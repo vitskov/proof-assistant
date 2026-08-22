@@ -8,6 +8,12 @@ plan with Python 3.13 and is published in the user-owned public
 `OPENAI_API_KEY` removed, RepoProver completed a real Lean proof through Codex
 dynamic tools, and the result passed an independent final `lean_check`.
 
+The subsequent 0.2.0 development pass added the file-based manuscript workflow.
+Its real acceptance run started with a LaTeX-only folder plus a Markdown task
+file, generated an isolated Lean project, completed and committed the requested
+formalization, and passed an independent final `lake build`. The 0.2.0 changes
+described here are tested locally but have not yet been pushed to GitHub.
+
 No upstream RepoProver files were modified or pushed, and no upstream pull
 request or issue was opened. The package's only remote is its user-owned origin.
 
@@ -28,6 +34,9 @@ request or issue was opened. The package's only remote is its user-owned origin.
 - Central package cache: `$HOME/.cache/repoprover-codex` on local APFS
 - Accepted Lean fixture:
   `$HOME/.cache/repoprover-codex/fixtures/repoprover-toy-acceptance`
+- File-interface acceptance output:
+  `$HOME/.cache/repoprover-codex/fixtures/manuscript-interface-acceptance`
+  (360 KB of task deliverables plus an external managed `.lake` symlink)
 - Its 7.1 GB `.lake` tree is attached under the central `lake/builds/`
   directory; the fixture contains only a repository-locally ignored symlink.
 - The 403 MB Mathlib download cache is centralized under
@@ -39,7 +48,7 @@ request or issue was opened. The package's only remote is its user-owned origin.
   path containing `Dropbox`, and always invokes `repoprover-codex compiler-check`
   after installation and before tests.
 - A live installer run compiled and executed a C program successfully, selected
-  `/usr/bin/clang` as the working Lean compiler fallback, and then passed all 60
+  `/usr/bin/clang` as the working Lean compiler fallback, and then passed all 71
   tests.
 - A deliberate Dropbox venv request was rejected before creating the path with
   exit status 2.
@@ -76,7 +85,8 @@ modify the user's persistent Codex configuration.
 ### Simulator and failure tests
 
 The original acceptance run passed 40 tests. After the gated home-local cache
-implementation, `python -m pytest -q` under Python 3.13: **60 passed**.
+implementation it passed 60. After the manuscript workflow implementation,
+`python -m pytest -q` under Python 3.13: **71 passed**.
 
 Covered cases include malformed tool arguments, dynamic-tool exceptions,
 unknown models/efforts, missing executable, simulated authentication failure,
@@ -85,6 +95,10 @@ failure, semantic proof outcomes, external-tool leaks, local-skill leaks, and
 the bidirectional JSONL protocol. Cache cases cover custom/registered Dropbox
 roots, symlink escapes, remote mounts, compiler configuration, transactional
 `.lake` attachment, Git hygiene, and refusal to move Git-tracked cache content.
+Manuscript cases cover raw-LaTeX scaffolding, existing Lean-project snapshots,
+exact task-file preservation, UTF-8/empty-task validation, nested/nonempty path
+refusal, runtime/cache exclusion, result markers without evidence, independent
+build failure, and the public CLI surface.
 
 ### Home-local cache validation
 
@@ -104,12 +118,13 @@ roots, symlink escapes, remote mounts, compiler configuration, transactional
 ### Compiler and package tests
 
 - Development installer: passed compiler compile/execute, cache initialization,
-  and all 60 tests from the final implementation tree.
+  and all 71 tests from the 0.2.0 implementation tree.
 - `uv build`: built both sdist and wheel successfully.
-- Fresh wheel environment: Python 3.13.15 under
-  `$HOME/.venvs/repoprover-codex-publish-wheel-test` during validation,
-  outside Dropbox and moved recoverably to the Trash afterward.
-- Installed wheel version: 0.1.0.
+- Fresh wheel environment: Python 3.13.15 under the external package-test root
+  `$HOME/.cache/repoprover-codex/tmp/package-0.2.0-final.B85NOs/venv`, outside
+  Dropbox.
+- Installed wheel version: 0.2.0; its `manuscript-run --help`, compiler
+  compile/execute check, and all 71 tests passed.
 - Installed wheel `compiler-check` and `cache doctor`: passed with
   `/usr/bin/clang` and the validated home-local APFS cache.
 
@@ -148,6 +163,31 @@ local toy-project commit. The adapter then found the named declaration without
 - toy commit `d27b505621d4f91e5998bbefa72a6e6bc2d5c054`
 - toy worktree clean after completion
 
+### File-based manuscript verification
+
+The 0.2.0 live acceptance used the LaTeX-only `TestProject/tex` directory and
+[`examples/verify-task.md`](examples/verify-task.md) as the authoritative task.
+The single `manuscript-run` invocation copied the source, generated the pinned
+Lean 4.28/Mathlib/REPL project, attached its `.lake` to the central cache,
+bootstrapped dependencies, and ran Codex with `OPENAI_API_KEY` removed.
+
+- model/effort: `gpt-5.6-luna` / `low`
+- outcome: `verified`
+- Codex thread `01a02bc1-cfb0-7250-af68-11de444a5ceb`
+- Codex turn `01a02bc1-d07a-76e3-9828-e6c2e7f2cd23`
+- 18 audited RepoProver dynamic-tool calls
+- 2 successful RepoProver `lean_check` calls
+- generated theorem: `Manuscript.double_even (n : ℕ) : Even (double n)`
+- independent `lake build`: passed (8,027 jobs)
+- task result commit: `3d9bdfa5ea6e018f195306f0905bee85f9def527`
+- final output workspace: clean
+
+The output includes exact task and input manifests, the verification report,
+Lean evidence and Git history, setup/build logs, final response, Codex events,
+tool calls, and structured result JSON. The 7.1 GB `.lake` tree resolves to
+`$HOME/.cache/repoprover-codex/lake/builds/workspace-44fcafe4a6db`, outside the
+360 KB task output and outside Dropbox, as designed.
+
 ### Concurrency
 
 Exactly two isolated Codex-backed agents ran concurrently in one Python process.
@@ -164,6 +204,7 @@ it is not a claim that two concurrent Lean proof jobs were exercised.
   `14c751bac2b5cbcbf5413de4da8a7dc41fbf455d`
 - Publication repository: `https://github.com/vitskov/repoprover-codex`
   (public, `main`)
+- 0.2.0 manuscript-interface changes: local and tested, not yet pushed
 - RepoProver sibling checkout: clean and unmodified
 - Upstream PR/issue activity: none
 

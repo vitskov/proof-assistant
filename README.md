@@ -51,6 +51,8 @@ Implemented:
 - child-process isolation for inherited MCP/app/plugin tools and local skills;
 - small compatibility adapter for a RepoProver agent;
 - final theorem/source verification through RepoProver's real `lean_check`;
+- a file-based manuscript interface with isolated input snapshots, generated
+  Lean workspaces, durable reports, and machine-readable run artifacts;
 - a conservative process-level limit of two active Codex turns;
 - protocol simulator tests that require neither Codex nor network access;
 - a real-Codex smoke-test command.
@@ -72,7 +74,7 @@ The final local acceptance run used:
 - RepoProver commit `386adba3df572cb71df534add2c764e071898a2e`;
 - Lean 4.28.0 (`7e01a1bf5c70fc6167d49c345d3bf80596e9a79b`);
 - Lake 5.0.0-src+7e01a1b; and
-- 60 passing package tests after the home-local cache implementation.
+- 71 passing package tests after the manuscript workflow implementation.
 
 See [`TEST_REPORT.md`](TEST_REPORT.md) for the live Codex, RepoProver, Lean,
 packaging, isolation, cache, and concurrency evidence.
@@ -119,6 +121,68 @@ sets `LEAN_CC=/usr/bin/clang` for the current RepoProver process. On macOS the
 RepoProver REPL address-space limit defaults to disabled because its
 `RLIMIT_AS` pre-exec hook is not portable there; Linux retains the 24 GB
 default.
+
+## Free-form manuscript verification
+
+`manuscript-run` is the high-level interface for a manuscript directory, a
+free-form task supplied as a UTF-8 file, and a dedicated output directory:
+
+```bash
+repoprover-codex manuscript-run \
+  --manuscript /absolute/path/to/latex-source \
+  --task-file /absolute/path/to/verification-task.md \
+  --output "$HOME/repoprover-runs/run-001" \
+  --model gpt-5.6-luna \
+  --effort low
+```
+
+The task file is authoritative. It can contain a multi-paragraph natural
+language request, assumptions, scope restrictions, desired theorem statements,
+and acceptance criteria. See [`examples/verify-task.md`](examples/verify-task.md).
+
+The command accepts either:
+
+- a LaTeX-only directory containing at least one `.tex` or `.ltx` file, for
+  which it generates a pinned Lean 4.28/Mathlib/REPL project; or
+- an existing Lean/Lake project containing LaTeX sources, whose current file
+  snapshot is preserved at the workspace root.
+
+The output must be new or empty. The command never modifies the input folder
+and refuses to overwrite an existing nonempty output. It excludes source Git
+metadata, `.lake`, Python environments, common caches, LaTeX build state,
+`.env*`, and `auth.json` from the copied snapshot. It initializes a fresh local
+Git history so every agent change is attributable to the run.
+
+```text
+run-001/
+├── TASK.md                       # exact task input
+├── INPUT_MANIFEST.json           # source/task hashes and snapshot metadata
+├── VERIFICATION_REPORT.md        # copied out when the agent creates a report
+├── RUN_STATUS.json               # concise machine-readable result
+├── workspace/                    # copied source, Lean evidence, and Git commits
+└── artifacts/
+    ├── setup.log
+    ├── setup.json
+    ├── final.md
+    ├── tool-calls.json
+    ├── events.json
+    ├── verification-build.log
+    └── result.json
+```
+
+An agent's `-- VERIFIED` marker is not trusted by itself. Exit status 0 also
+requires at least one successful RepoProver `lean_check`, a nonempty
+`VERIFICATION_REPORT.md`, a new result commit, a clean workspace, and a separate
+successful final `lake build`. `unverified`, `blocked`, `incomplete`, provider
+failures, and tool/setup failures remain distinct in `RUN_STATUS.json`.
+Failure to verify never implies that a statement is false.
+
+The task deliverables live under `--output`. Large Lean/Mathlib/REPL state is
+the deliberate exception: the workspace's `.lake` is a symlink into the
+validated `$HOME/.cache/repoprover-codex` hierarchy. Codex account/session state
+remains in Codex's own home. The output Lean workspace is rejected if it is in
+Dropbox; the read-only manuscript input may be in Dropbox because it is copied
+before the run.
 
 ## Home-local cache storage
 
@@ -252,4 +316,4 @@ configuration. Set
 
 Keep Lean projects and their `.lake`/Mathlib/REPL caches outside Dropbox and
 inside the validated home-local cache hierarchy. The development installer and
-`repoprover-prove` enforce this for package-managed runs.
+`repoprover-prove` and `manuscript-run` enforce this for package-managed runs.

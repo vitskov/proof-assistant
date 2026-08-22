@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import sys
+from dataclasses import asdict
 from pathlib import Path
 
 from .backend import CodexBackend, CodexConfig
@@ -14,6 +15,7 @@ from .cache import (
     CacheLocationError,
     attach_project_cache,
     ensure_project_cache_managed,
+    ensure_project_outside_dropbox,
     initialize_cache,
 )
 from .environment import (
@@ -23,6 +25,36 @@ from .environment import (
     select_native_compiler,
 )
 from .models import model_id, supported_efforts
+
+
+def _write_manuscript_failure(
+    paths,
+    *,
+    started_at: str,
+    outcome: str,
+    detail: str,
+    exit_code: int,
+) -> int:
+    from .manuscript import utc_now, write_json
+
+    payload = {
+        "schema_version": 1,
+        "command": "manuscript-run",
+        "started_at": started_at,
+        "completed_at": utc_now(),
+        "outcome": outcome,
+        "detail": detail,
+        "exit_code": exit_code,
+        "output": str(paths.output),
+        "workspace": str(paths.workspace),
+    }
+    write_json(paths.artifacts / "result.json", payload)
+    write_json(paths.output / "RUN_STATUS.json", payload)
+    (paths.artifacts / "error.txt").write_text(detail + "\n", encoding="utf-8")
+    print(f"OUTCOME: {outcome}", file=sys.stderr)
+    print(f"ERROR: {detail}", file=sys.stderr)
+    print(f"artifacts: {paths.artifacts}", file=sys.stderr)
+    return exit_code
 
 
 def _cache_layout(args) -> CacheLayout:
@@ -382,6 +414,262 @@ def cmd_repoprover_prove(args) -> int:
     }[outcome]
 
 
+def cmd_manuscript_run(args) -> int:
+    """Run a free-form, file-specified manuscript verification task."""
+    from .manuscript import (
+        ManuscriptInputError,
+        bootstrap_lean_workspace,
+        command_records_text,
+        commit_bootstrap_state,
+        create_manuscript_agent,
+        evaluate_manuscript_run,
+        prepare_manuscript_workspace,
+        run_command,
+        serialize_command,
+        serialize_tool_call,
+        utc_now,
+        workspace_git_state,
+        write_json,
+    )
+
+    started_at = utc_now()
+    output = Path(args.output).expanduser().resolve()
+    try:
+        cache_layout = _cache_layout(args)
+        # Validate before copying potentially large input trees. The workspace
+        # is a Lean project even when the source directory only contains TeX.
+        ensure_project_outside_dropbox(output / "workspace", cache_layout)
+        paths = prepare_manuscript_workspace(
+            args.manuscript,
+            output,
+            args.task_file,
+        )
+    except (CacheLocationError, ManuscriptInputError, OSError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+
+    print(f"output: {paths.output}")
+    print(f"workspace: {paths.workspace}")
+    print(f"input mode: {paths.source_mode}")
+    print(f"LaTeX sources: {len(paths.latex_sources)}")
+
+    try:
+        cache_layout.create()
+        cache_config = cache_layout.load_config()
+        cache_layout.apply_runtime_environment(
+            lean_cc=cache_config.lean_cc if cache_config else None
+        )
+        managed_lake = attach_project_cache(paths.workspace, cache_layout)
+
+        if args.lean_cc:
+            os.environ["LEAN_CC"] = args.lean_cc
+        compiler = configure_lean_runtime()
+        if cache_config is None or cache_config.lean_cc != compiler.executable:
+            cache_layout.record_compiler(compiler)
+        runtime_env = cache_layout.runtime_environment(
+            os.environ,
+            lean_cc=compiler.executable,
+        )
+    except (CacheLocationError, EnvironmentCheckError, OSError) as exc:
+        return _write_manuscript_failure(
+            paths,
+            started_at=started_at,
+            outcome="setup_failure",
+            detail=f"Lean/cache preflight failed: {exc}",
+            exit_code=5,
+        )
+
+    print(f"managed .lake: {managed_lake}", file=sys.stderr)
+    print(f"Lean native compiler: {compiler.executable}", file=sys.stderr)
+
+    setup_records = bootstrap_lean_workspace(
+        paths.workspace,
+        env=runtime_env,
+        timeout=args.setup_timeout,
+    )
+    (paths.artifacts / "setup.log").write_text(
+        command_records_text(setup_records), encoding="utf-8"
+    )
+    write_json(
+        paths.artifacts / "setup.json",
+        [serialize_command(record) for record in setup_records],
+    )
+    failed_setup = next(
+        (
+            record
+            for record in setup_records
+            if record.required and not record.succeeded
+        ),
+        None,
+    )
+    if failed_setup is not None:
+        return _write_manuscript_failure(
+            paths,
+            started_at=started_at,
+            outcome="setup_failure",
+            detail=(
+                f"Required setup command failed ({' '.join(failed_setup.argv)}); "
+                f"see {paths.artifacts / 'setup.log'}"
+            ),
+            exit_code=5,
+        )
+
+    try:
+        run_baseline = commit_bootstrap_state(paths.workspace)
+        agent = create_manuscript_agent(paths.workspace)
+        from repoprover.agents.lean_tools import (
+            configure_global_pool,
+            shutdown_global_pool,
+        )
+    except (ImportError, ManuscriptInputError, OSError) as exc:
+        return _write_manuscript_failure(
+            paths,
+            started_at=started_at,
+            outcome="setup_failure",
+            detail=f"RepoProver agent setup failed: {exc}",
+            exit_code=5,
+        )
+
+    memory_limit = (
+        args.lean_memory_limit_gb
+        if args.lean_memory_limit_gb is not None
+        else default_lean_memory_limit_gb()
+    )
+    configure_global_pool(
+        paths.workspace,
+        pool_size=args.lean_pool_size,
+        instance_mem_limit_gb=memory_limit,
+    )
+    try:
+        from .integration import run_repoprover_agent
+
+        try:
+            wrapped = run_repoprover_agent(
+                agent,
+                run_kwargs={},
+                codex=CodexConfig(
+                    executable=args.codex,
+                    model=args.model,
+                    effort=args.effort,
+                    request_timeout=args.request_timeout,
+                    turn_timeout=args.turn_timeout,
+                    sandbox="read-only",
+                ),
+            )
+        except Exception as exc:
+            return _write_manuscript_failure(
+                paths,
+                started_at=started_at,
+                outcome="provider_failure",
+                detail=f"{type(exc).__name__}: {exc}",
+                exit_code=1,
+            )
+    finally:
+        shutdown_global_pool()
+
+    (paths.artifacts / "final.md").write_text(
+        wrapped.codex.final_text.rstrip() + "\n", encoding="utf-8"
+    )
+    write_json(paths.artifacts / "events.json", wrapped.codex.events)
+    write_json(
+        paths.artifacts / "tool-calls.json",
+        [serialize_tool_call(call) for call in wrapped.codex.tool_calls],
+    )
+
+    independent_build = run_command(
+        ("lake", "build"),
+        cwd=paths.workspace,
+        env=runtime_env,
+        timeout=args.setup_timeout,
+    )
+    (paths.artifacts / "verification-build.log").write_text(
+        command_records_text([independent_build]), encoding="utf-8"
+    )
+
+    try:
+        final_commit, git_status = workspace_git_state(paths.workspace)
+    except ManuscriptInputError as exc:
+        return _write_manuscript_failure(
+            paths,
+            started_at=started_at,
+            outcome="tool_failure",
+            detail=f"Could not inspect final Git state: {exc}",
+            exit_code=5,
+        )
+
+    evaluation = evaluate_manuscript_run(
+        final_text=wrapped.codex.final_text,
+        tool_calls=wrapped.codex.tool_calls,
+        report=paths.report,
+        baseline_commit=run_baseline,
+        final_commit=final_commit,
+        git_status=git_status,
+        independent_build=independent_build,
+    )
+    if paths.report.is_file():
+        shutil.copy2(paths.report, paths.output / "VERIFICATION_REPORT.md")
+
+    result_payload = {
+        "schema_version": 1,
+        "command": "manuscript-run",
+        "started_at": started_at,
+        "completed_at": utc_now(),
+        "outcome": evaluation.outcome,
+        "detail": evaluation.detail,
+        "exit_code": evaluation.exit_code,
+        "input": {
+            "manuscript": str(paths.source_root),
+            "task_file": str(Path(args.task_file).expanduser().resolve()),
+            "task_sha256": paths.task_sha256,
+            "source_mode": paths.source_mode,
+            "latex_sources": list(paths.latex_sources),
+        },
+        "output": {
+            "root": str(paths.output),
+            "workspace": str(paths.workspace),
+            "artifacts": str(paths.artifacts),
+            "report": (
+                str(paths.output / "VERIFICATION_REPORT.md")
+                if paths.report.is_file()
+                else None
+            ),
+            "managed_lake": str(managed_lake),
+        },
+        "codex": {
+            "model": wrapped.codex.model,
+            "effort": wrapped.codex.effort,
+            "thread_id": wrapped.codex.thread_id,
+            "turn_id": wrapped.codex.turn_id,
+            "tool_calls": len(wrapped.codex.tool_calls),
+        },
+        "lean": {
+            "native_compiler": compiler.executable,
+            "pool_size": args.lean_pool_size,
+            "memory_limit_gb": memory_limit,
+            "independent_build": serialize_command(independent_build),
+        },
+        "git": {
+            "input_commit": paths.baseline_commit,
+            "run_baseline_commit": run_baseline,
+            "final_commit": final_commit,
+            "status_porcelain": git_status,
+        },
+        "evaluation": asdict(evaluation),
+    }
+    write_json(paths.artifacts / "result.json", result_payload)
+    write_json(paths.output / "RUN_STATUS.json", result_payload)
+
+    print(wrapped.codex.final_text)
+    print(f"\nthread={wrapped.codex.thread_id}")
+    print(f"turn={wrapped.codex.turn_id}")
+    print(f"tool_calls={len(wrapped.codex.tool_calls)}")
+    print(f"OUTCOME: {evaluation.outcome}")
+    print(f"verification: {evaluation.detail}")
+    print(f"output: {paths.output}")
+    print(f"artifacts: {paths.artifacts}")
+    return evaluation.exit_code
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="repoprover-codex")
     p.add_argument("--codex", default="codex", help="Codex executable")
@@ -457,6 +745,49 @@ def build_parser() -> argparse.ArgumentParser:
     rp.add_argument("--request-timeout", type=float, default=120.0)
     rp.add_argument("--turn-timeout", type=float, default=1800.0)
     rp.set_defaults(func=cmd_repoprover_prove)
+
+    manuscript = sub.add_parser(
+        "manuscript-run",
+        help="Verify a file-specified task against a LaTeX manuscript snapshot",
+    )
+    manuscript.add_argument(
+        "--manuscript",
+        required=True,
+        help="Folder containing the LaTeX manuscript source",
+    )
+    manuscript.add_argument(
+        "--task-file",
+        required=True,
+        help="UTF-8 file containing the authoritative free-form task",
+    )
+    manuscript.add_argument(
+        "--output",
+        required=True,
+        help="New or empty output folder (the Lean workspace must be outside Dropbox)",
+    )
+    manuscript.add_argument("--model", required=True)
+    manuscript.add_argument("--effort", default="high")
+    manuscript.add_argument("--lean-pool-size", type=int, default=1)
+    manuscript.add_argument(
+        "--lean-memory-limit-gb",
+        type=int,
+        default=None,
+        help="Per-REPL address-space limit (default: 0 on macOS, 24 on Linux)",
+    )
+    manuscript.add_argument(
+        "--lean-cc",
+        default=None,
+        help="Native compiler for Lake (auto-detected when omitted)",
+    )
+    manuscript.add_argument(
+        "--setup-timeout",
+        type=float,
+        default=1800.0,
+        help="Timeout per dependency/bootstrap/final-build command",
+    )
+    manuscript.add_argument("--request-timeout", type=float, default=120.0)
+    manuscript.add_argument("--turn-timeout", type=float, default=3600.0)
+    manuscript.set_defaults(func=cmd_manuscript_run)
     return p
 
 

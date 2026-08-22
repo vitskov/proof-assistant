@@ -72,7 +72,32 @@ pre-exec limit. It also checks Lean's native compiler and automatically uses
 the installed macOS version. The cache extraction environment is normalized
 from unsupported `C.UTF-8` to `C`.
 
-## Stage 5 — failure modes
+## Stage 5 — file-based manuscript acceptance
+
+Create a UTF-8 task file and select a new output folder outside Dropbox:
+
+```bash
+repoprover-codex manuscript-run \
+  --manuscript /absolute/path/to/latex-source \
+  --task-file examples/verify-task.md \
+  --output "$HOME/repoprover-runs/acceptance-001" \
+  --model MODEL_FROM_REPOPROVER_CODEX_MODELS \
+  --effort low
+```
+
+For a LaTeX-only input, confirm that the command creates a pinned Lean project,
+attaches `.lake` to the central cache, builds RepoProver's REPL, and leaves the
+input directory unchanged. Exit 0 requires a successful RepoProver
+`lean_check`, a committed report and formalization, a clean output workspace,
+and an independent final `lake build`. Inspect `RUN_STATUS.json` and every file
+under `artifacts/`; do not rely only on the agent's final prose.
+
+Run at least these input-policy simulator tests in the normal suite: empty or
+non-UTF-8 task file, missing LaTeX, nested input/output, nonempty output, copied
+cache/environment exclusion, existing-Lean-project preservation, incomplete
+evidence, and failed independent build.
+
+## Stage 6 — failure modes
 
 Test each of the following deliberately:
 
@@ -93,14 +118,14 @@ The adapter distinguishes `provider_failure`, `tool_failure`,
 false; `disproved` would require separate formal evidence and is never inferred
 from failure to complete a proof.
 
-## Stage 6 — concurrency
+## Stage 7 — concurrency
 
 Only after stages 1–5 pass, test 2 concurrent RepoProver agents. Do not initially
 use RepoProver's API-oriented high concurrency defaults on a single ChatGPT Pro
 entitlement. The backend has a package-level semaphore allowing at most two
 active turns in one process.
 
-## Stage 7 — upstream design decision
+## Stage 8 — upstream design decision
 
 After successful internal testing, choose between:
 

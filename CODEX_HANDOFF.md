@@ -86,7 +86,11 @@ Do NOT require SLURM/distributed RepoProver execution on macOS. RepoProver's HPC
 - `src/repoprover_codex/models.py` — model catalog and effort validation.
 - `src/repoprover_codex/backend.py` — initialize/model-list/thread/turn/tool callbacks/event completion.
 - `src/repoprover_codex/integration.py` — narrow adapter for an already-created RepoProver agent.
-- `src/repoprover_codex/cli.py` — `doctor`, `models`, `smoke`, `repoprover-prove`.
+- `src/repoprover_codex/cli.py` — `doctor`, `models`, `smoke`,
+  `repoprover-prove`, and `manuscript-run`.
+- `src/repoprover_codex/manuscript.py` — isolated manuscript snapshots,
+  task-file handling, generated Lean workspaces, evidence evaluation, and run
+  artifact support for `manuscript-run`.
 - `tests/` — unit tests, fake backend, bidirectional stdio simulator.
 - `docs/INTERNAL_TESTING.md` — staged testing notes.
 

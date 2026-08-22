@@ -393,17 +393,22 @@ def project_cache_target(project: str | Path, layout: CacheLayout) -> Path:
     return layout.lake_builds / f"{safe_name or 'project'}-{digest}"
 
 
-def _ensure_project_outside_dropbox(project: Path, layout: CacheLayout) -> None:
+def ensure_project_outside_dropbox(
+    project: str | Path, layout: CacheLayout
+) -> Path:
+    """Return a canonical project path after enforcing the Dropbox policy."""
+    root = Path(project).expanduser().resolve()
     named_dropbox = any(
-        part.casefold().startswith("dropbox") for part in project.parts
+        part.casefold().startswith("dropbox") for part in root.parts
     )
     if named_dropbox or any(
-        _is_within(project, dropbox) for dropbox in layout.dropbox_roots
+        _is_within(root, dropbox) for dropbox in layout.dropbox_roots
     ):
         raise CacheLocationError(
-            f"Lean project must not reside in Dropbox: {project}. Create a Git "
+            f"Lean project must not reside in Dropbox: {root}. Create a Git "
             f"worktree under {layout.worktrees} instead."
         )
+    return root
 
 
 def ensure_project_cache_managed(
@@ -412,7 +417,7 @@ def ensure_project_cache_managed(
 ) -> Path:
     """Fail closed unless the project's ``.lake`` data resolves into the cache."""
     root = Path(project).expanduser().resolve()
-    _ensure_project_outside_dropbox(root, layout)
+    ensure_project_outside_dropbox(root, layout)
     lake = root / ".lake"
     resolved = lake.resolve()
     if not _is_within(resolved, layout.root):
@@ -475,7 +480,7 @@ def attach_project_cache(project: str | Path, layout: CacheLayout) -> Path:
     root = Path(project).expanduser().resolve()
     if not root.is_dir():
         raise CacheLocationError(f"Lean project does not exist: {root}")
-    _ensure_project_outside_dropbox(root, layout)
+    ensure_project_outside_dropbox(root, layout)
     layout.create()
     _prepare_git_lake_exclusion(root)
     lake = root / ".lake"

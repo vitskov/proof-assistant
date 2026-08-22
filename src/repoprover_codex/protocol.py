@@ -126,7 +126,7 @@ def isolated_skill_config_args(
                 "clientInfo": {
                     "name": "repoprover-codex-skill-probe",
                     "title": "RepoProver Codex skill isolation probe",
-                    "version": "0.1.0",
+                    "version": "0.2.0",
                 },
                 "capabilities": {"experimentalApi": True},
             },
