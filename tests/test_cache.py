@@ -13,7 +13,7 @@ from repoprover_codex.environment import CompilerCheck
 
 def layout_for(home: Path, requested: Path | None = None) -> CacheLayout:
     return CacheLayout.discover(
-        requested,
+        requested or home / ".cache" / "repoprover-codex",
         user_home=home,
         dropbox_roots=[],
         filesystem_type="apfs",
@@ -29,6 +29,29 @@ def test_default_cache_layout_is_centralized_under_home(tmp_path):
     assert layout.lake_builds == layout.root / "lake" / "builds"
     assert layout.worktrees == layout.root / "worktrees"
     assert layout.fixtures == layout.root / "fixtures"
+
+
+def test_explicit_cache_root_takes_precedence_over_environment(
+    monkeypatch, tmp_path
+):
+    configured = tmp_path / ".cache" / "configured"
+    explicit = tmp_path / ".cache" / "explicit"
+    monkeypatch.setenv(cache.CACHE_HOME_ENV, str(configured))
+
+    from_environment = CacheLayout.discover(
+        user_home=tmp_path,
+        dropbox_roots=[],
+        filesystem_type="apfs",
+    )
+    from_argument = CacheLayout.discover(
+        explicit,
+        user_home=tmp_path,
+        dropbox_roots=[],
+        filesystem_type="apfs",
+    )
+
+    assert from_environment.root == configured
+    assert from_argument.root == explicit
 
 
 def test_cache_root_outside_user_home_is_rejected(tmp_path):
@@ -246,6 +269,7 @@ def test_attach_refuses_project_in_dropbox(tmp_path):
     project = home / "Dropbox" / "project"
     project.mkdir(parents=True)
     layout = CacheLayout.discover(
+        home / ".cache" / "repoprover-codex",
         user_home=home,
         dropbox_roots=[home / "Dropbox"],
         filesystem_type="apfs",

@@ -31,8 +31,10 @@ request is dispatched back to RepoProver's existing `handle_tool_call()`.
 
 ## Current scope
 
-This repository is for internal testing before any upstream RepoProver pull
-request is prepared.
+This is an independently maintained experimental bridge. Its internal macOS
+acceptance phase is complete enough for publication in the user-owned
+[`vitskov/repoprover-codex`](https://github.com/vitskov/repoprover-codex)
+repository. It has not been proposed to or merged into upstream RepoProver.
 
 Implemented:
 
@@ -59,6 +61,21 @@ Not implemented intentionally:
 - a fake OpenAI HTTP endpoint;
 - upstream modifications to `facebookresearch/repoprover`;
 - direct use of Codex shell/file mutation as a replacement for RepoProver tools.
+
+## Tested configuration
+
+The final local acceptance run used:
+
+- macOS 12.7.6 (21H1320), x86_64;
+- Python 3.13.15 and uv 0.9.26;
+- Codex CLI 0.149.0 with `gpt-5.6-luna` at `low` effort;
+- RepoProver commit `386adba3df572cb71df534add2c764e071898a2e`;
+- Lean 4.28.0 (`7e01a1bf5c70fc6167d49c345d3bf80596e9a79b`);
+- Lake 5.0.0-src+7e01a1b; and
+- 60 passing package tests after the home-local cache implementation.
+
+See [`TEST_REPORT.md`](TEST_REPORT.md) for the live Codex, RepoProver, Lean,
+packaging, isolation, cache, and concurrency evidence.
 
 ## Install for internal testing
 

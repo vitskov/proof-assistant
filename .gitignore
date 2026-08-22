@@ -1,8 +1,50 @@
+# Python environments (all environments must also live outside Dropbox).
 .venv/
-.pytest_cache/
+.venv-*/
+venv/
+env/
+ENV/
+
+# Python/package/test output.
 __pycache__/
 *.py[cod]
 *.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
 /build/
 /dist/
+
+# Lean/Lake state must never be committed or stored in this checkout.
+.lake/
+
+# Local caches and temporary output.
+.cache/
+.uv-cache/
+.tmp/
+*.tmp
+*.log
+
+# Credentials and machine-local configuration.
+.env
+.env.*
+!.env.example
+auth.json
+credentials.json
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+.ssh/
+.codex/
+
+# Editor and operating-system metadata.
 .DS_Store
+.idea/
+.vscode/
