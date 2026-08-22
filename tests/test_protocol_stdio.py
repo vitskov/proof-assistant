@@ -3,7 +3,9 @@ import os
 import stat
 import textwrap
 
-from repoprover_codex.protocol import AppServerClient
+import pytest
+
+from repoprover_codex.protocol import AppServerClient, CodexProtocolError
 
 
 def test_real_stdio_bidirectional_request_response(tmp_path):
@@ -64,3 +66,49 @@ for line in sys.stdin:
 
     assert result["toolResult"]["success"] is True
     assert result["toolResult"]["contentItems"][0]["text"] == "hello"
+
+
+def test_missing_codex_executable_has_structured_error(tmp_path):
+    client = AppServerClient(str(tmp_path / "does-not-exist"))
+    with pytest.raises(CodexProtocolError, match="executable not found"):
+        client.start()
+
+
+def test_request_timeout_is_reported_and_client_can_close(tmp_path):
+    fake = tmp_path / "silent-codex"
+    fake.write_text(
+        textwrap.dedent(
+            """#!/usr/bin/env python3
+import sys
+for _line in sys.stdin:
+    pass
+"""
+        )
+    )
+    fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+    client = AppServerClient(str(fake))
+    try:
+        with pytest.raises(TimeoutError, match="initialize"):
+            client.request("initialize", {}, timeout=0.02)
+    finally:
+        client.close()
+
+
+def test_app_server_crash_unblocks_pending_request(tmp_path):
+    fake = tmp_path / "crashing-codex"
+    fake.write_text(
+        textwrap.dedent(
+            """#!/usr/bin/env python3
+import sys
+sys.stdin.readline()
+raise SystemExit(7)
+"""
+        )
+    )
+    fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+    client = AppServerClient(str(fake))
+    try:
+        with pytest.raises(CodexProtocolError, match="app-server exited"):
+            client.request("initialize", {}, timeout=2)
+    finally:
+        client.close()

@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import queue
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
 from .models import validate_model_effort
-from .protocol import AppServerClient, CodexProtocolError
+from .protocol import AppServerClient, CodexProtocolError, CodexServerExited
 from .tools import dynamic_tool_result, openai_tools_to_codex
 
 
@@ -23,6 +24,14 @@ class CodexConfig:
     extra_app_server_args: tuple[str, ...] = field(default_factory=tuple)
 
 
+@dataclass(frozen=True)
+class CodexToolCall:
+    name: str
+    arguments: dict[str, Any] | Any
+    result: str
+    success: bool
+
+
 @dataclass
 class CodexResult:
     final_text: str
@@ -31,6 +40,12 @@ class CodexResult:
     model: str
     effort: str
     events: list[dict[str, Any]]
+    tool_calls: list[CodexToolCall] = field(default_factory=list)
+
+
+# A conservative package-level guard for callers that run several agents in a
+# single process. Separate processes remain subject to Codex account limits.
+_ACTIVE_TURNS = threading.BoundedSemaphore(value=2)
 
 
 class CodexBackend:
@@ -54,6 +69,9 @@ class CodexBackend:
             extra_args=list(config.extra_app_server_args),
         )
         self._tool_handler: Callable[[str, dict[str, Any]], str] | None = None
+        self._tool_names: set[str] = set()
+        self._tool_calls: list[CodexToolCall] = []
+        self._tool_lock = threading.Lock()
         self.client.register_request_handler("item/tool/call", self._on_tool_call)
 
         # Dynamic tools are authoritative. We fail closed on any unexpected
@@ -105,22 +123,63 @@ class CodexBackend:
         return list(response or [])
 
     def _on_tool_call(self, params: dict[str, Any]) -> dict[str, Any]:
-        if self._tool_handler is None:
-            return dynamic_tool_result(
-                "No RepoProver tool handler is installed", success=False
-            )
         tool = str(params.get("tool") or "")
-        arguments = params.get("arguments") or {}
+        raw_arguments = params.get("arguments", {})
+        if self._tool_handler is None:
+            return self._tool_failure(
+                tool,
+                raw_arguments,
+                "No RepoProver tool handler is installed",
+            )
+        if tool not in self._tool_names:
+            return self._tool_failure(
+                tool,
+                raw_arguments,
+                f"Unknown dynamic tool {tool!r}",
+            )
+        arguments = raw_arguments
+        if arguments is None:
+            arguments = {}
         if not isinstance(arguments, dict):
-            return dynamic_tool_result(
-                f"Invalid arguments for {tool!r}: expected JSON object", success=False
+            return self._tool_failure(
+                tool,
+                raw_arguments,
+                f"Invalid arguments for {tool!r}: expected JSON object",
             )
         try:
             result = self._tool_handler(tool, arguments)
         except Exception as exc:
-            return dynamic_tool_result(f"Error: {exc}", success=False)
+            return self._tool_failure(tool, arguments, f"Error: {exc}")
         text = result if isinstance(result, str) else str(result)
-        return dynamic_tool_result(text, success=not text.startswith("Error:"))
+        success = not text.lstrip().startswith("Error:")
+        self._record_tool_call(tool, arguments, text, success)
+        return dynamic_tool_result(text, success=success)
+
+    def _record_tool_call(
+        self,
+        tool: str,
+        arguments: dict[str, Any] | Any,
+        result: str,
+        success: bool,
+    ) -> None:
+        with self._tool_lock:
+            self._tool_calls.append(
+                CodexToolCall(
+                    name=tool,
+                    arguments=arguments,
+                    result=result,
+                    success=success,
+                )
+            )
+
+    def _tool_failure(
+        self,
+        tool: str,
+        arguments: dict[str, Any] | Any,
+        message: str,
+    ) -> dict[str, Any]:
+        self._record_tool_call(tool, arguments, message, False)
+        return dynamic_tool_result(message, success=False)
 
     @staticmethod
     def _extract_thread_id(response: Any) -> str:
@@ -188,6 +247,9 @@ class CodexBackend:
 
         self._tool_handler = tool_handler
         dynamic_tools = openai_tools_to_codex(tools)
+        self._tool_names = {str(tool["name"]) for tool in dynamic_tools}
+        with self._tool_lock:
+            self._tool_calls = []
 
         thread_params: dict[str, Any] = {
             "cwd": str(self.cwd) if self.cwd else None,
@@ -199,68 +261,78 @@ class CodexBackend:
         }
         thread_params = {k: v for k, v in thread_params.items() if v is not None}
 
-        thread_response = self.client.request(
-            "thread/start", thread_params, timeout=self.config.request_timeout
-        )
-        thread_id = self._extract_thread_id(thread_response)
+        with _ACTIVE_TURNS:
+            thread_response = self.client.request(
+                "thread/start", thread_params, timeout=self.config.request_timeout
+            )
+            thread_id = self._extract_thread_id(thread_response)
 
-        turn_params: dict[str, Any] = {
-            "threadId": thread_id,
-            "input": [{"type": "text", "text": user_prompt}],
-            "model": self.config.model,
-            "effort": self.config.effort,
-        }
-        turn_response = self.client.request(
-            "turn/start", turn_params, timeout=self.config.request_timeout
-        )
-        turn_id = self._extract_turn_id(turn_response)
+            turn_params: dict[str, Any] = {
+                "threadId": thread_id,
+                "input": [{"type": "text", "text": user_prompt}],
+                "model": self.config.model,
+                "effort": self.config.effort,
+            }
+            turn_response = self.client.request(
+                "turn/start", turn_params, timeout=self.config.request_timeout
+            )
+            turn_id = self._extract_turn_id(turn_response)
 
-        events: list[dict[str, Any]] = []
-        final_chunks: list[str] = []
+            events: list[dict[str, Any]] = []
+            final_chunks: list[str] = []
 
-        while True:
-            try:
-                notification = self.client.next_notification(
-                    timeout=self.config.turn_timeout
-                )
-            except queue.Empty as exc:
-                raise TimeoutError(
-                    f"Codex turn did not complete within {self.config.turn_timeout}s"
-                ) from exc
+            while True:
+                try:
+                    notification = self.client.next_notification(
+                        timeout=self.config.turn_timeout
+                    )
+                except queue.Empty as exc:
+                    raise TimeoutError(
+                        f"Codex turn did not complete within {self.config.turn_timeout}s"
+                    ) from exc
 
-            events.append(notification)
-            method = str(notification.get("method") or "")
-            params = notification.get("params") or {}
+                events.append(notification)
+                method = str(notification.get("method") or "")
+                params = notification.get("params") or {}
 
-            if method == "item/completed":
-                item = params.get("item") or {}
-                if isinstance(item, dict) and item.get("type") in (
-                    "agentMessage",
-                    "assistantMessage",
-                    "message",
-                ):
-                    text = self._text_from_item(item)
-                    if text:
-                        final_chunks.append(text)
+                if method == "_repoprover_codex/server_exited":
+                    raise CodexServerExited(
+                        f"codex app-server exited during turn: {params!r}"
+                    )
 
-            if method == "turn/completed":
-                completed_turn = params.get("turn") or {}
-                completed_id = (
-                    completed_turn.get("id")
-                    if isinstance(completed_turn, dict)
-                    else None
-                )
-                if turn_id is None or completed_id is None or str(completed_id) == turn_id:
-                    status = (
-                        completed_turn.get("status")
+                if method == "item/completed":
+                    item = params.get("item") or {}
+                    if isinstance(item, dict) and item.get("type") in (
+                        "agentMessage",
+                        "assistantMessage",
+                        "message",
+                    ):
+                        text = self._text_from_item(item)
+                        if text:
+                            final_chunks.append(text)
+
+                if method == "turn/completed":
+                    completed_turn = params.get("turn") or {}
+                    completed_id = (
+                        completed_turn.get("id")
                         if isinstance(completed_turn, dict)
                         else None
                     )
-                    if status in ("failed", "cancelled", "interrupted"):
-                        raise CodexProtocolError(
-                            f"Codex turn ended with status {status!r}: {params!r}"
+                    if (
+                        turn_id is None
+                        or completed_id is None
+                        or str(completed_id) == turn_id
+                    ):
+                        status = (
+                            completed_turn.get("status")
+                            if isinstance(completed_turn, dict)
+                            else None
                         )
-                    break
+                        if status in ("failed", "cancelled", "interrupted"):
+                            raise CodexProtocolError(
+                                f"Codex turn ended with status {status!r}: {params!r}"
+                            )
+                        break
 
         return CodexResult(
             final_text="\n".join(x for x in final_chunks if x).strip(),
@@ -269,4 +341,5 @@ class CodexBackend:
             model=self.config.model,
             effort=self.config.effort,
             events=events,
+            tool_calls=list(self._tool_calls),
         )

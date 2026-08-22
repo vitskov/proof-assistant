@@ -61,16 +61,25 @@ class AppServerClient:
         if self.env is not None:
             child_env = os.environ.copy()
             child_env.update(self.env)
-        self.proc = subprocess.Popen(
-            cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=None,
-            text=True,
-            bufsize=1,
-            cwd=str(self.cwd) if self.cwd else None,
-            env=child_env,
-        )
+        try:
+            self.proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=None,
+                text=True,
+                bufsize=1,
+                cwd=str(self.cwd) if self.cwd else None,
+                env=child_env,
+            )
+        except FileNotFoundError as exc:
+            raise CodexProtocolError(
+                f"Codex executable not found: {self.executable!r}"
+            ) from exc
+        except OSError as exc:
+            raise CodexProtocolError(
+                f"Could not start Codex executable {self.executable!r}: {exc}"
+            ) from exc
         self._reader = threading.Thread(
             target=self._reader_loop,
             name="repoprover-codex-app-server-reader",
@@ -94,6 +103,11 @@ class AppServerClient:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 proc.kill()
+                proc.wait(timeout=5)
+        reader = self._reader
+        self._reader = None
+        if reader is not None and reader is not threading.current_thread():
+            reader.join(timeout=5)
 
     def register_request_handler(
         self, method: str, handler: Callable[[dict[str, Any]], Any]
@@ -179,6 +193,12 @@ class AppServerClient:
             for pending in remaining:
                 pending.error = "codex app-server exited"
                 pending.event.set()
+            self._notifications.put(
+                {
+                    "method": "_repoprover_codex/server_exited",
+                    "params": {"returncode": proc.poll()},
+                }
+            )
 
     def _handle_server_request(self, msg: dict[str, Any]) -> None:
         method = str(msg["method"])

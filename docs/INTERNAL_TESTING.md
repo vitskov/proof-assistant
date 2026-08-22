@@ -7,13 +7,13 @@ model/reasoning-effort selection.
 ## Stage 1 — package tests
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -e '.[dev]'
-pytest -q
+scripts/install-dev.sh
+source "$HOME/.venvs/repoprover-codex/bin/activate"
 ```
 
-Expected: all simulator tests pass without Codex or network access.
+The script uses `uv`, refuses to put a Python environment in Dropbox, performs
+an actual compiler compile/run smoke test, and runs all simulator tests. Set
+`REPOPROVER_CODEX_VENV` to another non-Dropbox path if needed.
 
 ## Stage 2 — installed Codex connectivity
 
@@ -21,6 +21,7 @@ Expected: all simulator tests pass without Codex or network access.
 codex --version
 repoprover-codex doctor
 repoprover-codex models
+repoprover-codex compiler-check
 ```
 
 `doctor` proves that app-server starts and responds. `models` is authoritative
@@ -44,12 +45,20 @@ Pass criteria:
 
 ## Stage 4 — RepoProver single-agent test
 
-Install the current RepoProver checkout into the same venv. Construct one of its
-agent classes on a toy Lean project, then call `run_repoprover_agent(...)`.
+Install the current RepoProver checkout into the same external venv with `uv`.
+Keep the Lean project and all `.lake`, Mathlib, and REPL caches outside Dropbox;
+`/private/tmp` is suitable for a disposable macOS test. Construct one of its
+agent classes on that project, then call `run_repoprover_agent(...)`.
 
 The first target should be deliberately trivial, e.g. proving a theorem reducible
 by `rfl` or `simp`. This tests RepoProver tool schemas and actual Lean dispatch
 without conflating provider integration with mathematical difficulty.
+
+On macOS, `repoprover-prove` disables RepoProver's non-portable `RLIMIT_AS`
+pre-exec limit. It also checks Lean's native compiler and automatically uses
+`/usr/bin/clang` through `LEAN_CC` when Lean's bundled clang cannot execute on
+the installed macOS version. The cache extraction environment is normalized
+from unsupported `C.UTF-8` to `C`.
 
 ## Stage 5 — failure modes
 
@@ -59,17 +68,25 @@ Test each of the following deliberately:
 - valid model + invalid effort;
 - unauthenticated Codex;
 - Codex executable missing;
+- app-server crash;
+- app-server request timeout;
 - dynamic tool exception;
+- malformed dynamic-tool arguments;
 - Codex turn timeout;
-- Lean tool failure.
+- Lean tool failure;
+- cancelled/interrupted/failed turns.
 
-The adapter should distinguish all of these from "the theorem is false."
+The adapter distinguishes `provider_failure`, `tool_failure`,
+`formalization_mismatch`, and `unproved`. None of these mean that the theorem is
+false; `disproved` would require separate formal evidence and is never inferred
+from failure to complete a proof.
 
 ## Stage 6 — concurrency
 
 Only after stages 1–5 pass, test 2 concurrent RepoProver agents. Do not initially
 use RepoProver's API-oriented high concurrency defaults on a single ChatGPT Pro
-entitlement.
+entitlement. The backend has a package-level semaphore allowing at most two
+active turns in one process.
 
 ## Stage 7 — upstream design decision
 
@@ -102,3 +119,6 @@ all of its registered RepoProver tools to Codex as dynamic tools. Codex remains
 read-only at its own filesystem layer; modifications must therefore occur
 through RepoProver's explicit file/git tool handlers. This is intentional and
 makes RepoProver, not Codex's native shell, the authoritative control plane.
+The command exits zero only after it observes a successful Codex-requested
+`lean_check`, confirms the named declaration no longer contains `sorry` or
+`axiom`, and performs a final RepoProver `lean_check` over the resulting file.
