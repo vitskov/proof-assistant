@@ -7,7 +7,13 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .models import validate_model_effort
-from .protocol import AppServerClient, CodexProtocolError, CodexServerExited
+from .protocol import (
+    AppServerClient,
+    CodexProtocolError,
+    CodexServerExited,
+    isolated_skill_config_args,
+    isolated_tool_config_args,
+)
 from .tools import dynamic_tool_result, openai_tools_to_codex
 
 
@@ -21,6 +27,7 @@ class CodexConfig:
     approval_policy: str = "never"
     sandbox: str = "read-only"
     validate_model: bool = True
+    isolate_external_tools: bool = True
     extra_app_server_args: tuple[str, ...] = field(default_factory=tuple)
 
 
@@ -63,11 +70,25 @@ class CodexBackend:
     ) -> None:
         self.config = config
         self.cwd = Path(cwd).resolve() if cwd else None
-        self.client = client or AppServerClient(
-            config.executable,
-            cwd=self.cwd,
-            extra_args=list(config.extra_app_server_args),
-        )
+        if client is None:
+            extra_args: list[str] = []
+            if config.isolate_external_tools:
+                external_tool_args = isolated_tool_config_args(config.executable)
+                extra_args.extend(external_tool_args)
+                extra_args.extend(
+                    isolated_skill_config_args(
+                        config.executable,
+                        cwd=self.cwd,
+                        external_tool_args=external_tool_args,
+                    )
+                )
+            extra_args.extend(config.extra_app_server_args)
+            client = AppServerClient(
+                config.executable,
+                cwd=self.cwd,
+                extra_args=extra_args,
+            )
+        self.client = client
         self._tool_handler: Callable[[str, dict[str, Any]], str] | None = None
         self._tool_names: set[str] = set()
         self._tool_calls: list[CodexToolCall] = []
@@ -110,7 +131,99 @@ class CodexBackend:
             self.client.notify("initialized", {})
         except Exception:
             pass
+        if self.config.isolate_external_tools:
+            self._validate_external_tool_isolation()
+            self._validate_skill_isolation()
         return response or {}
+
+    def _validate_external_tool_isolation(self) -> None:
+        """Fail if the child still exposes an MCP/app/plugin capability."""
+        cursor: str | None = None
+        while True:
+            params: dict[str, Any] = {
+                "limit": 100,
+                "detail": "toolsAndAuthOnly",
+            }
+            if cursor is not None:
+                params["cursor"] = cursor
+            response = self.client.request(
+                "mcpServerStatus/list",
+                params,
+                timeout=self.config.request_timeout,
+            )
+            if not isinstance(response, dict) or not isinstance(
+                response.get("data"), list
+            ):
+                raise CodexProtocolError(
+                    "mcpServerStatus/list returned an invalid isolation response"
+                )
+            exposed: list[str] = []
+            for entry in response["data"]:
+                if not isinstance(entry, dict):
+                    raise CodexProtocolError(
+                        "mcpServerStatus/list contained an invalid server record"
+                    )
+                if any(
+                    entry.get(field)
+                    for field in ("tools", "resources", "resourceTemplates")
+                ):
+                    exposed.append(str(entry.get("name") or "<unnamed>"))
+            if exposed:
+                raise CodexProtocolError(
+                    "External Codex tools remained exposed after isolation: "
+                    + ", ".join(sorted(exposed))
+                )
+            next_cursor = response.get("nextCursor")
+            if next_cursor is None:
+                return
+            if (
+                not isinstance(next_cursor, str)
+                or not next_cursor
+                or next_cursor == cursor
+            ):
+                raise CodexProtocolError(
+                    "mcpServerStatus/list returned an invalid pagination cursor"
+                )
+            cursor = next_cursor
+
+    def _validate_skill_isolation(self) -> None:
+        response = self.client.request(
+            "skills/list",
+            {
+                "cwds": [str(self.cwd)] if self.cwd is not None else [],
+                "forceReload": True,
+            },
+            timeout=self.config.request_timeout,
+        )
+        if not isinstance(response, dict) or not isinstance(
+            response.get("data"), list
+        ):
+            raise CodexProtocolError("skills/list returned an invalid isolation response")
+        enabled: list[str] = []
+        for entry in response["data"]:
+            if not isinstance(entry, dict) or not isinstance(
+                entry.get("skills"), list
+            ):
+                raise CodexProtocolError(
+                    "skills/list contained an invalid workspace record"
+                )
+            errors = entry.get("errors") or []
+            if not isinstance(errors, list) or errors:
+                raise CodexProtocolError(
+                    "Codex reported skill discovery errors after isolation"
+                )
+            for skill in entry["skills"]:
+                if not isinstance(skill, dict):
+                    raise CodexProtocolError(
+                        "skills/list contained an invalid skill record"
+                    )
+                if skill.get("enabled"):
+                    enabled.append(str(skill.get("name") or "<unnamed>"))
+        if enabled:
+            raise CodexProtocolError(
+                "Local Codex skills remained enabled after isolation: "
+                + ", ".join(sorted(enabled))
+            )
 
     def model_catalog(self) -> list[dict[str, Any]]:
         response = self.client.request(
@@ -258,6 +371,10 @@ class CodexBackend:
             "baseInstructions": system_prompt,
             "dynamicTools": dynamic_tools,
             "model": self.config.model or None,
+            # Hosting-platform capabilities and remote environments are not part
+            # of RepoProver's explicit tool registry.
+            "selectedCapabilityRoots": [],
+            "environments": [],
         }
         thread_params = {k: v for k, v in thread_params.items() if v is not None}
 

@@ -46,6 +46,7 @@ Implemented:
 - collection of assistant output and `turn/completed`;
 - immediate app-server crash detection and structured timeout failures;
 - fail-closed approval handling for accidental shell/file approval requests;
+- child-process isolation for inherited MCP/app/plugin tools and local skills;
 - small compatibility adapter for a RepoProver agent;
 - final theorem/source verification through RepoProver's real `lean_check`;
 - a conservative process-level limit of two active Codex turns;
@@ -169,6 +170,17 @@ Codex invoked a successful `lean_check`, the named declaration exists without
 edited Lean file. Other outcomes are printed distinctly as `unproved`,
 `tool_failure`, `formalization_mismatch`, or `provider_failure`. In particular,
 an unproved target is never reported as a false theorem.
+
+The backend enumerates configured Codex MCP server names, disables them in the
+child app-server configuration, and disables Codex apps and plugins. It also
+enumerates every local skill visible from the target workspace, disables those
+skills by path, disables bundled skills and automatic skill instructions, and
+selects no hosting-platform capability roots or remote environments. It then
+checks app-server's effective MCP and skill inventories and fails closed if an
+external tool, resource, or enabled local skill remains exposed. It neither
+prints server/skill settings nor changes the user's persistent Codex
+configuration. Set
+`CodexConfig(isolate_external_tools=False)` only for an intentional experiment.
 
 Keep Lean projects and their `.lake`/Mathlib/REPL caches outside Dropbox. A
 temporary path such as `/private/tmp/repoprover-toy-test` is appropriate for

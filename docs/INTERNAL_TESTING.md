@@ -119,6 +119,13 @@ all of its registered RepoProver tools to Codex as dynamic tools. Codex remains
 read-only at its own filesystem layer; modifications must therefore occur
 through RepoProver's explicit file/git tool handlers. This is intentional and
 makes RepoProver, not Codex's native shell, the authoritative control plane.
+Inherited Codex MCP servers are replaced with disabled child-only config entries;
+Codex apps, plugins, bundled/local skills, automatic skill instructions,
+hosting-platform capability roots, and remote environments are disabled by
+default. The backend checks the resulting MCP and skill inventories and fails
+closed if an external tool, resource, or enabled local skill is still exposed.
+None of these child-only controls change the user's persistent Codex
+configuration.
 The command exits zero only after it observes a successful Codex-requested
 `lean_check`, confirms the named declaration no longer contains `sorry` or
 `axiom`, and performs a final RepoProver `lean_check` over the resulting file.

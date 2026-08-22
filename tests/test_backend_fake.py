@@ -49,8 +49,14 @@ class FakeClient:
                     }
                 ]
             }
+        if method == "mcpServerStatus/list":
+            return {"data": [], "nextCursor": None}
+        if method == "skills/list":
+            return {"data": [{"cwd": "/tmp", "skills": [], "errors": []}]}
         if method == "thread/start":
             assert params["dynamicTools"][0]["name"] == "lean_check"
+            assert params["selectedCapabilityRoots"] == []
+            assert params["environments"] == []
             return {"thread": {"id": "thr-1"}}
         if method == "turn/start":
             assert params["model"] == "gpt-test"

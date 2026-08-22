@@ -21,7 +21,14 @@ TOOL = {
 
 
 class ScenarioClient:
-    def __init__(self, events=None, tool_params=None, initialize_error=None):
+    def __init__(
+        self,
+        events=None,
+        tool_params=None,
+        initialize_error=None,
+        external_servers=None,
+        local_skills=None,
+    ):
         self.handlers = {}
         self.events = list(
             events
@@ -35,6 +42,8 @@ class ScenarioClient:
         )
         self.tool_params = tool_params
         self.initialize_error = initialize_error
+        self.external_servers = list(external_servers or [])
+        self.local_skills = list(local_skills or [])
         self.tool_result = None
 
     def register_request_handler(self, method, handler):
@@ -63,6 +72,14 @@ class ScenarioClient:
                             {"reasoningEffort": "low"},
                         ],
                     }
+                ]
+            }
+        if method == "mcpServerStatus/list":
+            return {"data": self.external_servers, "nextCursor": None}
+        if method == "skills/list":
+            return {
+                "data": [
+                    {"cwd": "/tmp", "skills": self.local_skills, "errors": []}
                 ]
             }
         if method == "thread/start":
@@ -105,6 +122,35 @@ def test_unauthenticated_codex_remains_provider_failure():
         initialize_error=CodexProtocolError("authentication required; run codex login")
     )
     with pytest.raises(CodexProtocolError, match="authentication required"):
+        run_scenario(client)
+
+
+def test_external_tool_isolation_fails_closed():
+    client = ScenarioClient(
+        external_servers=[
+            {
+                "name": "unexpected-app",
+                "tools": {"write": {"name": "write", "inputSchema": {}}},
+                "resources": [],
+                "resourceTemplates": [],
+            }
+        ]
+    )
+    with pytest.raises(CodexProtocolError, match="unexpected-app"):
+        run_scenario(client)
+
+
+def test_local_skill_isolation_fails_closed():
+    client = ScenarioClient(
+        local_skills=[
+            {
+                "name": "unexpected-skill",
+                "path": "/tmp/unexpected/SKILL.md",
+                "enabled": True,
+            }
+        ]
+    )
+    with pytest.raises(CodexProtocolError, match="unexpected-skill"):
         run_scenario(client)
 
 

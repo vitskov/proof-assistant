@@ -10,6 +10,15 @@ This is INTERNAL TESTING ONLY.
 **DO NOT push changes upstream.**
 **DO NOT create or modify upstream issues.**
 
+The user's standing environment rules are non-negotiable:
+
+- use Python 3.13 for this work;
+- never create or store Python environments in Dropbox;
+- use `uv` whenever feasible for Python environment, dependency, and build work;
+- never create or store Lean caches in Dropbox; and
+- every package install script must run a real compiler compile-and-execute
+  preflight, not merely check whether a compiler command exists.
+
 You may modify this local package, run tests, add tests, clone RepoProver for inspection/testing, create toy Lean projects, and make local Git commits.
 
 The target machine is expected to already have Codex CLI installed and authenticated through the user's ChatGPT Pro plan.
@@ -124,13 +133,13 @@ git add -A
 git commit -m "Import repoprover-codex internal handoff"   # only if needed
 ```
 
-Create an isolated environment:
+Create an isolated Python 3.13 environment outside Dropbox using `uv`:
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip setuptools wheel
-pip install -e '.[dev]'
+uv venv --python 3.13 "$HOME/.venvs/repoprover-codex"
+source "$HOME/.venvs/repoprover-codex/bin/activate"
+uv pip install --python "$HOME/.venvs/repoprover-codex/bin/python" -e '.[dev]'
+repoprover-codex compiler-check
 pytest -q
 ```
 
@@ -202,10 +211,10 @@ cd repoprover
 git rev-parse HEAD
 ```
 
-Record the SHA and install it into the same venv:
+Record the SHA and install it into the same external venv:
 
 ```bash
-pip install -e .
+uv pip install --python "$HOME/.venvs/repoprover-codex/bin/python" -e .
 ```
 
 Inspect the real current APIs before assuming the prototype adapter is correct, especially:
@@ -229,7 +238,11 @@ lake --version
 lean --version
 ```
 
-Use a RepoProver toy/example project if suitable, otherwise create a tiny isolated Lean project. The first theorem must be trivial (`rfl`, `simp`, or `norm_num`) so provider plumbing rather than theorem difficulty is being tested.
+Use a RepoProver toy/example project if suitable, otherwise create a tiny isolated
+Lean project outside Dropbox. All `.lake`, Mathlib, REPL, download, and build
+caches must remain outside Dropbox. The first theorem must be trivial (`rfl`,
+`simp`, or `norm_num`) so provider plumbing rather than theorem difficulty is
+being tested.
 
 ## Stage 8 — real RepoProver PROVE agent
 

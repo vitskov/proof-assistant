@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import re
 import subprocess
 import threading
 from dataclasses import dataclass
@@ -16,6 +17,159 @@ class CodexProtocolError(RuntimeError):
 
 class CodexServerExited(CodexProtocolError):
     pass
+
+
+_SAFE_CONFIG_KEY = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def isolated_tool_config_args(
+    executable: str,
+    *,
+    env: dict[str, str] | None = None,
+    timeout: float = 30.0,
+) -> list[str]:
+    """Build child-only overrides that disable inherited external tools.
+
+    Codex merges an empty ``mcp_servers`` table with the user's base config, and
+    overriding only ``enabled`` replaces the transport table. Replacing each
+    configured entry with a complete disabled dummy transport is therefore the
+    fail-closed form supported by the current CLI. Apps and plugin-bundled MCP
+    servers have separate feature switches and are disabled as well.
+    """
+    child_env = os.environ.copy()
+    if env:
+        child_env.update(env)
+    try:
+        result = subprocess.run(
+            [executable, "mcp", "list", "--json"],
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+            env=child_env,
+        )
+    except FileNotFoundError as exc:
+        raise CodexProtocolError(
+            f"Codex executable not found: {executable!r}"
+        ) from exc
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise CodexProtocolError(
+            f"Could not inspect configured Codex MCP servers: {exc}"
+        ) from exc
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        raise CodexProtocolError(
+            "Could not inspect configured Codex MCP servers before starting "
+            f"an isolated backend: {detail or f'exit {result.returncode}'}"
+        )
+    try:
+        entries = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise CodexProtocolError(
+            "codex mcp list --json returned malformed JSON"
+        ) from exc
+    if not isinstance(entries, list):
+        raise CodexProtocolError("codex mcp list --json returned a non-list result")
+
+    args = ["--disable", "apps", "--disable", "plugins"]
+    for entry in entries:
+        if not isinstance(entry, dict) or not entry.get("enabled", True):
+            continue
+        name = entry.get("name")
+        if not isinstance(name, str) or not name:
+            raise CodexProtocolError("Codex MCP listing contained an invalid name")
+        if _SAFE_CONFIG_KEY.fullmatch(name) is None:
+            raise CodexProtocolError(
+                "Cannot safely isolate Codex MCP server with unsupported name "
+                f"{name!r}"
+            )
+        args.extend(
+            [
+                "-c",
+                f'mcp_servers.{name}={{command="true",enabled=false}}',
+            ]
+        )
+    return args
+
+
+def isolated_skill_config_args(
+    executable: str,
+    *,
+    cwd: str | Path | None,
+    external_tool_args: list[str],
+    env: dict[str, str] | None = None,
+    timeout: float = 30.0,
+) -> list[str]:
+    """Discover and disable every skill visible to the child workspace.
+
+    Skill configuration is deny-list based in the current Codex CLI. A probe
+    app-server therefore scans the same workspace with external tools and
+    bundled skills disabled. The real child receives path-specific, ephemeral
+    overrides for every remaining user/repository/admin skill.
+    """
+    base_args = [
+        "-c",
+        "skills.include_instructions=false",
+        "-c",
+        "skills.bundled.enabled=false",
+    ]
+    probe = AppServerClient(
+        executable,
+        cwd=cwd,
+        env=env,
+        extra_args=[*external_tool_args, *base_args],
+    )
+    try:
+        probe.request(
+            "initialize",
+            {
+                "clientInfo": {
+                    "name": "repoprover-codex-skill-probe",
+                    "title": "RepoProver Codex skill isolation probe",
+                    "version": "0.1.0",
+                },
+                "capabilities": {"experimentalApi": True},
+            },
+            timeout=timeout,
+        )
+        probe.notify("initialized", {})
+        response = probe.request(
+            "skills/list",
+            {
+                "cwds": [str(Path(cwd).resolve())] if cwd is not None else [],
+                "forceReload": True,
+            },
+            timeout=timeout,
+        )
+    finally:
+        probe.close()
+
+    if not isinstance(response, dict) or not isinstance(
+        response.get("data"), list
+    ):
+        raise CodexProtocolError("skills/list returned an invalid isolation response")
+    paths: set[str] = set()
+    for entry in response["data"]:
+        if not isinstance(entry, dict) or not isinstance(
+            entry.get("skills"), list
+        ):
+            raise CodexProtocolError("skills/list contained an invalid workspace record")
+        errors = entry.get("errors") or []
+        if not isinstance(errors, list) or errors:
+            raise CodexProtocolError(
+                "Codex reported skill discovery errors; refusing an unverified child"
+            )
+        for skill in entry["skills"]:
+            if not isinstance(skill, dict) or not isinstance(
+                skill.get("path"), str
+            ):
+                raise CodexProtocolError("skills/list contained an invalid skill record")
+            paths.add(skill["path"])
+
+    selectors = ",".join(
+        f"{{path={json.dumps(path)},enabled=false}}" for path in sorted(paths)
+    )
+    return [*base_args, "-c", f"skills.config=[{selectors}]"]
 
 
 @dataclass
