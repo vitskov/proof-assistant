@@ -9,12 +9,24 @@ import sys
 from pathlib import Path
 
 from .backend import CodexBackend, CodexConfig
+from .cache import (
+    CacheLayout,
+    CacheLocationError,
+    attach_project_cache,
+    ensure_project_cache_managed,
+    initialize_cache,
+)
 from .environment import (
     EnvironmentCheckError,
     configure_lean_runtime,
     default_lean_memory_limit_gb,
+    select_native_compiler,
 )
 from .models import model_id, supported_efforts
+
+
+def _cache_layout(args) -> CacheLayout:
+    return CacheLayout.discover(getattr(args, "cache_home", None))
 
 
 def _backend(args) -> CodexBackend:
@@ -136,6 +148,78 @@ def cmd_compiler_check(_args) -> int:
     return 0
 
 
+def cmd_cache_path(args) -> int:
+    try:
+        layout = _cache_layout(args)
+    except CacheLocationError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+    print(layout.root)
+    return 0
+
+
+def cmd_cache_init(args) -> int:
+    try:
+        layout = _cache_layout(args)
+        config, check = initialize_cache(layout)
+    except (CacheLocationError, EnvironmentCheckError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+    print(f"cache root: {layout.root}")
+    print(f"filesystem: {layout.filesystem_type}")
+    print(f"Mathlib downloads: {layout.mathlib_downloads}")
+    print(f"Lake system cache: {layout.lake_system}")
+    print(f"dependency depots: {layout.lake_dependencies}")
+    print(f"isolated builds: {layout.lake_builds}")
+    print(f"worktrees: {layout.worktrees}")
+    print(f"fixtures: {layout.fixtures}")
+    print(f"native compiler: {check.executable}")
+    print(f"configuration: {layout.config_path}")
+    if config.compiler_fallback_used:
+        print("Lean bundled compiler failed; recorded working fallback")
+    return 0
+
+
+def cmd_cache_doctor(args) -> int:
+    try:
+        layout = _cache_layout(args)
+        missing = [path for path in layout.directories if not path.is_dir()]
+        if missing:
+            raise CacheLocationError(
+                "Cache is not initialized; run `repoprover-codex cache init`"
+            )
+        config = layout.load_config()
+        if config is None:
+            raise CacheLocationError(
+                "Cache compiler configuration is missing; run "
+                "`repoprover-codex cache init`"
+            )
+        runtime = layout.runtime_environment(lean_cc=config.lean_cc)
+        check = select_native_compiler(runtime)
+    except (CacheLocationError, EnvironmentCheckError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+    print(f"cache root: {layout.root}")
+    print(f"filesystem: {layout.filesystem_type} (local)")
+    print("inside user home: yes")
+    print("inside Dropbox: no")
+    print(f"native compiler: {check.executable}")
+    print("compile/run smoke check: OK")
+    return 0
+
+
+def cmd_cache_attach(args) -> int:
+    try:
+        layout = _cache_layout(args)
+        target = attach_project_cache(args.project, layout)
+    except (CacheLocationError, OSError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+    print(f"project: {Path(args.project).expanduser().resolve()}")
+    print(f"managed .lake: {target}")
+    return 0
+
+
 _DECLARATION_RE = re.compile(
     r"(?m)^[ \t]*(?:theorem|lemma)\s+(?P<name>[^\s:{(]+)"
 )
@@ -204,6 +288,19 @@ def cmd_repoprover_prove(args) -> int:
         print(f"ERROR: project does not exist: {project}", file=sys.stderr)
         return 2
 
+    try:
+        cache_layout = _cache_layout(args)
+        cache_layout.create()
+        cache_config = cache_layout.load_config()
+        cache_layout.apply_runtime_environment(
+            lean_cc=cache_config.lean_cc if cache_config else None
+        )
+        ensure_project_cache_managed(project, cache_layout)
+    except CacheLocationError as exc:
+        print("OUTCOME: tool_failure", file=sys.stderr)
+        print(f"ERROR: cache policy check failed: {exc}", file=sys.stderr)
+        return 5
+
     if args.lean_cc:
         os.environ["LEAN_CC"] = args.lean_cc
     try:
@@ -212,6 +309,9 @@ def cmd_repoprover_prove(args) -> int:
         print(f"OUTCOME: tool_failure", file=sys.stderr)
         print(f"ERROR: Lean compiler preflight failed: {exc}", file=sys.stderr)
         return 5
+    if cache_config is None or cache_config.lean_cc != compiler.executable:
+        cache_layout.record_compiler(compiler)
+    print(f"cache root: {cache_layout.root}", file=sys.stderr)
     print(f"Lean native compiler: {compiler.executable}", file=sys.stderr)
 
     task = ContributorTask.prove(
@@ -285,6 +385,14 @@ def cmd_repoprover_prove(args) -> int:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="repoprover-codex")
     p.add_argument("--codex", default="codex", help="Codex executable")
+    p.add_argument(
+        "--cache-home",
+        default=None,
+        help=(
+            "Package cache root (default: ~/.cache/repoprover-codex; must be "
+            "inside the user home, local, and outside Dropbox)"
+        ),
+    )
     sub = p.add_subparsers(dest="command", required=True)
 
     d = sub.add_parser("doctor", help="Check Codex app-server connectivity")
@@ -297,6 +405,26 @@ def build_parser() -> argparse.ArgumentParser:
         "compiler-check", help="Compile and run a native program for Lean/Lake"
     )
     cc.set_defaults(func=cmd_compiler_check)
+
+    cache = sub.add_parser(
+        "cache", help="Inspect and initialize validated package cache storage"
+    )
+    cache_sub = cache.add_subparsers(dest="cache_command", required=True)
+    cache_path = cache_sub.add_parser("path", help="Print the validated cache root")
+    cache_path.set_defaults(func=cmd_cache_path)
+    cache_init = cache_sub.add_parser(
+        "init", help="Create cache directories and record a working compiler"
+    )
+    cache_init.set_defaults(func=cmd_cache_init)
+    cache_doctor = cache_sub.add_parser(
+        "doctor", help="Validate cache location, layout, and compiler"
+    )
+    cache_doctor.set_defaults(func=cmd_cache_doctor)
+    cache_attach = cache_sub.add_parser(
+        "attach", help="Move a project's .lake tree into managed cache storage"
+    )
+    cache_attach.add_argument("--project", required=True)
+    cache_attach.set_defaults(func=cmd_cache_attach)
 
     s = sub.add_parser("smoke", help="Run a real dynamic-tool smoke test")
     s.add_argument("--model", required=True)

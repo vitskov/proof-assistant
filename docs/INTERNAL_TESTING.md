@@ -12,8 +12,18 @@ source "$HOME/.venvs/repoprover-codex/bin/activate"
 ```
 
 The script uses `uv`, refuses to put a Python environment in Dropbox, performs
-an actual compiler compile/run smoke test, and runs all simulator tests. Set
-`REPOPROVER_CODEX_VENV` to another non-Dropbox path if needed.
+an actual compiler compile/run smoke test, initializes
+`$HOME/.cache/repoprover-codex`, and runs all simulator tests. Set
+`REPOPROVER_CODEX_VENV` to another non-Dropbox path if needed. Cache overrides
+must remain inside the user home, outside registered Dropbox roots, and on a
+local filesystem.
+
+Validate cache policy separately when diagnosing an installation:
+
+```bash
+repoprover-codex cache path
+repoprover-codex cache doctor
+```
 
 ## Stage 2 — installed Codex connectivity
 
@@ -46,9 +56,11 @@ Pass criteria:
 ## Stage 4 — RepoProver single-agent test
 
 Install the current RepoProver checkout into the same external venv with `uv`.
-Keep the Lean project and all `.lake`, Mathlib, and REPL caches outside Dropbox;
-`/private/tmp` is suitable for a disposable macOS test. Construct one of its
-agent classes on that project, then call `run_repoprover_agent(...)`.
+Place the disposable Lean project under the `fixtures/` directory printed by
+`repoprover-codex cache path`, or create an external worktree under its
+`worktrees/` directory. If the project already has `.lake`, run
+`repoprover-codex cache attach --project PATH`. Construct one of its agent
+classes on that project, then call `run_repoprover_agent(...)`.
 
 The first target should be deliberately trivial, e.g. proving a theorem reducible
 by `rfl` or `simp`. This tests RepoProver tool schemas and actual Lean dispatch
@@ -129,3 +141,5 @@ configuration.
 The command exits zero only after it observes a successful Codex-requested
 `lean_check`, confirms the named declaration no longer contains `sorry` or
 `axiom`, and performs a final RepoProver `lean_check` over the resulting file.
+It also refuses to start unless the project is outside Dropbox and its `.lake`
+tree resolves into the validated home-local cache.

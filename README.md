@@ -64,7 +64,8 @@ Not implemented intentionally:
 
 Python environments must live outside Dropbox. The development installer uses
 `uv`, defaults to `$HOME/.venvs/repoprover-codex`, runs a mandatory native
-compile-and-execute check, and runs the test suite:
+compile-and-execute check, initializes validated home-local cache storage, and
+runs the test suite:
 
 ```bash
 cd repoprover-codex
@@ -72,9 +73,11 @@ scripts/install-dev.sh
 source "$HOME/.venvs/repoprover-codex/bin/activate"
 ```
 
-Override the external environment or Python selection with
-`REPOPROVER_CODEX_VENV` and `REPOPROVER_CODEX_PYTHON`. The installer rejects a
-venv path containing `Dropbox`.
+Override the external environment, Python selection, or cache root with
+`REPOPROVER_CODEX_VENV`, `REPOPROVER_CODEX_PYTHON`, and
+`REPOPROVER_CODEX_CACHE_HOME`. The installer rejects a venv path containing
+`Dropbox`; the cache root must resolve inside the user home on a local
+filesystem and outside every detected Dropbox root.
 
 RepoProver can be installed separately from a checkout:
 
@@ -99,6 +102,54 @@ sets `LEAN_CC=/usr/bin/clang` for the current RepoProver process. On macOS the
 RepoProver REPL address-space limit defaults to disabled because its
 `RLIMIT_AS` pre-exec hook is not portable there; Linux retains the 24 GB
 default.
+
+## Home-local cache storage
+
+All package-managed large state is rooted at
+`$HOME/.cache/repoprover-codex` by default:
+
+```text
+~/.cache/repoprover-codex/
+├── mathlib-downloads/  # MATHLIB_CACHE_DIR
+├── lake/
+│   ├── system/         # LAKE_CACHE_DIR
+│   ├── dependencies/   # reserved immutable dependency depots
+│   └── builds/         # isolated .lake trees, one per project path
+├── fixtures/           # reusable test projects
+├── worktrees/          # external RepoProver/Lean worktrees
+├── locks/              # concurrent cache-operation locks
+└── tmp/
+```
+
+Initialize and validate it with:
+
+```bash
+repoprover-codex cache init
+repoprover-codex cache doctor
+repoprover-codex cache path
+```
+
+The validator canonicalizes symlinks, requires the root to remain inside the
+user home, reads Dropbox's registered root metadata without inspecting any
+credentials, and rejects Dropbox and remote/network filesystems. An override
+through `--cache-home` or `REPOPROVER_CODEX_CACHE_HOME` is accepted only after
+the same checks.
+
+Lake has no environment variable that relocates a workspace's complete `.lake`
+tree. Before using an external Lean project, attach it explicitly:
+
+```bash
+repoprover-codex cache attach --project /path/to/lean-project
+```
+
+This moves the existing `.lake` directory into the per-project cache location
+and replaces it with a symlink. The operation is locked, refuses to merge two
+existing cache trees, refuses Git-tracked `.lake` content, and adds only a
+repository-local `/.lake` exclusion in `.git/info/exclude`. It never edits the
+tracked `.gitignore`. `repoprover-prove` fails closed if the project or cache is
+in Dropbox, or if `.lake` does not resolve into the managed cache. For a source
+checkout in Dropbox, create a Git worktree under the printed `worktrees/`
+directory instead of attaching the Dropbox checkout.
 
 ## Inspect models and reasoning levels
 
@@ -182,6 +233,6 @@ prints server/skill settings nor changes the user's persistent Codex
 configuration. Set
 `CodexConfig(isolate_external_tools=False)` only for an intentional experiment.
 
-Keep Lean projects and their `.lake`/Mathlib/REPL caches outside Dropbox. A
-temporary path such as `/private/tmp/repoprover-toy-test` is appropriate for
-local acceptance testing.
+Keep Lean projects and their `.lake`/Mathlib/REPL caches outside Dropbox and
+inside the validated home-local cache hierarchy. The development installer and
+`repoprover-prove` enforce this for package-managed runs.

@@ -24,8 +24,13 @@ package, and no pull request or issue was opened.
 ## Storage and installer guarantees
 
 - Active Python environment: `/Users/vui1/.venvs/repoprover-codex`
-- Disposable Lean project and `.lake` cache:
-  `/private/tmp/repoprover-codex-toy-20260822`
+- Central package cache: `/Users/vui1/.cache/repoprover-codex` on local APFS
+- Accepted Lean fixture:
+  `/Users/vui1/.cache/repoprover-codex/fixtures/repoprover-toy-acceptance`
+- Its 7.1 GB `.lake` tree is attached under the central `lake/builds/`
+  directory; the fixture contains only a repository-locally ignored symlink.
+- The 403 MB Mathlib download cache is centralized under
+  `mathlib-downloads/`; `~/.cache/mathlib` is a compatibility symlink to it.
 - No `.venv`, `venv`, `.lake`, or `.elan` directory was found in either Dropbox
   source checkout.
 - The former Dropbox `.venv` was moved recoverably to the Trash.
@@ -33,10 +38,13 @@ package, and no pull request or issue was opened.
   path containing `Dropbox`, and always invokes `repoprover-codex compiler-check`
   after installation and before tests.
 - A live installer run compiled and executed a C program successfully, selected
-  `/usr/bin/clang` as the working Lean compiler fallback, and then passed all 40
+  `/usr/bin/clang` as the working Lean compiler fallback, and then passed all 59
   tests.
 - A deliberate Dropbox venv request was rejected before creating the path with
   exit status 2.
+- Cache policy rejects paths outside the user home, registered/named Dropbox
+  roots, symlink escapes, and remote filesystems. Live invalid Dropbox and
+  outside-home requests both exited 2 before creating anything.
 
 The user-wide rules are also recorded in `/Users/vui1/.codex/AGENTS.md`: never
 place Python environments or Lean caches in Dropbox, use uv whenever feasible,
@@ -66,21 +74,43 @@ modify the user's persistent Codex configuration.
 
 ### Simulator and failure tests
 
-`python -m pytest -q` under Python 3.13.11: **40 passed**.
+The original acceptance run passed 40 tests. After the gated home-local cache
+implementation, `python -m pytest -q` under Python 3.13.11: **59 passed**.
 
 Covered cases include malformed tool arguments, dynamic-tool exceptions,
 unknown models/efforts, missing executable, simulated authentication failure,
 app-server crash, request and turn timeouts, abnormal turn statuses, Lean tool
 failure, semantic proof outcomes, external-tool leaks, local-skill leaks, and
-the bidirectional JSONL protocol.
+the bidirectional JSONL protocol. Cache cases cover custom/registered Dropbox
+roots, symlink escapes, remote mounts, compiler configuration, transactional
+`.lake` attachment, Git hygiene, and refusal to move Git-tracked cache content.
+
+### Home-local cache validation
+
+- `cache init`: passed; selected `/usr/bin/clang` and wrote no secrets.
+- `cache doctor`: passed; APFS identified as local, home containment confirmed,
+  Dropbox containment rejected, compile/run smoke passed.
+- The accepted 7.1 GB fixture was moved from `/private/tmp` into the central
+  cache and then attached at production scale.
+- After relocation and attachment, `lake build` passed (8,027 jobs),
+  `lake build REPL` passed, direct Lean elaboration passed, and the toy Git
+  worktree remained clean.
+- A post-relocation `repoprover-prove` run used the managed `.lake` target,
+  invoked RepoProver's real `lean_check`, and passed the independent final Lean
+  verification. The fixture remained clean and the recorded compiler-fallback
+  metadata remained intact.
 
 ### Compiler and package tests
 
-- Development installer: passed compiler compile/execute and 40 tests.
+- Development installer: passed compiler compile/execute, cache initialization,
+  and all 59 tests from the final implementation tree.
 - `uv build`: built both sdist and wheel successfully.
-- Fresh wheel environment: Python 3.13.11 under `/private/tmp`.
+- Fresh wheel environment: Python 3.13.11 under
+  `/Users/vui1/.venvs/repoprover-codex-wheel-cache-test` during validation,
+  outside Dropbox and moved recoverably to the Trash afterward.
 - Installed wheel version: 0.1.0.
-- Installed wheel `compiler-check`: passed with `/usr/bin/clang`.
+- Installed wheel `compiler-check` and `cache doctor`: passed with
+  `/usr/bin/clang` and the validated home-local APFS cache.
 
 ### Live Codex connectivity
 
@@ -98,8 +128,8 @@ catalog was:
 The final API-key-free smoke test used `gpt-5.6-luna`/`low`, invoked only the
 registered `echo` tool, and completed successfully:
 
-- thread `01a02b51-92be-7383-ae1c-3f17f98f09f0`
-- turn `01a02b51-9371-7120-8d78-e3df7933d04c`
+- thread `01a02b70-ca60-7e21-9a83-20cbf5e94381`
+- turn `01a02b70-cb30-7282-9f97-f164fa01400c`
 
 ### Real RepoProver + Lean proof
 
