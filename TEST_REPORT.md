@@ -33,7 +33,7 @@ package, and no pull request or issue was opened.
   path containing `Dropbox`, and always invokes `repoprover-codex compiler-check`
   after installation and before tests.
 - A live installer run compiled and executed a C program successfully, selected
-  `/usr/bin/clang` as the working Lean compiler fallback, and then passed all 38
+  `/usr/bin/clang` as the working Lean compiler fallback, and then passed all 40
   tests.
 - A deliberate Dropbox venv request was rejected before creating the path with
   exit status 2.
@@ -66,7 +66,7 @@ modify the user's persistent Codex configuration.
 
 ### Simulator and failure tests
 
-`python -m pytest -q` under Python 3.13.11: **38 passed**.
+`python -m pytest -q` under Python 3.13.11: **40 passed**.
 
 Covered cases include malformed tool arguments, dynamic-tool exceptions,
 unknown models/efforts, missing executable, simulated authentication failure,
@@ -76,7 +76,7 @@ the bidirectional JSONL protocol.
 
 ### Compiler and package tests
 
-- Development installer: passed compiler compile/execute and 38 tests.
+- Development installer: passed compiler compile/execute and 40 tests.
 - `uv build`: built both sdist and wheel successfully.
 - Fresh wheel environment: Python 3.13.11 under `/private/tmp`.
 - Installed wheel version: 0.1.0.
