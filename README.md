@@ -32,7 +32,7 @@ request is dispatched back to RepoProver's existing `handle_tool_call()`.
 ## Current scope
 
 This is an independently maintained experimental bridge. Its internal macOS
-acceptance phase is complete enough for publication in the user-owned
+acceptance phase is complete, and it is published in the user-owned
 [`vitskov/repoprover-codex`](https://github.com/vitskov/repoprover-codex)
 repository. It has not been proposed to or merged into upstream RepoProver.
 

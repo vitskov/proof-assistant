@@ -3,13 +3,13 @@
 ## Result
 
 The standalone `repoprover-codex` package passed its internal macOS acceptance
-plan with Python 3.13 and is ready for publication in the user-owned
+plan with Python 3.13 and is published in the user-owned public
 `vitskov/repoprover-codex` repository. Codex CLI authentication worked with
 `OPENAI_API_KEY` removed, RepoProver completed a real Lean proof through Codex
 dynamic tools, and the result passed an independent final `lean_check`.
 
-No upstream RepoProver files were modified, no upstream remote was added to this
-package, and no pull request or issue was opened.
+No upstream RepoProver files were modified or pushed, and no upstream pull
+request or issue was opened. The package's only remote is its user-owned origin.
 
 ## Environment
 
@@ -162,7 +162,8 @@ it is not a claim that two concurrent Lean proof jobs were exercised.
 - Installer/compiler guard commit: `1886d49`
 - Home-local Lean-cache implementation commit:
   `14c751bac2b5cbcbf5413de4da8a7dc41fbf455d`
-- Publication target: `https://github.com/vitskov/repoprover-codex`
+- Publication repository: `https://github.com/vitskov/repoprover-codex`
+  (public, `main`)
 - RepoProver sibling checkout: clean and unmodified
 - Upstream PR/issue activity: none
 
