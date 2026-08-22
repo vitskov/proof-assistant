@@ -1,0 +1,272 @@
+from __future__ import annotations
+
+import queue
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Callable
+
+from .models import validate_model_effort
+from .protocol import AppServerClient, CodexProtocolError
+from .tools import dynamic_tool_result, openai_tools_to_codex
+
+
+@dataclass(frozen=True)
+class CodexConfig:
+    executable: str = "codex"
+    model: str = ""
+    effort: str = "high"
+    request_timeout: float = 120.0
+    turn_timeout: float = 1800.0
+    approval_policy: str = "never"
+    sandbox: str = "read-only"
+    validate_model: bool = True
+    extra_app_server_args: tuple[str, ...] = field(default_factory=tuple)
+
+
+@dataclass
+class CodexResult:
+    final_text: str
+    thread_id: str
+    turn_id: str | None
+    model: str
+    effort: str
+    events: list[dict[str, Any]]
+
+
+class CodexBackend:
+    """Native Codex app-server backend.
+
+    Authentication intentionally remains inside the Codex executable.
+    """
+
+    def __init__(
+        self,
+        config: CodexConfig,
+        *,
+        cwd: str | Path | None = None,
+        client: AppServerClient | None = None,
+    ) -> None:
+        self.config = config
+        self.cwd = Path(cwd).resolve() if cwd else None
+        self.client = client or AppServerClient(
+            config.executable,
+            cwd=self.cwd,
+            extra_args=list(config.extra_app_server_args),
+        )
+        self._tool_handler: Callable[[str, dict[str, Any]], str] | None = None
+        self.client.register_request_handler("item/tool/call", self._on_tool_call)
+
+        # Dynamic tools are authoritative. We fail closed on any unexpected
+        # request asking the host to approve Codex-native mutations/execution.
+        for method in (
+            "item/commandExecution/requestApproval",
+            "item/fileChange/requestApproval",
+            "execCommandApproval",
+            "applyPatchApproval",
+        ):
+            self.client.register_request_handler(method, self._deny_approval)
+
+    def close(self) -> None:
+        self.client.close()
+
+    def _deny_approval(self, _params: dict[str, Any]) -> dict[str, Any]:
+        # Protocol versions have used slightly different response fields. The
+        # common decision vocabulary is "decline"/"denied"; returning both is
+        # intentionally conservative for an integration smoke-test backend.
+        return {"decision": "decline", "approved": False}
+
+    def initialize(self) -> dict[str, Any]:
+        response = self.client.request(
+            "initialize",
+            {
+                "clientInfo": {
+                    "name": "repoprover-codex",
+                    "title": "RepoProver Codex backend",
+                    "version": "0.1.0",
+                },
+                "capabilities": {"experimentalApi": True},
+            },
+            timeout=self.config.request_timeout,
+        )
+        try:
+            self.client.notify("initialized", {})
+        except Exception:
+            pass
+        return response or {}
+
+    def model_catalog(self) -> list[dict[str, Any]]:
+        response = self.client.request(
+            "model/list",
+            {"limit": 100},
+            timeout=self.config.request_timeout,
+        )
+        if isinstance(response, dict):
+            return list(response.get("data") or response.get("models") or [])
+        return list(response or [])
+
+    def _on_tool_call(self, params: dict[str, Any]) -> dict[str, Any]:
+        if self._tool_handler is None:
+            return dynamic_tool_result(
+                "No RepoProver tool handler is installed", success=False
+            )
+        tool = str(params.get("tool") or "")
+        arguments = params.get("arguments") or {}
+        if not isinstance(arguments, dict):
+            return dynamic_tool_result(
+                f"Invalid arguments for {tool!r}: expected JSON object", success=False
+            )
+        try:
+            result = self._tool_handler(tool, arguments)
+        except Exception as exc:
+            return dynamic_tool_result(f"Error: {exc}", success=False)
+        text = result if isinstance(result, str) else str(result)
+        return dynamic_tool_result(text, success=not text.startswith("Error:"))
+
+    @staticmethod
+    def _extract_thread_id(response: Any) -> str:
+        if not isinstance(response, dict):
+            raise CodexProtocolError(f"Unexpected thread/start response: {response!r}")
+        thread = response.get("thread")
+        if isinstance(thread, dict) and thread.get("id"):
+            return str(thread["id"])
+        if response.get("threadId"):
+            return str(response["threadId"])
+        if response.get("id"):
+            return str(response["id"])
+        raise CodexProtocolError(f"thread/start returned no thread id: {response!r}")
+
+    @staticmethod
+    def _extract_turn_id(response: Any) -> str | None:
+        if not isinstance(response, dict):
+            return None
+        turn = response.get("turn")
+        if isinstance(turn, dict) and turn.get("id"):
+            return str(turn["id"])
+        if response.get("turnId"):
+            return str(response["turnId"])
+        if response.get("id"):
+            return str(response["id"])
+        return None
+
+    @staticmethod
+    def _text_from_item(item: dict[str, Any]) -> str:
+        # v2 agentMessage items normally contain text directly; tolerate common
+        # variants so the adapter is not unnecessarily brittle.
+        if isinstance(item.get("text"), str):
+            return item["text"]
+        content = item.get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            chunks: list[str] = []
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                value = part.get("text") or part.get("content")
+                if isinstance(value, str):
+                    chunks.append(value)
+            return "".join(chunks)
+        return ""
+
+    def run(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        tools: list[dict[str, Any]] | None,
+        tool_handler: Callable[[str, dict[str, Any]], str],
+    ) -> CodexResult:
+        self.client.start()
+        self.initialize()
+
+        if self.config.validate_model:
+            validate_model_effort(
+                self.model_catalog(),
+                model=self.config.model,
+                effort=self.config.effort,
+            )
+
+        self._tool_handler = tool_handler
+        dynamic_tools = openai_tools_to_codex(tools)
+
+        thread_params: dict[str, Any] = {
+            "cwd": str(self.cwd) if self.cwd else None,
+            "approvalPolicy": self.config.approval_policy,
+            "sandbox": self.config.sandbox,
+            "baseInstructions": system_prompt,
+            "dynamicTools": dynamic_tools,
+            "model": self.config.model or None,
+        }
+        thread_params = {k: v for k, v in thread_params.items() if v is not None}
+
+        thread_response = self.client.request(
+            "thread/start", thread_params, timeout=self.config.request_timeout
+        )
+        thread_id = self._extract_thread_id(thread_response)
+
+        turn_params: dict[str, Any] = {
+            "threadId": thread_id,
+            "input": [{"type": "text", "text": user_prompt}],
+            "model": self.config.model,
+            "effort": self.config.effort,
+        }
+        turn_response = self.client.request(
+            "turn/start", turn_params, timeout=self.config.request_timeout
+        )
+        turn_id = self._extract_turn_id(turn_response)
+
+        events: list[dict[str, Any]] = []
+        final_chunks: list[str] = []
+
+        while True:
+            try:
+                notification = self.client.next_notification(
+                    timeout=self.config.turn_timeout
+                )
+            except queue.Empty as exc:
+                raise TimeoutError(
+                    f"Codex turn did not complete within {self.config.turn_timeout}s"
+                ) from exc
+
+            events.append(notification)
+            method = str(notification.get("method") or "")
+            params = notification.get("params") or {}
+
+            if method == "item/completed":
+                item = params.get("item") or {}
+                if isinstance(item, dict) and item.get("type") in (
+                    "agentMessage",
+                    "assistantMessage",
+                    "message",
+                ):
+                    text = self._text_from_item(item)
+                    if text:
+                        final_chunks.append(text)
+
+            if method == "turn/completed":
+                completed_turn = params.get("turn") or {}
+                completed_id = (
+                    completed_turn.get("id")
+                    if isinstance(completed_turn, dict)
+                    else None
+                )
+                if turn_id is None or completed_id is None or str(completed_id) == turn_id:
+                    status = (
+                        completed_turn.get("status")
+                        if isinstance(completed_turn, dict)
+                        else None
+                    )
+                    if status in ("failed", "cancelled", "interrupted"):
+                        raise CodexProtocolError(
+                            f"Codex turn ended with status {status!r}: {params!r}"
+                        )
+                    break
+
+        return CodexResult(
+            final_text="\n".join(x for x in final_chunks if x).strip(),
+            thread_id=thread_id,
+            turn_id=turn_id,
+            model=self.config.model,
+            effort=self.config.effort,
+            events=events,
+        )
