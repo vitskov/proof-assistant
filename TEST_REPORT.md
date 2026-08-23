@@ -1,223 +1,159 @@
-# Acceptance test report — 2026-08-22
+# Test report — version 0.3.0
 
-## Result
+Test date: 2026-08-22 (America/New_York)
 
-The standalone `repoprover-codex` package passed its internal macOS acceptance
-plan with Python 3.13 and is published in the user-owned public
-`vitskov/repoprover-codex` repository. Codex CLI authentication worked with
-`OPENAI_API_KEY` removed, RepoProver completed a real Lean proof through Codex
-dynamic tools, and the result passed an independent final `lean_check`.
+## Release result
 
-The subsequent 0.2.0 development pass added the file-based manuscript workflow.
-Its real acceptance run started with a LaTeX-only folder plus a Markdown task
-file, generated an isolated Lean project, completed and committed the requested
-formalization, and passed an independent final `lake build`. The 0.2.0 changes
-described here are tested locally but have not yet been pushed to GitHub.
+The version 0.3.0 implementation at commit
+`a754bc904db90d66cdbfb18384758b879fc1f58d` passed the complete Python test
+suite, a fresh-wheel test, the supported local installer, Codex app-server
+health checks, and a real two-project Lean cache-sharing acceptance test.
 
-No upstream RepoProver files were modified or pushed, and no upstream pull
-request or issue was opened. The package's only remote is its user-owned origin.
+The cache design prevents a new manuscript workspace from retaining another
+complete Mathlib/REPL build when its dependency fingerprint is compatible.
+Every project still has an isolated root build. A bounded LRU policy prevents
+inactive managed cache data from exceeding the configured ceiling or consuming
+the configured filesystem free-space reserve.
 
-## Environment
+No files in the sibling RepoProver checkout were changed. Nothing was pushed
+to `facebookresearch/repoprover`, and no upstream pull request or issue was
+created.
+
+## Tested environment
 
 - macOS 12.7.6 (21H1320), x86_64
 - Python 3.13.15
 - uv 0.9.26
 - Codex CLI 0.149.0
 - Git 2.37.1
-- Lean 4.28.0, commit `7e01a1bf5c70fc6167d49c345d3bf80596e9a79b`
+- Lean 4.28.0, commit
+  `7e01a1bf5c70fc6167d49c345d3bf80596e9a79b`
 - Lake 5.0.0-src+7e01a1b
-- RepoProver `386adba3df572cb71df534add2c764e071898a2e`
+- RepoProver commit `386adba3df572cb71df534add2c764e071898a2e`
+- RepoProver worktree status: clean
+- Native compiler selected for Lean: `/usr/bin/clang`
 
-## Storage and installer guarantees
+The active development installation is:
 
-- Active Python environment: `$HOME/.venvs/repoprover-codex`
-- Central package cache: `$HOME/.cache/repoprover-codex` on local APFS
-- Accepted Lean fixture:
-  `$HOME/.cache/repoprover-codex/fixtures/repoprover-toy-acceptance`
-- File-interface acceptance output:
-  `$HOME/.cache/repoprover-codex/fixtures/manuscript-interface-acceptance`
-  (360 KB of task deliverables plus an external managed `.lake` symlink)
-- Its 7.1 GB `.lake` tree is attached under the central `lake/builds/`
-  directory; the fixture contains only a repository-locally ignored symlink.
-- The 403 MB Mathlib download cache is centralized under
-  `mathlib-downloads/`; `~/.cache/mathlib` is a compatibility symlink to it.
-- No `.venv`, `venv`, `.lake`, or `.elan` directory was found in either Dropbox
-  source checkout.
-- The former Dropbox `.venv` was moved recoverably to the Trash.
-- `scripts/install-dev.sh` uses uv and Python 3.13 by default, rejects any venv
-  path containing `Dropbox`, and always invokes `repoprover-codex compiler-check`
-  after installation and before tests.
-- A live installer run compiled and executed a C program successfully, selected
-  `/usr/bin/clang` as the working Lean compiler fallback, and then passed all 71
-  tests.
-- A deliberate Dropbox venv request was rejected before creating the path with
-  exit status 2.
-- Cache policy rejects paths outside the user home, registered/named Dropbox
-  roots, symlink escapes, and remote filesystems. Live invalid Dropbox and
-  outside-home requests both exited 2 before creating anything.
+- environment: `/Users/vui1/.venvs/repoprover-codex`
+- interpreter: Python 3.13.15
+- package version: 0.3.0
+- package source: `/Users/vui1/src/repoprover-codex`
+- cache: `/Users/vui1/.cache/repoprover-codex`
 
-The user-wide Codex instructions also record these rules: never place Python
-environments or Lean caches in Dropbox, use uv whenever feasible, and require a
-real compiler compile/execute preflight in package install scripts.
+All of these locations are outside Dropbox.
 
-## Codex capability isolation
+## Automated suite
 
-RepoProver's registered dynamic tools are the authoritative external tool
-surface. For each backend, the package now:
+`python -m pytest -q` completed with **78 passed**. The installer ran the same
+suite after reinstalling the editable package with uv.
 
-1. enumerates configured local MCP servers and replaces every enabled entry with
-   a disabled child-only transport;
-2. disables Codex apps and plugins in the child process;
-3. disables bundled skills and automatic skill instructions;
-4. probes the target workspace for user/repository/admin skills and disables
-   every discovered skill by absolute path in the child-only configuration;
-5. selects no hosting-platform capability roots or remote environments; and
-6. queries the effective MCP and skill inventories, failing startup if any MCP
-   tool/resource or enabled skill remains.
+Coverage includes:
 
-Live validation found zero external tools and zero enabled skills. The isolated
-app-server process tree contained only the Node launcher and Codex binary; no
-configured MCP, app, or plugin subprocess was started. These controls do not
-modify the user's persistent Codex configuration.
+- app-server JSONL protocol, model/effort validation, and dynamic tools;
+- Codex failure, timeout, and external MCP/skill isolation cases;
+- compiler discovery and real compile/execute checks;
+- cache path, Dropbox, local-filesystem, and Git-hygiene enforcement;
+- config migration, cache limits, LRU eviction, active leases, and capacity
+  refusal;
+- dependency fingerprinting, immutable depot publication, concurrent warm
+  claims, project-build isolation, and broken-link repair; and
+- manuscript snapshots, task-file preservation, generated Lean projects,
+  output validation, result evidence, independent builds, and CLI parsing.
 
-## Test results
+Focused Ruff `E`, `F`, `I`, and `UP` checks and Ruff formatting checks passed
+for every implementation and test file changed in 0.3.0. `git diff --check`
+also passed.
 
-### Simulator and failure tests
+## Real Lean cache-sharing acceptance
 
-The original acceptance run passed 40 tests. After the gated home-local cache
-implementation it passed 60. After the manuscript workflow implementation,
-`python -m pytest -q` under Python 3.13: **71 passed**.
+Two independent small Lean projects were prepared under:
 
-Covered cases include malformed tool arguments, dynamic-tool exceptions,
-unknown models/efforts, missing executable, simulated authentication failure,
-app-server crash, request and turn timeouts, abnormal turn statuses, Lean tool
-failure, semantic proof outcomes, external-tool leaks, local-skill leaks, and
-the bidirectional JSONL protocol. Cache cases cover custom/registered Dropbox
-roots, symlink escapes, remote mounts, compiler configuration, transactional
-`.lake` attachment, Git hygiene, and refusal to move Git-tracked cache content.
-Manuscript cases cover raw-LaTeX scaffolding, existing Lean-project snapshots,
-exact task-file preservation, UTF-8/empty-task validation, nested/nonempty path
-refusal, runtime/cache exclusion, result markers without evidence, independent
-build failure, and the public CLI surface.
+`/Users/vui1/.cache/repoprover-codex/fixtures/cache-sharing-acceptance`
 
-### Home-local cache validation
+Each project pins Lean 4.28, Mathlib 4.28, and REPL 4.28.0-rc1, and proves the
+toy theorem `2 + 2 = 4` with `norm_num`.
 
-- `cache init`: passed; selected `/usr/bin/clang` and wrote no secrets.
-- `cache doctor`: passed; APFS identified as local, home containment confirmed,
-  Dropbox containment rejected, compile/run smoke passed.
-- The accepted 7.1 GB fixture was moved from `/private/tmp` into the central
-  cache and then attached at production scale.
-- After relocation and attachment, `lake build` passed (8,027 jobs),
-  `lake build REPL` passed, direct Lean elaboration passed, and the toy Git
-  worktree remained clean.
-- A post-relocation `repoprover-prove` run used the managed `.lake` target,
-  invoked RepoProver's real `lean_check`, and passed the independent final Lean
-  verification. The fixture remained clean and the recorded compiler-fallback
-  metadata remained intact.
+Project A exercised the cold path. Project B exercised the warm path. Both
+completed `lake build` successfully and selected:
 
-### Compiler and package tests
+- dependency key: `9409030579b28f587dcc649b`
+- shared depot:
+  `/Users/vui1/.cache/repoprover-codex/lake/dependencies/deps-9409030579b28f587dcc649b`
+- resolved Mathlib commit:
+  `8f9d9cff6bd728b17a24e163c9402775d9e6a365`
+- resolved REPL commit:
+  `08ef67a0ce3606ff54b143bce6e7bb63af491e75`
+- locked-manifest SHA-256:
+  `fad34588ea56a5f5414d1b70d14c77b31c5fa836325c7a0f6007aafde688a142`
 
-- Development installer: passed compiler compile/execute, cache initialization,
-  and all 71 tests from the 0.2.0 implementation tree.
-- `uv build`: built both sdist and wheel successfully.
-- Fresh wheel environment: Python 3.13.15 under the external package-test root
-  `$HOME/.cache/repoprover-codex/tmp/package-0.2.0-final.B85NOs/venv`, outside
-  Dropbox.
-- Installed wheel version: 0.2.0; its `manuscript-run --help`, compiler
-  compile/execute check, and all 71 tests passed.
-- Installed wheel `compiler-check` and `cache doctor`: passed with
-  `/usr/bin/clang` and the validated home-local APFS cache.
+The projects' top-level `.lake` links resolve to different build directories.
+Their `.lake/packages` links resolve to the same shared depot. The depot is
+about 7.05 GiB; each isolated root build is about 5.9 MiB. Measured managed
+cache growth from preparing Project B was 6,225,920 bytes rather than another
+multi-gigabyte dependency tree. No writable regular files remained in the
+sealed dependency packages tree.
 
-### Live Codex connectivity
+Two `cache prepare` commands were then run simultaneously against Projects A
+and B. Both acquired shared warm leases, reported depot reuse, and completed
+`lake build`. This specifically verifies that compatible warm jobs are not
+serialized behind an unnecessary exclusive depot lock.
 
-`doctor` initialized app-server and returned seven models. The exact visible
-catalog was:
+After acceptance:
 
-- `gpt-5.6-sol`: low, medium, high, xhigh, max, ultra
-- `gpt-5.6-terra`: low, medium, high, xhigh, max, ultra
-- `gpt-5.6-luna`: low, medium, high, xhigh, max
-- `gpt-5.5`: low, medium, high, xhigh
-- `gpt-5.4`: low, medium, high, xhigh
-- `gpt-5.4-mini`: low, medium, high, xhigh
-- `gpt-5.3-codex-spark`: low, medium, high, xhigh
+- managed cache: 7.45 GiB
+- dependency depots: 7.05 GiB
+- isolated project builds: 0.01 GiB
+- Mathlib downloads: 0.39 GiB
+- configured cache maximum: 16.00 GiB
+- configured minimum filesystem free space: 25.00 GiB
+- measured filesystem free space: 114.28 GiB
+- manual `cache gc`: zero removals because both safety limits were satisfied
 
-The final API-key-free smoke test used `gpt-5.6-luna`/`low`, invoked only the
-registered `echo` tool, and completed successfully:
+## Installer and wheel
 
-- thread `01a02b84-44aa-72b2-ad69-6cbfce93da8c`
-- turn `01a02b84-4571-7d21-8eb1-060479b884b2`
+`scripts/install-dev.sh` passed using uv and Python 3.13.15. As a mandatory
+installation step it compiled and executed a C program, selected
+`/usr/bin/clang`, initialized the non-Dropbox cache with the 16/25 GiB policy,
+and passed all 78 tests.
 
-### Real RepoProver + Lean proof
+`uv build --python /Users/vui1/.venvs/repoprover-codex/bin/python` produced the
+0.3.0 sdist and wheel. The wheel was installed with uv into a fresh disposable
+Python 3.13.15 environment outside Dropbox. In that environment:
 
-The final isolated `ContributorAgent` PROVE run started from a committed
-`sorry`, replaced it with `rfl`, used RepoProver's real `lean_check`, and made a
-local toy-project commit. The adapter then found the named declaration without
-`sorry`/`axiom` and ran a separate final RepoProver `lean_check`.
+- the imported package reported version 0.3.0 from `site-packages`;
+- `compiler-check` compiled and executed successfully;
+- `cache doctor` confirmed local APFS storage outside Dropbox and repeated the
+  compile/execute check; and
+- all 78 tests passed against the installed wheel.
 
-- outcome: `proved`
-- verification: `Compiles successfully`
-- Codex thread `01a02b52-82f9-79e0-ad8c-52637db88722`
-- Codex turn `01a02b52-83cb-7482-b4f4-5db0f13872c9`
-- 12 audited RepoProver dynamic-tool calls, including `lean_check`, file, git,
-  and RepoProver's registered `bash` tool
-- toy commit `d27b505621d4f91e5998bbefa72a6e6bc2d5c054`
-- toy worktree clean after completion
+The disposable environment and local package build artifacts were removed
+afterward.
 
-### File-based manuscript verification
+## Codex and RepoProver status
 
-The 0.2.0 live acceptance used the LaTeX-only `TestProject/tex` directory and
-[`examples/verify-task.md`](examples/verify-task.md) as the authoritative task.
-The single `manuscript-run` invocation copied the source, generated the pinned
-Lean 4.28/Mathlib/REPL project, attached its `.lake` to the central cache,
-bootstrapped dependencies, and ran Codex with `OPENAI_API_KEY` removed.
+With `OPENAI_API_KEY` removed, `doctor` initialized Codex app-server and listed
+seven authenticated models. `models` returned the expected exact model/effort
+catalog. The child isolation checks found no exposed local MCP tools/resources
+or enabled local skills.
 
-- model/effort: `gpt-5.6-luna` / `low`
-- outcome: `verified`
-- Codex thread `01a02bc1-cfb0-7250-af68-11de444a5ceb`
-- Codex turn `01a02bc1-d07a-76e3-9828-e6c2e7f2cd23`
-- 18 audited RepoProver dynamic-tool calls
-- 2 successful RepoProver `lean_check` calls
-- generated theorem: `Manuscript.double_even (n : ℕ) : Even (double n)`
-- independent `lake build`: passed (8,027 jobs)
-- task result commit: `3d9bdfa5ea6e018f195306f0905bee85f9def527`
-- final output workspace: clean
+The existing end-to-end acceptance evidence from the preceding development
+pass remains valid for the unchanged provider/proof path:
 
-The output includes exact task and input manifests, the verification report,
-Lean evidence and Git history, setup/build logs, final response, Codex events,
-tool calls, and structured result JSON. The 7.1 GB `.lake` tree resolves to
-`$HOME/.cache/repoprover-codex/lake/builds/workspace-44fcafe4a6db`, outside the
-360 KB task output and outside Dropbox, as designed.
+- a Codex dynamic-tool smoke turn completed using the existing Codex login;
+- a real RepoProver `ContributorAgent` replaced a committed `sorry`, invoked
+  RepoProver's `lean_check`, and passed independent final Lean verification;
+- a LaTeX-only manuscript plus a Markdown task file produced a verified Lean
+  result and passed an independent final `lake build`; and
+- exactly two Codex-backed dynamic-tool turns completed concurrently.
 
-### Concurrency
+The 0.3.0 pass reran app-server initialization and inventory checks, but did not
+spend another model turn on those unchanged scenarios. Its new real acceptance
+work targeted the dependency sharing, disk-bound, lease, packaging, and local
+installation paths.
 
-Exactly two isolated Codex-backed agents ran concurrently in one Python process.
-Each created a separate thread and turn, called the registered `echo` tool once,
-and completed successfully. This validates the package-level two-turn semaphore;
-it is not a claim that two concurrent Lean proof jobs were exercised.
+## Platform boundary
 
-## Repository state and remaining boundary
-
-- Package local integration commit: `8408f7d`
-- Capability-isolation commit: `d9fa357`
-- Installer/compiler guard commit: `1886d49`
-- Home-local Lean-cache implementation commit:
-  `14c751bac2b5cbcbf5413de4da8a7dc41fbf455d`
-- Publication repository: `https://github.com/vitskov/repoprover-codex`
-  (public, `main`)
-- 0.2.0 manuscript-interface changes: local and tested, not yet pushed
-- RepoProver sibling checkout: clean and unmodified
-- Upstream PR/issue activity: none
-
-The publication audit scanned the current tracked tree and every historical Git
-blob for private-key material, common GitHub/OpenAI/cloud token formats, OAuth
-token JSON, and assigned secrets, with no findings. A separate `detect-secrets`
-scan found no tracked findings. No credential files, private keys, virtual
-environments, Lean caches, Python caches, package build output, or temporary
-test files are tracked. The initial import commit historically contained
-generated `build/lib` source copies; they were removed in commit `8408f7d` and
-remain absent from the current tree while preserving the requested history.
-
-Linux remains a documented target but was not available for this local
-acceptance run. Any future Codex protocol/config change that prevents the
-inventory checks from proving isolation will now fail closed rather than start a
-RepoProver turn with unverified local capabilities.
+Linux remains a supported target in the portable implementation, but no Linux
+machine was available for this acceptance run. Cache leases require POSIX
+`flock`, consistent with the documented macOS/Linux support boundary.
