@@ -1,13 +1,16 @@
 """UI-neutral application workflow for Proof Assistant."""
 
 from .contracts import (
+    CancellationReport,
     ChangeImpactPlan,
     ClarificationPresentation,
     FileChange,
     FindingSummary,
+    LatexSourceCandidate,
     NewProjectRequest,
     ProgressEvent,
     ProjectSummary,
+    SourceInspection,
     SourceLocation,
     VerificationSettings,
     WorkflowSnapshot,
@@ -15,14 +18,17 @@ from .contracts import (
 )
 
 __all__ = [
+    "CancellationReport",
     "ChangeImpactPlan",
     "ClarificationPresentation",
     "FileChange",
     "FindingSummary",
+    "LatexSourceCandidate",
     "NewProjectRequest",
     "ProgressEvent",
     "ProjectSummary",
     "SourceLocation",
+    "SourceInspection",
     "VerificationSettings",
     "CancellationFlag",
     "ProofAssistantWorkflow",

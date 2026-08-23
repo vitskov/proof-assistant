@@ -37,6 +37,7 @@ def test_workflow_contract_values_are_json_serializable(tmp_path):
     request = NewProjectRequest(
         name="paper",
         source_path=tmp_path / "source",
+        main_file="main.tex",
         settings=VerificationSettings(model="model"),
     )
     payload = contract_dict(request)
@@ -49,6 +50,7 @@ def test_distribution_identity_and_version_are_consistent():
     project = configuration["project"]
     assert project["name"] == "proof-assistant"
     assert project["version"] == proof_assistant.__version__ == "0.1.0"
+    assert project["license"] == "CC-BY-NC-4.0"
     assert project["scripts"]["proof-assistant"] == "proof_assistant.cli:main"
     assert project["scripts"]["repoprover-codex"] == "proof_assistant.cli:main"
     assert "textual>=1,<2" in project["dependencies"]

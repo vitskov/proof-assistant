@@ -32,8 +32,10 @@ instructions: >
   sorry, admit, or new axioms.
 ```
 
-An empty `targets` list means all indexed theorem-like claims. This is different
-from “verify nothing.”
+An empty `targets` list means all theorem-like claims indexed from the project's
+persisted main file and its recursive input closure. It does not include an
+alternate root or orphaned LaTeX draft in the same source folder, and it is
+different from “verify nothing.”
 
 ## Custom instructions
 

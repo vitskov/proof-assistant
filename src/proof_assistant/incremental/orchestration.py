@@ -133,7 +133,35 @@ class VerificationResult:
 
 
 class VerificationCancelled(RuntimeError):
-    pass
+    """Cooperative cancellation with durable recovery facts for UI clients."""
+
+    def __init__(
+        self,
+        message: str = "Verification cancelled",
+        *,
+        run_id: int | None = None,
+        preserved_certificates: tuple[str, ...] = (),
+        retryable_claims: tuple[str, ...] = (),
+        temporary_worktrees_cleaned: bool = True,
+    ) -> None:
+        super().__init__(message)
+        self.run_id = run_id
+        self.preserved_certificates = preserved_certificates
+        self.retryable_claims = retryable_claims
+        self.temporary_worktrees_cleaned = temporary_worktrees_cleaned
+
+    def record_recovery(
+        self,
+        *,
+        run_id: int,
+        preserved_certificates: Sequence[str],
+        retryable_claims: Sequence[str],
+        temporary_worktrees_cleaned: bool,
+    ) -> None:
+        self.run_id = run_id
+        self.preserved_certificates = tuple(sorted(preserved_certificates))
+        self.retryable_claims = tuple(sorted(retryable_claims))
+        self.temporary_worktrees_cleaned = temporary_worktrees_cleaned
 
 
 def _git(path: Path, arguments: Sequence[str], *, check: bool = True) -> str:
@@ -433,10 +461,70 @@ def _merge_batch(project: Path, result: BatchResult) -> str | None:
     return None
 
 
-def _remove_worktree(project: Path, workspace: Path) -> None:
-    _git(project, ["worktree", "remove", "--force", str(workspace)], check=False)
+def _remove_worktree(project: Path, workspace: Path) -> bool:
+    try:
+        _git(project, ["worktree", "remove", "--force", str(workspace)], check=False)
+    except Exception:
+        pass
     shutil.rmtree(workspace, ignore_errors=True)
-    _git(project, ["worktree", "prune"], check=False)
+    try:
+        _git(project, ["worktree", "prune"], check=False)
+    except Exception:
+        pass
+    return not workspace.exists()
+
+
+def _execute_batch_round(
+    project: Path,
+    jobs: Sequence[BatchJob],
+    *,
+    max_workers: int,
+    checkpoint: Callable[[], None],
+) -> list[tuple[BatchResult, str | None]]:
+    """Run, boundary-check, and merge one proof frontier with assured cleanup.
+
+    Cancellation is observed after all workers have stopped but *before* any
+    candidate commit is merged into the authoritative project.  Once merging
+    begins there is intentionally no cancellation checkpoint: the caller must
+    finish the independent build and kernel-certification boundary before it
+    observes cancellation again.
+    """
+    results: list[BatchResult] = []
+    try:
+        if max_workers == 1:
+            results = [_run_batch_worker(job) for job in jobs]
+        else:
+            with ProcessPoolExecutor(max_workers=max_workers) as executor:
+                futures = {executor.submit(_run_batch_worker, job): job for job in jobs}
+                for future in as_completed(futures):
+                    results.append(future.result())
+        checkpoint()
+        return [
+            (result, _merge_batch(project, result))
+            for result in sorted(results, key=lambda item: item.index)
+        ]
+    finally:
+        for job in jobs:
+            _remove_worktree(project, Path(job.workspace))
+
+
+def _cleanup_run_worktrees(project: Path, layout: CacheLayout, *, run_id: int) -> bool:
+    """Best-effort recovery sweep for every temporary worktree in one run."""
+    root = layout.worktrees / "incremental" / hashlib_sha(project) / f"run-{run_id:06d}"
+    if root.is_dir():
+        try:
+            workspaces = sorted(root.iterdir())
+        except OSError:
+            workspaces = []
+        for workspace in workspaces:
+            if workspace.is_dir():
+                _remove_worktree(project, workspace)
+        shutil.rmtree(root, ignore_errors=True)
+    try:
+        _git(project, ["worktree", "prune"], check=False)
+    except Exception:
+        pass
+    return not root.exists()
 
 
 def verify_project(
@@ -458,9 +546,14 @@ def verify_project(
                     str(exc) or "Verification cancelled"
                 ) from exc
 
-    def notify(phase: str, message: str, **details: object) -> None:
+    def notify(
+        phase: str,
+        message: str,
+        details: dict[str, object] | None = None,
+        **extra_details: object,
+    ) -> None:
         if event_hook is not None:
-            event_hook(phase, message, details)
+            event_hook(phase, message, {**(details or {}), **extra_details})
 
     options.validate()
     checkpoint()
@@ -471,21 +564,24 @@ def verify_project(
         prepared: PreparedPass | None = None
         try:
             runtime_env, compiler = _runtime_environment(layout)
-            notify("CACHE_SETUP", "Prepared the shared Lean cache runtime")
+            notify(
+                "VALIDATING",
+                "Validated the Lean runtime and native compiler",
+                compiler=compiler,
+            )
             provisional_environment, _inputs = environment_fingerprint(session.project)
             prepared = session.prepare_pass(
                 manuscript=manuscript,
                 task_file=task_file,
                 environment_hash=provisional_environment,
                 expected_inventory_sha256=expected_inventory_sha256,
+                event_hook=notify,
                 _already_locked=True,
             )
             checkpoint()
             notify(
-                "IMPACT_ANALYSIS",
-                "Imported the stable manuscript snapshot and computed affected claims",
-                affected=len(prepared.affected),
-                selected=len(prepared.selected),
+                "CACHE_SETUP",
+                "Preparing the shared Lean cache and dependency depot",
             )
             run_directory = session.runs / f"{prepared.run_id:06d}"
             policy = cache_policy(layout.load_config())
@@ -709,19 +805,13 @@ def verify_project(
                                 options=options,
                             )
                         )
-                    results: list[BatchResult] = []
-                    if options.jobs == 1:
-                        results = [_run_batch_worker(job) for job in jobs]
-                    else:
-                        with ProcessPoolExecutor(max_workers=options.jobs) as executor:
-                            futures = {
-                                executor.submit(_run_batch_worker, job): job
-                                for job in jobs
-                            }
-                            for future in as_completed(futures):
-                                results.append(future.result())
-                    for result in sorted(results, key=lambda item: item.index):
-                        error = _merge_batch(session.project, result)
+                    merged_results = _execute_batch_round(
+                        session.project,
+                        jobs,
+                        max_workers=options.jobs,
+                        checkpoint=checkpoint,
+                    )
+                    for result, error in merged_results:
                         if result.provider_failure:
                             provider_errors.append(result.provider_failure)
                         if error:
@@ -743,9 +833,6 @@ def verify_project(
                                             category=classify_failure(error),
                                             message=error,
                                         )
-                        _remove_worktree(session.project, Path(result.workspace))
-                    checkpoint()
-
                     source_mutation = _git(
                         session.project,
                         [
@@ -959,22 +1046,87 @@ def verify_project(
                 )
         except Exception as exc:
             if prepared is not None:
+                cancelled = isinstance(exc, VerificationCancelled)
+                temporary_worktrees_cleaned = _cleanup_run_worktrees(
+                    session.project, layout, run_id=prepared.run_id
+                )
                 with StateStore(session.database_path) as store:
-                    store.finish_run(
-                        prepared.run_id,
-                        status=(
-                            "INTERRUPTED"
-                            if isinstance(exc, VerificationCancelled)
-                            else "FAILED"
-                        ),
-                        outcome=(
-                            "interrupted"
-                            if isinstance(exc, VerificationCancelled)
-                            else "setup_failure"
-                        ),
-                        completed_at=utc_now(),
-                        detail=f"{type(exc).__name__}: {exc}",
+                    with store.transaction() as connection:
+                        retryable_claims = store.reset_in_flight_claims(
+                            run_id=prepared.run_id,
+                            action=(
+                                "cancel_retry" if cancelled else "failed_run_retry"
+                            ),
+                            reason=(
+                                "Verification was safely cancelled; proof must be retried"
+                                if cancelled
+                                else "Verification failed before certification; proof must be retried"
+                            ),
+                            connection=connection,
+                        )
+                        store.finish_run(
+                            prepared.run_id,
+                            status="INTERRUPTED" if cancelled else "FAILED",
+                            outcome="interrupted" if cancelled else "setup_failure",
+                            completed_at=utc_now(),
+                            detail=f"{type(exc).__name__}: {exc}",
+                        )
+                    preserved_certificates = tuple(
+                        sorted(str(row["claim_id"]) for row in store.certificate_rows())
                     )
+                    try:
+                        session._export_state(
+                            store,
+                            prepared.objects,
+                            _edges(store),
+                            prepared.snapshot,
+                        )
+                        session._write_status_files(store=store)
+                    except Exception:
+                        # Recovery state is authoritative in SQLite even when a
+                        # secondary human-readable export cannot be refreshed.
+                        pass
+                if cancelled:
+                    cancellation = exc
+                    assert isinstance(cancellation, VerificationCancelled)
+                    cancellation.record_recovery(
+                        run_id=prepared.run_id,
+                        preserved_certificates=preserved_certificates,
+                        retryable_claims=retryable_claims,
+                        temporary_worktrees_cleaned=temporary_worktrees_cleaned,
+                    )
+                    try:
+                        atomic_write_json(
+                            session.runs / f"{prepared.run_id:06d}" / "run.json",
+                            {
+                                "schema_version": 1,
+                                "command": "manuscript verify",
+                                "run_id": prepared.run_id,
+                                "snapshot": prepared.snapshot.commit,
+                                "outcome": "interrupted",
+                                "detail": str(cancellation),
+                                "preserved_certificates": list(
+                                    cancellation.preserved_certificates
+                                ),
+                                "retryable_claims": list(cancellation.retryable_claims),
+                                "temporary_worktrees_cleaned": (
+                                    cancellation.temporary_worktrees_cleaned
+                                ),
+                            },
+                        )
+                    except Exception:
+                        # SQLite recovery and the typed exception still carry
+                        # the interruption facts if the filesystem is full.
+                        pass
+                    try:
+                        session._commit_host_changes(
+                            "Record safely interrupted verification run "
+                            f"{prepared.run_id:06d}"
+                        )
+                    except Exception:
+                        # SQLite and the atomic run artifact already contain
+                        # the durable interruption result.
+                        pass
             raise
 
 

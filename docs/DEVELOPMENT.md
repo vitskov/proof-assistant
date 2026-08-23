@@ -56,21 +56,27 @@ Codex login is sufficient.
 
 Test the Textual app with its pilot/headless driver. Cover:
 
-1. new-project and resume selection;
-2. default and customized project-owned task;
-3. external Dropbox-source warning without rejecting the source;
-4. rejection of Dropbox managed project destinations;
-5. clarification rendering with the actual multi-file source path and
+1. one-file automatic main-file announcement, multi-file explicit root
+   selection, and resume without reselection;
+2. new-project and resume selection;
+3. default and customized project-owned task;
+4. external Dropbox-source warning without rejecting the source;
+5. rejection of Dropbox managed project destinations;
+6. a progress view that lists the main/input closure, shows every typed stage,
+   and exposes selectable/copyable read-only text;
+7. clarification rendering with the actual multi-file source path and
    highlighted lines;
-6. stable multi-file change detection and complete impact preview;
-7. explicit confirmation, plus rejection/recomputation of stale plans;
-8. no-change resume returning to the existing clarification screen;
-9. interrupted/failure recovery and read-only active-project status; and
-10. findings categories and evidence paths.
+8. stable multi-file change detection and complete impact preview;
+9. explicit confirmation, plus rejection/recomputation of stale plans;
+10. no-change resume returning to the existing clarification screen;
+11. interrupted/failure recovery and read-only active-project status; and
+12. findings categories and evidence paths.
 
 Backend source tests must cover rapid editor-style replace sequences,
 simultaneous changes to several `\input` files, adds/deletes/renames, and staged
-copy mutation. Do not make wall-clock sleeps the correctness mechanism.
+copy mutation. They must also cover nested/cyclic input closure, alternate and
+orphan roots, missing/dynamic/escaping includes, and duplicate labels outside
+the selected closure. Do not make wall-clock sleeps the correctness mechanism.
 
 ## Incremental verification acceptance
 

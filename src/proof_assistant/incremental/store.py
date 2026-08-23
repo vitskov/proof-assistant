@@ -269,15 +269,112 @@ class StateStore:
         return f"{kind}:auto-{current:06d}"
 
     def recover_interrupted_runs(self, now: str) -> int:
-        cursor = self.connection.execute(
-            """
-            UPDATE runs SET status = 'INTERRUPTED', outcome = 'interrupted',
-                completed_at = ?, detail = 'Recovered after process interruption'
-            WHERE status = 'RUNNING'
-            """,
-            (now,),
-        )
+        """Recover abandoned runs and make every in-flight claim retryable.
+
+        This method is called while the project writer lock is held, before a
+        new run is allocated.  Consequently, any remaining ``PROVING`` state
+        belongs to an abandoned writer and must never survive recovery.
+        ``INVALIDATED`` is deliberately used as the conservative retry state:
+        it carries no certification authority and is part of the scheduler's
+        ready frontier.
+        """
+        with self.transaction() as connection:
+            running = list(
+                connection.execute(
+                    "SELECT run_id FROM runs WHERE status = 'RUNNING' ORDER BY run_id"
+                )
+            )
+            running_ids = {int(row["run_id"]) for row in running}
+            proving_run_ids = {
+                int(row["last_changed_run"])
+                for row in connection.execute(
+                    """
+                    SELECT DISTINCT last_changed_run FROM claims
+                    WHERE status = ? AND retired = 0
+                      AND last_changed_run IS NOT NULL
+                    """,
+                    (str(ClaimState.PROVING),),
+                )
+            }
+            for run_id in sorted(proving_run_ids):
+                self.reset_in_flight_claims(
+                    run_id=run_id,
+                    action=(
+                        "recover_interrupted"
+                        if run_id in running_ids
+                        else "recover_orphaned_proving"
+                    ),
+                    reason=(
+                        "Recovered after process interruption; proof must be retried"
+                        if run_id in running_ids
+                        else "Recovered stale in-flight state; proof must be retried"
+                    ),
+                    connection=connection,
+                )
+            # A PROVING row without provenance is malformed legacy state, but
+            # it is still non-authoritative and must not strand the scheduler.
+            connection.execute(
+                """
+                UPDATE claims SET status = ?
+                WHERE status = ? AND retired = 0 AND last_changed_run IS NULL
+                """,
+                (str(ClaimState.INVALIDATED), str(ClaimState.PROVING)),
+            )
+            cursor = connection.execute(
+                """
+                UPDATE runs SET status = 'INTERRUPTED', outcome = 'interrupted',
+                    completed_at = ?, detail = 'Recovered after process interruption'
+                WHERE status = 'RUNNING'
+                """,
+                (now,),
+            )
         return cursor.rowcount
+
+    def reset_in_flight_claims(
+        self,
+        *,
+        run_id: int,
+        action: str,
+        reason: str,
+        connection: sqlite3.Connection | None = None,
+    ) -> tuple[str, ...]:
+        """Reset this run's non-authoritative ``PROVING`` claims for retry."""
+        database = connection or self.connection
+        rows = list(
+            database.execute(
+                """
+                SELECT claim_id FROM claims
+                WHERE status = ? AND last_changed_run = ? AND retired = 0
+                ORDER BY claim_id
+                """,
+                (str(ClaimState.PROVING), run_id),
+            )
+        )
+        for row in rows:
+            claim_id = str(row["claim_id"])
+            database.execute(
+                """
+                UPDATE claims SET status = ?, last_changed_run = ?
+                WHERE claim_id = ?
+                """,
+                (str(ClaimState.INVALIDATED), run_id, claim_id),
+            )
+            database.execute(
+                """
+                INSERT OR REPLACE INTO run_claims(
+                    run_id, claim_id, action, state_before, state_after, reason, reused
+                ) VALUES (?, ?, ?, ?, ?, ?, 0)
+                """,
+                (
+                    run_id,
+                    claim_id,
+                    action,
+                    str(ClaimState.PROVING),
+                    str(ClaimState.INVALIDATED),
+                    reason,
+                ),
+            )
+        return tuple(str(row["claim_id"]) for row in rows)
 
     def begin_run(
         self,

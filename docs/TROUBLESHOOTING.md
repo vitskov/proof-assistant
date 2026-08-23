@@ -14,8 +14,10 @@ certificates, open questions, Lean code, and reports remain durable.
 
 ## A project appears quiet
 
-The TUI progress screen is phase-oriented. Advanced status remains readable
-during an active writer:
+The TUI progress screen names the selected main file, lists its resolved input
+closure, and gives phase/substage messages in separate read-only text areas.
+Focus any area to select and copy its text (`Ctrl+A`, then `Ctrl+C`, copies that
+entire pane). Advanced status remains readable during an active writer:
 
 ```bash
 proof-assistant manuscript status --project "$PROJECT"
@@ -39,6 +41,26 @@ ps -axo pid,ppid,etime,state,%cpu,%mem,command | \
 
 Compare elapsed time with `--turn-timeout`; that timeout applies to each Codex
 batch, not the complete manuscript.
+
+## The selected main file cannot be indexed
+
+Proof Assistant fails closed when `\input` or `\include` names a missing file,
+an absolute path, a path outside the selected source folder, or a dynamic path
+it cannot resolve deterministically. Fix the command in the author source and
+try again. Do not copy an external file into the managed manuscript snapshot by
+hand.
+
+Only the selected main file and its recursive input closure are indexed. If an
+expected theorem is absent, first confirm that its file is reachable from the
+persisted main file. Conversely, a theorem in another root or an orphaned draft
+is intentionally excluded.
+
+Projects created before the mandatory-main-file contract can resume
+automatically when their source has one LaTeX file or one uniquely identifiable
+document root. If several roots remain possible, resume enters recovery instead
+of guessing. Create a new managed project for the same source in the TUI, or use
+`manuscript init --main-file PATH` with a new project destination. The legacy
+project and its evidence remain untouched.
 
 ## Clarification returns after resume
 

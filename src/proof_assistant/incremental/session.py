@@ -6,7 +6,7 @@ import re
 import shutil
 import subprocess
 import tempfile
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -28,7 +28,13 @@ from .graph import (
     source_changes,
 )
 from .io import atomic_write_json, atomic_write_text, canonical_hash
-from .latex import explicit_reference_graph, index_manuscript
+from .latex import (
+    LatexIndexError,
+    discover_latex_sources,
+    explicit_reference_graph,
+    index_manuscript,
+    resolve_latex_closure,
+)
 from .lean import install_dependency_extractor
 from .locking import ProjectLockedError, project_lock
 from .models import ClaimState, ManuscriptEdge, Snapshot, SourceObject, TaskSpec
@@ -36,7 +42,7 @@ from .snapshot import SnapshotRepository, sync_project_manuscript
 from .store import StateStore
 from .task import parse_task_file, parse_task_text, task_document
 
-PROJECT_CONFIG_VERSION = 1
+PROJECT_CONFIG_VERSION = 2
 PROJECT_GITIGNORE = """\
 /.lake/
 /.repoprover/
@@ -82,6 +88,8 @@ class PreparedPass:
     cycles: tuple[tuple[str, ...], ...]
     source_diff: str
     baseline_commit: str
+    main_file: str
+    input_files: tuple[str, ...]
 
 
 def utc_now() -> str:
@@ -127,6 +135,7 @@ class IncrementalSession:
         project_name: str | None = None,
         project_id: str | None = None,
         source_in_dropbox: bool = False,
+        main_file: str,
     ) -> IncrementalSession:
         source = Path(manuscript).expanduser().resolve()
         destination = Path(project).expanduser().resolve()
@@ -136,6 +145,12 @@ class IncrementalSession:
             raise ManuscriptInputError(
                 "Manuscript and persistent project directories must not contain one another"
             )
+        try:
+            source_files = resolve_latex_closure(source, main_file)
+        except LatexIndexError as exc:
+            raise ManuscriptInputError(str(exc)) from exc
+        normalized_main = source_files[0]
+        input_files = source_files[1:]
         if destination.exists():
             if not destination.is_dir() or any(destination.iterdir()):
                 raise IncrementalProjectError(
@@ -166,6 +181,8 @@ class IncrementalSession:
                 "schema_version": PROJECT_CONFIG_VERSION,
                 "created_at": utc_now(),
                 "manuscript": str(source),
+                "main_file": normalized_main,
+                "input_files": list(input_files),
                 "task_file": configured_task_path,
                 "name": project_name or destination.name,
                 "project_id": project_id
@@ -179,6 +196,8 @@ class IncrementalSession:
             )
             with StateStore(session.database_path) as store:
                 store.set_metadata("manuscript", str(source))
+                store.set_metadata("main_file", normalized_main)
+                store.set_metadata("input_files", json.dumps(input_files))
                 store.set_metadata("task_file", configured_task_path)
                 store.set_metadata("task_sha256", task_sha256)
                 store.set_metadata(
@@ -205,7 +224,9 @@ class IncrementalSession:
                 manuscript_copy = sync_project_manuscript(
                     session.snapshots, snapshot.commit, staging
                 )
-                objects = index_manuscript(manuscript_copy, store)
+                objects = index_manuscript(
+                    manuscript_copy, store, main_file=normalized_main
+                )
                 edges, unresolved = explicit_reference_graph(objects)
                 cycles = canonical_cycles(
                     build_graph((item.claim_id for item in objects), edges)
@@ -299,7 +320,7 @@ class IncrementalSession:
     def _load_config(self) -> dict[str, Any]:
         if not self.config_path.is_file():
             raise IncrementalProjectError(
-                f"Not an incremental RepoProver project: {self.project}"
+                f"Not a Proof Assistant project: {self.project}"
             )
         try:
             config = json.loads(self.config_path.read_text(encoding="utf-8"))
@@ -307,8 +328,77 @@ class IncrementalSession:
             raise IncrementalProjectError(
                 f"Invalid project configuration: {exc}"
             ) from exc
-        if config.get("schema_version") != PROJECT_CONFIG_VERSION:
+        schema_version = config.get("schema_version")
+        if schema_version not in {1, PROJECT_CONFIG_VERSION}:
             raise IncrementalProjectError("Unsupported incremental project schema")
+        if "main_file" not in config:
+            source = Path(str(config.get("manuscript", ""))).expanduser().resolve()
+            try:
+                candidates = discover_latex_sources(source)
+            except LatexIndexError as exc:
+                raise IncrementalProjectError(str(exc)) from exc
+            document_roots = [path for path, is_root in candidates if is_root]
+            if len(candidates) == 1:
+                main_file = candidates[0][0]
+            elif len(document_roots) == 1:
+                main_file = document_roots[0]
+            else:
+                choices = ", ".join(path for path, _is_root in candidates)
+                raise IncrementalProjectError(
+                    "This legacy project has no selected main LaTeX file and "
+                    "the choice is ambiguous. Start a new managed project in "
+                    "Proof Assistant and select the root, or set the relative "
+                    "`main_file` in .repoprover/config.json before resuming. "
+                    f"Candidates: {choices}"
+                )
+            try:
+                closure = resolve_latex_closure(source, main_file)
+            except LatexIndexError as exc:
+                raise IncrementalProjectError(str(exc)) from exc
+            config.update(
+                {
+                    "schema_version": PROJECT_CONFIG_VERSION,
+                    "main_file": closure[0],
+                    "input_files": list(closure[1:]),
+                    "package_version": __version__,
+                }
+            )
+            atomic_write_json(self.config_path, config)
+            if self.database_path.is_file():
+                with StateStore(self.database_path) as store:
+                    store.set_metadata("main_file", closure[0])
+                    store.set_metadata("input_files", json.dumps(closure[1:]))
+        elif schema_version != PROJECT_CONFIG_VERSION:
+            source = Path(str(config.get("manuscript", ""))).expanduser().resolve()
+            try:
+                closure = resolve_latex_closure(source, str(config["main_file"]))
+            except LatexIndexError as exc:
+                raise IncrementalProjectError(str(exc)) from exc
+            config.update(
+                {
+                    "schema_version": PROJECT_CONFIG_VERSION,
+                    "main_file": closure[0],
+                    "input_files": list(closure[1:]),
+                    "package_version": __version__,
+                }
+            )
+            atomic_write_json(self.config_path, config)
+            if self.database_path.is_file():
+                with StateStore(self.database_path) as store:
+                    store.set_metadata("main_file", closure[0])
+                    store.set_metadata("input_files", json.dumps(closure[1:]))
+        main_file = config.get("main_file")
+        if not isinstance(main_file, str) or not main_file.strip():
+            raise IncrementalProjectError(
+                "Project configuration must specify a non-empty relative `main_file`"
+            )
+        input_files = config.get("input_files", [])
+        if not isinstance(input_files, list) or not all(
+            isinstance(value, str) for value in input_files
+        ):
+            raise IncrementalProjectError(
+                "Project configuration `input_files` must be a list of relative paths"
+            )
         return config
 
     def _task_path_from_config(self, config: dict[str, Any]) -> Path:
@@ -347,10 +437,21 @@ class IncrementalSession:
         task_file: str | Path | None = None,
         environment_hash: str | None = None,
         expected_inventory_sha256: str | None = None,
+        event_hook: Callable[[str, str, dict[str, object]], None] | None = None,
         _already_locked: bool = False,
     ) -> PreparedPass:
+        def notify(phase: str, message: str, **details: object) -> None:
+            if event_hook is not None:
+                event_hook(phase, message, details)
+
         config = self._load_config()
         source = Path(manuscript or config["manuscript"]).expanduser().resolve()
+        main_file = str(config["main_file"])
+        try:
+            source_files = resolve_latex_closure(source, main_file)
+        except LatexIndexError as exc:
+            raise ManuscriptInputError(str(exc)) from exc
+        input_files = source_files[1:]
         task_path_value = task_file or self._task_path_from_config(config)
         task_path, task_text, task_sha256, task = parse_task_file(task_path_value)
         if not source.is_dir():
@@ -373,6 +474,13 @@ class IncrementalSession:
                     environment_hash=environment_hash,
                 )
                 try:
+                    notify(
+                        "OBSERVING_SOURCE",
+                        "Reading a stable inventory of the authoritative source",
+                        source_path=str(source),
+                        main_file=main_file,
+                        input_files=input_files,
+                    )
                     snapshot = self.snapshots.create(
                         source,
                         run_id=run_id,
@@ -407,13 +515,42 @@ class IncrementalSession:
                         )
                         for row in store.manuscript_edges()
                     )
+                    notify(
+                        "IMPORTING_SOURCE",
+                        "Importing the reviewed source snapshot into the managed project",
+                        snapshot=snapshot.commit,
+                        main_file=main_file,
+                        input_files=input_files,
+                    )
                     manuscript_copy = sync_project_manuscript(
                         self.snapshots, snapshot.commit, self.project
+                    )
+                    notify(
+                        "IMPORTING_SOURCE",
+                        "Imported the reviewed source snapshot into the managed project",
+                        snapshot=snapshot.commit,
+                        main_file=main_file,
+                        input_files=input_files,
                     )
                     atomic_write_text(
                         self.project / "RepoProverInput" / "TASK.md", task_text
                     )
-                    objects = index_manuscript(manuscript_copy, store)
+                    notify(
+                        "INDEXING",
+                        "Indexing the selected main file and recursive input closure",
+                        main_file=main_file,
+                        input_files=input_files,
+                        files=1 + len(input_files),
+                    )
+                    objects = index_manuscript(
+                        manuscript_copy, store, main_file=main_file
+                    )
+                    notify(
+                        "INDEXING",
+                        "Indexed mathematical statements from the selected source",
+                        objects=len(objects),
+                        files=1 + len(input_files),
+                    )
                     explicit_edges, unresolved = explicit_reference_graph(objects)
                     current_ids = {item.claim_id for item in objects}
                     persistent_edges = tuple(
@@ -512,6 +649,14 @@ class IncrementalSession:
                     )
                     if not selected:
                         selected = set(targets)
+                    notify(
+                        "IMPACT_ANALYSIS",
+                        "Computed direct changes, descendants, and proof targets",
+                        directly_changed=len(statement_changed | proof_changed),
+                        deleted=len(deleted),
+                        affected=len(affected),
+                        selected=len(selected),
+                    )
                     if not task.policy.preserve_certified:
                         for claim_id in sorted(selected):
                             if store.certificate(claim_id) is None:
@@ -546,6 +691,8 @@ class IncrementalSession:
                         },
                     )
                     store.set_metadata("manuscript", str(source))
+                    store.set_metadata("main_file", main_file)
+                    store.set_metadata("input_files", json.dumps(input_files))
                     stored_task_path = (
                         "VERIFY.yaml"
                         if task_path.resolve()
@@ -560,6 +707,8 @@ class IncrementalSession:
                     config.update(
                         {
                             "manuscript": str(source),
+                            "main_file": main_file,
+                            "input_files": list(input_files),
                             "task_file": stored_task_path,
                             "package_version": __version__,
                         }
@@ -588,6 +737,8 @@ class IncrementalSession:
                         cycles=cycles,
                         source_diff=source_diff,
                         baseline_commit=baseline_commit,
+                        main_file=main_file,
+                        input_files=input_files,
                     )
                 except Exception as exc:
                     store.finish_run(
@@ -745,7 +896,7 @@ class IncrementalSession:
                 store.close()
 
     def status(self) -> dict[str, Any]:
-        self._load_config()
+        config = self._load_config()
         mutation_in_progress = False
         try:
             lock_context = project_lock(self.project, exclusive=False)
@@ -761,6 +912,8 @@ class IncrementalSession:
                 latest = store.latest_run()
                 return {
                     "project": str(self.project),
+                    "main_file": str(config["main_file"]),
+                    "input_files": tuple(config.get("input_files", [])),
                     "mutation_in_progress": mutation_in_progress,
                     "snapshot": store.previous_snapshot(),
                     "latest_run": dict(latest) if latest else None,

@@ -28,6 +28,8 @@ FIXTURE = Path(__file__).parent / "fixtures" / "incremental_manuscript"
                 "init",
                 "--manuscript",
                 "m",
+                "--main-file",
+                "main.tex",
                 "--project",
                 "p",
             ],
@@ -87,6 +89,21 @@ def test_public_project_commands_do_not_accept_external_task_files():
         )
 
 
+def test_manuscript_init_requires_explicit_main_file():
+    parser = build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            [
+                "manuscript",
+                "init",
+                "--manuscript",
+                "m",
+                "--project",
+                "p",
+            ]
+        )
+
+
 def test_parallelism_is_bounded_and_batches_are_deterministic():
     assert _partition(("A", "B", "C", "D", "E"), 2) == [
         ("A", "B"),
@@ -118,6 +135,7 @@ def test_deterministic_merge_accepts_only_assigned_claim_modules(tmp_path):
     project = tmp_path / "project"
     IncrementalSession.initialize(
         manuscript=FIXTURE,
+        main_file="main.tex",
         task_file=FIXTURE / "VERIFY.yaml",
         project=project,
     )

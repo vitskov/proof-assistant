@@ -4,18 +4,22 @@ Tested on 2026-08-23 in `America/New_York`.
 
 ## Result
 
-Proof Assistant 0.1.0 passed the complete automated suite, a clean wheel
-installation, mandatory native compiler execution, a real two-claim
-Codex-to-Lean verification, an unchanged certificate-reuse pass, and cache and
-repository hygiene checks.
+Proof Assistant 0.1.0 passed the complete automated suite, a clean Python 3.13
+wheel installation, mandatory native compiler execution, an installed-command
+multi-root manuscript acceptance, and cache and repository hygiene checks. The
+earlier provider-backed two-claim acceptance remains recorded separately below
+and was not rerun for this main-source/TUI development pass.
 
-- Complete automated suite: **155 passed**.
+- Complete automated suite: **186 passed**.
 - Supported installer: **passed**, including its mandatory compiler check and
   complete suite.
 - Fresh wheel and Python 3.13 environment: **passed**.
-- Textual Pilot suite from the installed wheel: **5 passed**.
-- Real small manuscript: **2/2 claims certified**.
-- Unchanged second pass: **2 certificates reused, 0 proof turns required**.
+- Textual Pilot suite: **9 passed**.
+- Installed multi-root sample: **1 selected claim indexed**, alternate root
+  excluded.
+- Earlier real small manuscript baseline: **2/2 claims certified**.
+- Earlier unchanged second pass: **2 certificates reused, 0 proof turns
+  required**.
 - Shared Mathlib depot: **reused**; no new `~/.cache/proof-assistant` tree.
 - RepoProver checkout: **clean and unchanged**.
 - Upstream RepoProver PR: **NOT CREATED**.
@@ -52,7 +56,7 @@ Command:
 /Users/vui1/.venvs/proof-assistant/bin/python -m pytest -q
 ```
 
-Result: `155 passed` (34.97 seconds in the final installer run).
+Result: `186 passed` (47.50 seconds in the final installer run).
 
 The suite covers:
 
@@ -61,8 +65,10 @@ The suite covers:
 - native compiler detection and compile-and-execute behavior;
 - cache admission, leases, shared dependency depots, bounded coarse-index GC,
   interrupted reconciliation, and Dropbox rejection;
-- deterministic LaTeX indexing, multi-input source spans, dependency graphs,
-  snapshots, SQLite state, correspondence, and kernel-backed certificates;
+- mandatory main-file inspection/selection, deterministic recursive LaTeX
+  closure indexing, multi-input source spans, alternate-root exclusion,
+  dependency graphs, snapshots, SQLite state, correspondence, and kernel-backed
+  certificates;
 - project-owned default/custom `VERIFY.yaml` and migration of older external
   task configurations;
 - stable before/copy/after source inventories, add/modify/delete/rename plans,
@@ -71,8 +77,11 @@ The suite covers:
   busy, clarification, and changed-source states;
 - exact clarification file/span/excerpt/blocked-claim presentation, strict
   optional Codex narration, deterministic fallback, and provenance storage;
-- Textual new/resume, task editing, progress, safe cancellation, exact source
-  display, change confirmation, findings, and recovery screens; and
+- Textual one-file/multi-file root selection, new/resume, task editing,
+  copyable detailed progress, cooperative cancellation reports, exact source
+  display, change confirmation, findings, and recovery screens;
+- cancellation boundary cleanup, durable certificate preservation, retryable
+  in-flight claims, and legacy orphaned-`PROVING` recovery; and
 - the architecture rule that backend code cannot import Textual or Rich.
 
 Ruff (`E`, `F`, `I`, `UP`), Ruff formatting, `compileall`, and
@@ -90,17 +99,18 @@ PROOF_ASSISTANT_PYTHON=3.13
 
 It used `uv`, installed the package and development dependencies, executed
 `proof-assistant compiler-check` before cache/test work, compiled and ran a C
-program with `/usr/bin/clang`, initialized the preserved cache, and ran all 155
+program with `/usr/bin/clang`, initialized the preserved cache, and ran all 186
 tests.
 
 An sdist and wheel were built outside Dropbox. The wheel was installed into a
 fresh Python 3.13.15 environment and validated for:
 
 - version `0.1.0` and distribution/import identity;
+- package license metadata `CC-BY-NC-4.0` matching `LICENSE`;
 - primary `proof-assistant` and deprecated 0.1 `repoprover-codex` entrypoints;
 - packaged `proof_assistant.lean/DependencyExtractor.lean` resource;
 - pinned supported Textual 1.x resolution (`1.0.0` in the test);
-- all five Textual Pilot tests from the installed wheel;
+- packaged main-file/cancellation contracts and Textual screens import cleanly;
 - native compiler compile/run; and
 - cache doctor against the existing shared cache.
 
@@ -109,7 +119,31 @@ incompatible Textual 8 release. The supported range was corrected to
 `textual>=1,<2`, guarded by a distribution-contract test, and the entire wheel
 gate was rerun successfully.
 
-## Real verification acceptance
+## Installed main-source acceptance
+
+The installed command was exercised against a fresh source container outside
+Dropbox with `paper.tex`, its nested `sections/result.tex` input, and an
+independent `alternate.tex` document containing a deliberately duplicate label.
+
+| Evidence | Value |
+|---|---|
+| discovered LaTeX candidates | 3 |
+| explicit selection required | yes |
+| conventional suggestion | `paper.tex` |
+| selected main file | `paper.tex` |
+| persisted input closure | `sections/result.tex` |
+| indexed claims | 1 |
+| duplicate label in alternate root | excluded; no error |
+| initialized snapshot | `8a801c92cb606d5aa8f3ac99aed48cd0d051540a` |
+
+The acceptance project and fresh wheel environment were moved to Trash after
+the evidence was recorded.
+
+## Earlier real verification acceptance
+
+The following provider-backed evidence was produced before this main-source/TUI
+pass and remains useful regression context. It was not rerun in the final 186-test
+gate.
 
 A fresh managed project outside Dropbox was initialized from the two-claim
 incremental manuscript fixture without an external task argument.
@@ -145,12 +179,12 @@ Final cache status:
 
 ```text
 root: /Users/vui1/.cache/repoprover-codex
-managed: 7.61 GiB
+managed: 8.84 GiB
 limit: 16.00 GiB
-filesystem free: 119.50 GiB
+filesystem free: 118.84 GiB
 minimum free: 25.00 GiB
 dependency depots: 7.06 GiB
-isolated project builds: 0.16 GiB
+isolated project builds: 1.38 GiB
 Mathlib downloads: 0.39 GiB
 active reservations: 0.00 GiB
 ```

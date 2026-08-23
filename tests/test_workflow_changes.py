@@ -7,16 +7,21 @@ from pathlib import Path
 import pytest
 
 from proof_assistant.incremental.models import ClaimState
-from proof_assistant.incremental.orchestration import VerificationResult
+from proof_assistant.incremental.orchestration import (
+    VerificationCancelled,
+    VerificationResult,
+)
 from proof_assistant.incremental.session import IncrementalSession
 from proof_assistant.incremental.store import StateStore
 from proof_assistant.workflow.contracts import (
     ClaimChangeKind,
     NewProjectRequest,
+    ProgressPhase,
     VerificationSettings,
     WorkflowState,
 )
 from proof_assistant.workflow.service import (
+    CancellationFlag,
     ProofAssistantWorkflow,
     StaleChangePlanError,
 )
@@ -34,7 +39,14 @@ def setup_project(tmp_path: Path, **kwargs):
         **kwargs,
     )
     project = tmp_path / "project"
-    workflow.create_project(NewProjectRequest("Paper", source, project))
+    workflow.create_project(
+        NewProjectRequest(
+            name="Paper",
+            source_path=source,
+            main_file="main.tex",
+            project_path=project,
+        )
+    )
     return source, project, workflow
 
 
@@ -92,6 +104,58 @@ def test_task_change_is_separate_from_external_file_changes(tmp_path):
     }
 
 
+def test_change_to_unselected_alternate_root_does_not_create_a_plan(tmp_path):
+    source, project, workflow = setup_project(tmp_path)
+    (source / "alternate.tex").write_text(
+        r"\begin{theorem}\label{lem:zero-add}Outside selected closure.\end{theorem}",
+        encoding="utf-8",
+    )
+    assert workflow.plan_changes(project) is None
+
+
+def test_change_plan_reports_selected_main_and_updated_recursive_inputs(tmp_path):
+    source = tmp_path / "paper"
+    (source / "parts").mkdir(parents=True)
+    (source / "main.tex").write_text(r"\input{parts/a}", encoding="utf-8")
+    (source / "parts/a.tex").write_text(
+        r"\begin{lemma}\label{a}A.\end{lemma}", encoding="utf-8"
+    )
+    workflow = ProofAssistantWorkflow(
+        catalog_root=tmp_path / "catalog", use_codex_clarification=False
+    )
+    project = tmp_path / "project"
+    workflow.create_project(
+        NewProjectRequest("Paper", source, "main.tex", project_path=project)
+    )
+    (source / "parts/b.tex").write_text(
+        r"\begin{lemma}\label{b}B.\end{lemma}", encoding="utf-8"
+    )
+    (source / "main.tex").write_text(
+        r"\input{parts/a}\input{parts/b}", encoding="utf-8"
+    )
+    plan = workflow.plan_changes(project)
+    assert plan is not None
+    assert plan.main_file == "main.tex"
+    assert plan.input_files == ("parts/a.tex", "parts/b.tex")
+    prepared = IncrementalSession(project).prepare_pass()
+    persisted = json.loads(
+        (project / ".repoprover/config.json").read_text(encoding="utf-8")
+    )
+    assert persisted["input_files"] == ["parts/a.tex", "parts/b.tex"]
+    with StateStore(project / ".repoprover/state.sqlite3") as store:
+        assert json.loads(store.get_metadata("input_files") or "null") == [
+            "parts/a.tex",
+            "parts/b.tex",
+        ]
+        store.finish_run(
+            prepared.run_id,
+            status="COMPLETE",
+            outcome="test",
+            completed_at="2026-08-23T00:00:00+00:00",
+            detail="test",
+        )
+
+
 def test_confirmation_rejects_a_plan_if_any_source_file_changed_again(tmp_path):
     source, project, workflow = setup_project(tmp_path)
     change_lemma(source, "first edit")
@@ -144,6 +208,111 @@ def test_confirmed_plan_passes_reviewed_digest_and_emits_typed_progress(
         "VALIDATING",
         "REPORTING",
     ]
+    assert events[0].details["main_file"] == "main.tex"
+    assert events[0].details["input_files"] == ()
+
+
+def test_progress_event_maps_typed_counts_and_claim_id(tmp_path):
+    workflow = ProofAssistantWorkflow(
+        catalog_root=tmp_path / "catalog", use_codex_clarification=False
+    )
+    events = []
+    workflow._emit(
+        events.append,
+        ProgressPhase.PROOF_BATCH,
+        "Proving claim",
+        details={"completed": 2, "total": 5, "claim_id": "lem:a"},
+    )
+    assert events[0].completed == 2
+    assert events[0].total == 5
+    assert events[0].claim_id == "lem:a"
+
+
+def test_pre_run_cancellation_returns_durable_empty_recovery_report(tmp_path):
+    _source, project, workflow = setup_project(tmp_path)
+    cancellation = CancellationFlag()
+    cancellation.cancel()
+    result = workflow.confirm_and_verify(
+        project,
+        None,
+        VerificationSettings(model="unused"),
+        cancellation=cancellation,
+    )
+    assert result.state == WorkflowState.INTERRUPTED
+    assert result.cancellation is not None
+    assert result.cancellation.run_id is None
+    assert result.cancellation.retryable_claims == ()
+    assert result.cancellation.temporary_worktrees_cleaned is True
+
+
+def test_verifier_cancellation_facts_are_preserved_in_workflow_contract(
+    tmp_path, monkeypatch
+):
+    _source, project, workflow = setup_project(tmp_path)
+
+    def cancel_verify(*_args, **_kwargs):
+        raise VerificationCancelled(
+            "Stopped at a safe boundary",
+            run_id=7,
+            preserved_certificates=("lem:a",),
+            retryable_claims=("thm:b",),
+            temporary_worktrees_cleaned=True,
+        )
+
+    monkeypatch.setattr(
+        "proof_assistant.workflow.service.verify_project", cancel_verify
+    )
+    result = workflow.confirm_and_verify(
+        project, None, VerificationSettings(model="unused")
+    )
+    assert result.state == WorkflowState.INTERRUPTED
+    assert result.cancellation is not None
+    assert result.cancellation.run_id == 7
+    assert result.cancellation.preserved_certificates == ("lem:a",)
+    assert result.cancellation.retryable_claims == ("thm:b",)
+    assert result.cancellation.temporary_worktrees_cleaned is True
+
+
+def test_prepared_none_verifier_cancellation_reads_persisted_certificates(
+    tmp_path, monkeypatch
+):
+    _source, project, workflow = setup_project(tmp_path)
+    session = IncrementalSession(project)
+    snapshot = session.status()["snapshot"]
+    with StateStore(session.database_path) as store:
+        store.upsert_certificate(
+            {
+                "claim_id": "lem:zero-add",
+                "manuscript_snapshot": snapshot,
+                "statement_hash": "statement",
+                "formal_type_hash": "type",
+                "lean_declaration": "ManuscriptVerification.zeroAdd",
+                "lean_value_hash": "value",
+                "environment_hash": "environment",
+                "lean_version": "4.28.0",
+                "last_verified_run": 1,
+            }
+        )
+
+    def cancel_before_prepare(*_args, **_kwargs):
+        raise VerificationCancelled(
+            "Stopped before preparation",
+            preserved_certificates=("not-authoritative",),
+            retryable_claims=("not-in-flight",),
+            temporary_worktrees_cleaned=True,
+        )
+
+    monkeypatch.setattr(
+        "proof_assistant.workflow.service.verify_project", cancel_before_prepare
+    )
+    result = workflow.confirm_and_verify(
+        project, None, VerificationSettings(model="unused")
+    )
+    assert result.cancellation is not None
+    assert result.cancellation.run_id is None
+    assert result.cancellation.preserved_certificates == ("lem:zero-add",)
+    assert result.cancellation.retryable_claims == ()
+    assert result.cancellation.temporary_worktrees_cleaned is True
 
 
 class BadNarrator:
@@ -160,7 +329,7 @@ def test_resume_question_uses_exact_multifile_location_and_fallback(tmp_path):
     main = source / "main.tex"
     moved = section / "results.tex"
     moved.write_text(main.read_text(encoding="utf-8"), encoding="utf-8")
-    main.unlink()
+    main.write_text(r"\input{sections/results}", encoding="utf-8")
     workflow = ProofAssistantWorkflow(
         catalog_root=tmp_path / "catalog-two",
         clarification_narrator=BadNarrator(),

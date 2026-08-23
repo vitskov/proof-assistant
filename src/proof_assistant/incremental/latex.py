@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
@@ -14,6 +15,11 @@ from pylatexenc.latexwalker import (
     LatexWalker,
 )
 
+from ..manuscript import (
+    IGNORED_DIRECTORY_NAMES,
+    IGNORED_FILE_NAMES,
+    IGNORED_FILE_SUFFIXES,
+)
 from .models import ManuscriptEdge, SourceObject
 from .store import StateStore
 
@@ -46,6 +52,12 @@ EQUATION_ENVIRONMENTS = frozenset(
 )
 PROOF_ENVIRONMENTS = frozenset({"proof", "proof*"})
 REFERENCE_MACROS = frozenset({"ref", "eqref", "cref", "Cref", "autoref"})
+LATEX_SUFFIXES = frozenset({".tex", ".ltx"})
+_SIMPLE_INCLUDE_MACROS = frozenset({"input", "include", "subfile"})
+_DIRECTORY_INCLUDE_MACROS = frozenset({"import", "subimport"})
+_EXTRA_IGNORED_DIRECTORIES = frozenset(
+    {".build", ".repoprover", ".swiftpm", "build", "dist", "target"}
+)
 
 
 class LatexIndexError(RuntimeError):
@@ -185,6 +197,222 @@ def _custom_theorem_environments(source: str) -> dict[str, str]:
     return environments
 
 
+def discover_latex_sources(source_root: Path) -> tuple[tuple[str, bool], ...]:
+    """Return deterministic, source-root-relative LaTeX candidates.
+
+    Symlinks that leave the source tree are rejected instead of being silently
+    followed.  The boolean records whether the file contains an uncommented
+    ``\\documentclass`` declaration; it is a UI suggestion signal, never an
+    implicit selection when several files are present.
+    """
+
+    root = source_root.expanduser().resolve()
+    if not root.is_dir():
+        raise LatexIndexError(f"LaTeX source folder does not exist: {root}")
+    candidates: list[tuple[str, bool]] = []
+    paths: list[Path] = []
+    for current, directory_names, file_names in os.walk(root, followlinks=False):
+        current_path = Path(current)
+        directory_names[:] = sorted(
+            name
+            for name in directory_names
+            if name not in IGNORED_DIRECTORY_NAMES
+            and name not in _EXTRA_IGNORED_DIRECTORIES
+            and not (current_path / name).is_symlink()
+        )
+        paths.extend(
+            current_path / name
+            for name in sorted(file_names)
+            if name not in IGNORED_FILE_NAMES
+            and not name.casefold().startswith(".env.")
+            and "".join(Path(name).suffixes).casefold() not in IGNORED_FILE_SUFFIXES
+            and Path(name).suffix.casefold() in LATEX_SUFFIXES
+        )
+    for path in sorted(paths, key=lambda item: item.relative_to(root).as_posix()):
+        resolved = path.resolve()
+        if resolved != root and root not in resolved.parents:
+            raise LatexIndexError(
+                f"LaTeX source escapes the manuscript folder through a symlink: "
+                f"{path.relative_to(root).as_posix()}"
+            )
+        try:
+            source = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError as exc:
+            raise LatexIndexError(f"LaTeX source must be UTF-8: {path}") from exc
+        candidates.append(
+            (
+                path.relative_to(root).as_posix(),
+                re.search(
+                    r"\\documentclass(?:\s*\[[^]]*\])?\s*\{",
+                    _strip_comments(source),
+                )
+                is not None,
+            )
+        )
+    if not candidates:
+        raise LatexIndexError(
+            f"No .tex or .ltx files were found under {root}; add a LaTeX "
+            "manuscript file before creating the project"
+        )
+    return tuple(candidates)
+
+
+def _read_braced_argument(
+    source: str, start: int, *, macro: str, file: str
+) -> tuple[str, int]:
+    cursor = start
+    while cursor < len(source) and source[cursor].isspace():
+        cursor += 1
+    if cursor >= len(source) or source[cursor] != "{":
+        raise LatexIndexError(
+            f"Dynamic or malformed \\{macro} in {file}; included LaTeX paths "
+            "must be literal braced paths"
+        )
+    depth = 1
+    end = cursor + 1
+    while end < len(source) and depth:
+        if source[end] == "{" and (end == 0 or source[end - 1] != "\\"):
+            depth += 1
+        elif source[end] == "}" and (end == 0 or source[end - 1] != "\\"):
+            depth -= 1
+        end += 1
+    if depth:
+        raise LatexIndexError(f"Unclosed argument to \\{macro} in {file}")
+    value = source[cursor + 1 : end - 1].strip()
+    if not value or any(marker in value for marker in ("\\", "$", "#", "{", "}")):
+        raise LatexIndexError(
+            f"Dynamic \\{macro} path in {file} is unsupported: {value!r}; "
+            "use a literal path so the complete manuscript can be verified"
+        )
+    return value, end
+
+
+def _include_arguments(source: str, relative_path: str) -> tuple[tuple[str, str], ...]:
+    stripped = _strip_comments(source)
+    pattern = re.compile(r"(?<!\\)\\(input|include|subfile|import|subimport)\b")
+    includes: list[tuple[str, str]] = []
+    for match in pattern.finditer(stripped):
+        macro = match.group(1)
+        first, cursor = _read_braced_argument(
+            stripped, match.end(), macro=macro, file=relative_path
+        )
+        if macro in _DIRECTORY_INCLUDE_MACROS:
+            second, _cursor = _read_braced_argument(
+                stripped, cursor, macro=macro, file=relative_path
+            )
+            includes.append((str(Path(first) / second), macro))
+        else:
+            includes.append((first, macro))
+    return tuple(includes)
+
+
+def _validated_main_path(source_root: Path, main_file: str) -> tuple[Path, str]:
+    root = source_root.expanduser().resolve()
+    value = Path(str(main_file))
+    if value.is_absolute() or not value.parts or ".." in value.parts:
+        raise LatexIndexError(
+            f"Main LaTeX file must be a relative path inside the source folder: {main_file!r}"
+        )
+    candidate = root / value
+    resolved = candidate.resolve()
+    if resolved != root and root not in resolved.parents:
+        raise LatexIndexError(
+            f"Main LaTeX file escapes the source folder: {main_file!r}"
+        )
+    if not candidate.is_file() or candidate.suffix.casefold() not in LATEX_SUFFIXES:
+        raise LatexIndexError(
+            f"Selected main LaTeX file does not exist: {value.as_posix()}"
+        )
+    return candidate, candidate.relative_to(root).as_posix()
+
+
+def _resolve_include_path(
+    source_root: Path,
+    including_file: Path,
+    raw_path: str,
+    *,
+    macro: str,
+    macro_source: str,
+) -> tuple[Path, str]:
+    raw = Path(raw_path)
+    if raw.is_absolute():
+        raise LatexIndexError(
+            f"Included LaTeX path escapes the source folder in {macro_source}: {raw_path!r}"
+        )
+    root = source_root.resolve()
+    bases = [including_file.parent / raw]
+    if macro in _SIMPLE_INCLUDE_MACROS:
+        bases.append(root / raw)
+    found: dict[Path, Path] = {}
+    escaped = False
+    for base in bases:
+        choices = (
+            (base,)
+            if base.suffix
+            else (base, base.with_suffix(".tex"), base.with_suffix(".ltx"))
+        )
+        for choice in choices:
+            resolved = choice.resolve()
+            if resolved != root and root not in resolved.parents:
+                escaped = True
+                continue
+            if resolved.is_file():
+                if resolved.suffix.casefold() not in LATEX_SUFFIXES:
+                    raise LatexIndexError(
+                        "Included source is not a .tex or .ltx file in "
+                        f"{macro_source}: {raw_path!r}"
+                    )
+                found[resolved] = choice
+                break
+    if len(found) > 1:
+        choices = ", ".join(path.relative_to(root).as_posix() for path in sorted(found))
+        raise LatexIndexError(
+            f"Ambiguous \\{macro} path in {macro_source}: {raw_path!r} "
+            f"matches {choices}"
+        )
+    if found:
+        resolved = next(iter(found))
+        return resolved, resolved.relative_to(root).as_posix()
+    if escaped:
+        raise LatexIndexError(
+            f"Included LaTeX path escapes the source folder in {macro_source}: {raw_path!r}"
+        )
+    raise LatexIndexError(
+        f"Included LaTeX file referenced by {macro_source} does not exist: {raw_path!r}"
+    )
+
+
+def resolve_latex_closure(source_root: Path, main_file: str) -> tuple[str, ...]:
+    """Resolve ``main_file`` and every literal recursive LaTeX include once."""
+
+    root = source_root.expanduser().resolve()
+    main_path, normalized_main = _validated_main_path(root, main_file)
+    ordered: list[str] = []
+    visited: set[str] = set()
+
+    def visit(path: Path, relative_path: str) -> None:
+        if relative_path in visited:
+            return
+        visited.add(relative_path)
+        ordered.append(relative_path)
+        try:
+            source = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError as exc:
+            raise LatexIndexError(f"LaTeX source must be UTF-8: {path}") from exc
+        for raw_include, macro in _include_arguments(source, relative_path):
+            child_path, child_relative = _resolve_include_path(
+                root,
+                path,
+                raw_include,
+                macro=macro,
+                macro_source=relative_path,
+            )
+            visit(child_path, child_relative)
+
+    visit(main_path, normalized_main)
+    return tuple(ordered)
+
+
 def _byte_offsets(text: str) -> list[int]:
     result = [0]
     total = 0
@@ -217,7 +445,12 @@ def _proof_for(
     return None
 
 
-def extract_file(path: Path, relative_path: str) -> list[_ObjectDraft]:
+def extract_file(
+    path: Path,
+    relative_path: str,
+    *,
+    inherited_theorem_environments: dict[str, str] | None = None,
+) -> list[_ObjectDraft]:
     try:
         source = path.read_text(encoding="utf-8")
     except UnicodeDecodeError as exc:
@@ -230,6 +463,7 @@ def extract_file(path: Path, relative_path: str) -> list[_ObjectDraft]:
         ) from exc
 
     theorem_kinds = dict(THEOREM_ENVIRONMENTS)
+    theorem_kinds.update(inherited_theorem_environments or {})
     theorem_kinds.update(_custom_theorem_environments(source))
     all_nodes = list(_walk_nodes(nodes))
     all_environments = sorted(
@@ -356,19 +590,32 @@ def _assign_stable_ids(
     )
 
 
-def index_manuscript(source_root: Path, store: StateStore) -> tuple[SourceObject, ...]:
+def index_manuscript(
+    source_root: Path, store: StateStore, *, main_file: str
+) -> tuple[SourceObject, ...]:
+    closure = resolve_latex_closure(source_root, main_file)
+    inherited: dict[str, str] = {}
+    for relative_path in closure:
+        path = source_root / relative_path
+        try:
+            source = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError as exc:
+            raise LatexIndexError(f"LaTeX source must be UTF-8: {path}") from exc
+        inherited.update(_custom_theorem_environments(source))
     drafts: list[_ObjectDraft] = []
-    for path in sorted(
-        (
-            item
-            for item in source_root.rglob("*")
-            if item.is_file() and item.suffix.casefold() in {".tex", ".ltx"}
-        ),
-        key=lambda item: item.relative_to(source_root).as_posix(),
-    ):
-        drafts.extend(extract_file(path, path.relative_to(source_root).as_posix()))
+    for relative_path in closure:
+        drafts.extend(
+            extract_file(
+                source_root / relative_path,
+                relative_path,
+                inherited_theorem_environments=inherited,
+            )
+        )
     if not drafts:
-        raise LatexIndexError(f"No mathematical objects found under {source_root}")
+        raise LatexIndexError(
+            "No mathematical objects found in the selected LaTeX closure "
+            f"rooted at {main_file!r}"
+        )
     return tuple(item.finalized() for item in _assign_stable_ids(drafts, store))
 
 

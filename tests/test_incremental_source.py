@@ -11,9 +11,11 @@ from proof_assistant.incremental.graph import (
 )
 from proof_assistant.incremental.latex import (
     LatexIndexError,
+    discover_latex_sources,
     explicit_reference_graph,
     index_manuscript,
     normalize_latex_statement,
+    resolve_latex_closure,
 )
 from proof_assistant.incremental.models import ClaimState, ManuscriptEdge
 from proof_assistant.incremental.snapshot import SnapshotRepository
@@ -56,7 +58,7 @@ def test_structural_index_extracts_custom_environments_proofs_refs_and_byte_span
         encoding="utf-8",
     )
     with StateStore(tmp_path / "state.sqlite3") as store:
-        objects = index_manuscript(source, store)
+        objects = index_manuscript(source, store, main_file="main.tex")
     by_id = {item.claim_id: item for item in objects}
     assert set(by_id) == {"lem:first", "thm:second", "eq:key"}
     assert by_id["thm:second"].kind == "theorem"
@@ -80,7 +82,7 @@ def test_theorem_without_proof_and_unresolved_reference_are_preserved(tmp_path):
         encoding="utf-8",
     )
     with StateStore(tmp_path / "state.sqlite3") as store:
-        objects = index_manuscript(source, store)
+        objects = index_manuscript(source, store, main_file="main.tex")
     assert objects[0].proof_text == ""
     edges, unresolved = explicit_reference_graph(objects)
     assert edges == ()
@@ -96,7 +98,7 @@ def test_duplicate_labels_fail_closed(tmp_path):
     )
     with StateStore(tmp_path / "state.sqlite3") as store:
         with pytest.raises(LatexIndexError, match="Duplicate LaTeX label"):
-            index_manuscript(source, store)
+            index_manuscript(source, store, main_file="main.tex")
 
 
 def test_unlabeled_ids_survive_insertions_via_persistent_sidecar(tmp_path):
@@ -108,7 +110,7 @@ def test_unlabeled_ids_survive_insertions_via_persistent_sidecar(tmp_path):
         encoding="utf-8",
     )
     with StateStore(tmp_path / "state.sqlite3") as store:
-        first = index_manuscript(source, store)
+        first = index_manuscript(source, store, main_file="main.tex")
         store.replace_current_claims(
             "snapshot-a",
             first,
@@ -121,11 +123,110 @@ def test_unlabeled_ids_survive_insertions_via_persistent_sidecar(tmp_path):
             r"\begin{lemma}Alpha.\end{lemma}\begin{lemma}Beta.\end{lemma}",
             encoding="utf-8",
         )
-        second = index_manuscript(source, store)
+        second = index_manuscript(source, store, main_file="main.tex")
     second_ids = {item.statement_text.strip(): item.claim_id for item in second}
     assert second_ids["Alpha."] == ids["Alpha."]
     assert second_ids["Beta."] == ids["Beta."]
     assert second_ids["New."] not in set(ids.values())
+
+
+def test_selected_main_indexes_only_recursive_closure_and_inherits_theorems(tmp_path):
+    source = tmp_path / "paper"
+    (source / "sections").mkdir(parents=True)
+    (source / "main.tex").write_text(
+        r"\newtheorem{result}{Theorem}\input{sections/results}", encoding="utf-8"
+    )
+    (source / "sections/results.tex").write_text(
+        r"\begin{result}\label{selected}Chosen.\end{result}", encoding="utf-8"
+    )
+    (source / "alternate.tex").write_text(
+        r"\begin{theorem}\label{selected}Duplicate outside closure.\end{theorem}",
+        encoding="utf-8",
+    )
+    with StateStore(tmp_path / "state.sqlite3") as store:
+        objects = index_manuscript(source, store, main_file="main.tex")
+    assert [(item.claim_id, item.source_file, item.kind) for item in objects] == [
+        ("selected", "sections/results.tex", "theorem")
+    ]
+
+
+def test_recursive_closure_is_cycle_safe_and_shared_inputs_are_indexed_once(tmp_path):
+    source = tmp_path / "paper"
+    (source / "parts").mkdir(parents=True)
+    (source / "main.tex").write_text(
+        r"\input{parts/a}\input{parts/b}", encoding="utf-8"
+    )
+    (source / "parts/a.tex").write_text(
+        r"\input{shared}\begin{lemma}\label{a}A.\end{lemma}", encoding="utf-8"
+    )
+    (source / "parts/b.tex").write_text(
+        r"\input{shared}\begin{lemma}\label{b}B.\end{lemma}", encoding="utf-8"
+    )
+    (source / "parts/shared.tex").write_text(
+        r"\input{a}\begin{lemma}\label{shared}Shared.\end{lemma}",
+        encoding="utf-8",
+    )
+    assert resolve_latex_closure(source, "main.tex") == (
+        "main.tex",
+        "parts/a.tex",
+        "parts/shared.tex",
+        "parts/b.tex",
+    )
+    with StateStore(tmp_path / "state.sqlite3") as store:
+        objects = index_manuscript(source, store, main_file="main.tex")
+    assert {item.claim_id for item in objects} == {"a", "b", "shared"}
+
+
+@pytest.mark.parametrize(
+    ("main_text", "message"),
+    [
+        (r"\input{missing}", "does not exist"),
+        (r"\input{../../outside}", "escapes the source folder"),
+        (r"\input{\chosen}", "Dynamic"),
+    ],
+)
+def test_recursive_closure_fails_closed_for_unresolved_inputs(
+    tmp_path, main_text, message
+):
+    source = tmp_path / "paper"
+    source.mkdir()
+    (source / "main.tex").write_text(main_text, encoding="utf-8")
+    with pytest.raises(LatexIndexError, match=message):
+        resolve_latex_closure(source, "main.tex")
+
+
+def test_simple_input_resolution_fails_if_local_and_root_paths_are_ambiguous(tmp_path):
+    source = tmp_path / "paper"
+    (source / "parts").mkdir(parents=True)
+    (source / "main.tex").write_text(r"\input{parts/chapter}", encoding="utf-8")
+    (source / "parts/chapter.tex").write_text(r"\input{shared}", encoding="utf-8")
+    (source / "parts/shared.tex").write_text("local", encoding="utf-8")
+    (source / "shared.tex").write_text("root", encoding="utf-8")
+    with pytest.raises(LatexIndexError, match="Ambiguous"):
+        resolve_latex_closure(source, "main.tex")
+
+
+def test_subfile_and_import_forms_follow_including_file_semantics(tmp_path):
+    source = tmp_path / "paper"
+    (source / "parts/nested").mkdir(parents=True)
+    (source / "main.tex").write_text(r"\subfile{parts/a}", encoding="utf-8")
+    (source / "parts/a.tex").write_text(r"\import{nested/}{b}", encoding="utf-8")
+    (source / "parts/nested/b.tex").write_text("body", encoding="utf-8")
+    assert resolve_latex_closure(source, "main.tex") == (
+        "main.tex",
+        "parts/a.tex",
+        "parts/nested/b.tex",
+    )
+
+
+def test_source_discovery_ignores_generated_and_managed_directories(tmp_path):
+    source = tmp_path / "paper"
+    (source / "build").mkdir(parents=True)
+    (source / ".repoprover").mkdir()
+    (source / "main.tex").write_text(r"\documentclass{article}", encoding="utf-8")
+    (source / "build/generated.tex").write_text("generated", encoding="utf-8")
+    (source / ".repoprover/internal.tex").write_text("internal", encoding="utf-8")
+    assert discover_latex_sources(source) == (("main.tex", True),)
 
 
 def test_graph_slice_frontier_cycles_and_canonical_export(tmp_path):

@@ -105,6 +105,11 @@ The former `repoprover-codex` executable is a deprecated alias during the 0.1
 line. New documentation, shell configuration, and automation should use
 `proof-assistant`.
 
+On first project creation, select the external source folder and then its main
+LaTeX file. A sole `.tex`/`.ltx` file is announced and adopted automatically;
+several candidates require an explicit selection. The managed project persists
+that root and resolves its recursive `\input`/`\include` closure.
+
 ## RepoProver integration checkout
 
 Keep the integration checkout outside Dropbox, for example at

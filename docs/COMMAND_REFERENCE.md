@@ -22,11 +22,16 @@ task editing, Dropbox warnings, impact review, and recovery screens.
 ```bash
 proof-assistant manuscript init \
   --manuscript /absolute/path/to/source \
+  --main-file paper.tex \
   --project "$HOME/proof-assistant/example"
 ```
 
 `init` creates the project-owned default `VERIFY.yaml`; it does not accept or
-require an external task file.
+require an external task file. `--main-file` is relative to `--manuscript` and
+may name a root that recursively includes other LaTeX files. It is always
+required by this non-interactive command. The TUI's one-file shortcut obtains
+the same explicit backend value from source inspection; it does not create an
+implicit-root project.
 
 ```bash
 proof-assistant manuscript verify --project PROJECT [OPTIONS]

@@ -30,7 +30,33 @@ can expose intermediate multi-file saves. It still permits the source because
 the importer waits for a stable inventory, stages a complete copy, re-hashes
 it, and asks you to review changes before verification.
 
-### 2. Choose the managed project
+### 2. Select the main LaTeX file
+
+Proof Assistant inspects the selected folder before it creates any project:
+
+- if the folder contains exactly one `.tex` or `.ltx` file, the TUI announces
+  that file as the main file and continues without asking a redundant question;
+- if it contains several LaTeX files, the TUI lists every candidate and requires
+  an explicit selection; and
+- if it contains none, project creation stops with a validation error.
+
+Select the document root: normally the file containing `\documentclass` whose
+compilation produces the paper. The main file may recursively use `\input` and
+`\include`; those children may include further children. Proof Assistant
+resolves that complete, cycle-safe closure. Plain input forms try the including
+file's directory and then the source root; if both resolve to different files,
+the backend rejects the ambiguity. `\\import`/`\\subimport` retain their
+including-file-relative semantics.
+
+The choice is not a display preference. `main_file` is a required backend
+contract and is persisted in the managed project. Only the selected root and
+its resolved inputs are theorem-indexed. Other possible roots, old drafts, and
+orphaned `.tex` files under the source folder are excluded from verification.
+An absolute include, an include escaping the source directory, or a referenced
+file that cannot be resolved fails closed instead of silently checking an
+incomplete manuscript.
+
+### 3. Choose the managed project
 
 Give the project a name. Unless changed, it is created at:
 
@@ -43,7 +69,7 @@ state, imported source snapshots, Lean code, certificates, questions, and
 reports. Do not edit its managed manuscript copy; edit the external source
 selected in step 1.
 
-### 3. Define the task
+### 4. Define the task
 
 Choose one of:
 
@@ -55,28 +81,51 @@ Choose one of:
 Proof Assistant validates and stores the result as `$PROJECT/VERIFY.yaml`.
 There is no external task file to select, keep synchronized, or edit.
 
-### 4. Create and verify
+### 5. Create and verify
 
-Review the entered source, destination, task choice, and Dropbox notices, then
-choose **Create and verify**. The backend creates a stable initial import before
-starting the first verification pass.
+Review the entered source, selected main file, destination, task choice, and
+Dropbox notices, then choose **Create and verify**. The backend creates a stable
+initial import and resolves the main file's input closure before starting the
+first verification pass.
 
 ## Verification progress
 
-The progress screen reports phases and claim counts rather than flooding the
-terminal with raw Lean and Codex logs. It may show:
+The progress screen always identifies the persisted main file and lists every
+resolved `\input`/`\include` file in its manuscript closure. It reports detailed
+phases, substage messages, and claim counts rather than flooding the terminal
+with raw Lean and Codex logs.
 
-- stable source import;
-- source/claim indexing;
-- affected dependency calculation;
-- cache and Lean preparation;
-- current ready proof frontier;
-- independent build and certification; and
-- report generation.
+The stage pane displays the complete typed pipeline with pending, active, and
+done status: validation, stable source observation, source import, indexing,
+impact analysis, cache setup, Lean build, Lean declaration extraction, proof
+batches, independent certification, report generation, and completion. Live
+substage messages and claim counts appear in a separate event-log pane.
+
+The sources, stages, and event log are separate focusable, read-only text
+areas. Focus a pane and use the normal TextArea selection/copy actions
+(`Ctrl+A`, then `Ctrl+C`, for all text), so paths and diagnostics do not need to
+be retyped from the terminal.
 
 Closing the interface does not erase project state. On the next launch choose
 **Resume project**. Proof Assistant recovers interrupted run state before
 deciding which screen to show.
+
+### What “Request cooperative cancellation” preserves
+
+Cancellation is cooperative, so an active Codex/Lean batch is allowed to stop
+at a host-controlled boundary. If cancellation is already requested when the
+workers return, their temporary candidates are discarded before merge. If a
+merge has begun, Proof Assistant finishes that round's independent Lean build
+and kernel certification before stopping. This prevents a half-merged round
+from being mistaken for verified work.
+
+Every certificate completed before the boundary remains durable in the
+project. Claims that were only marked `PROVING` are reset to the retryable
+`INVALIDATED` state, never to `CERTIFIED`; the next run schedules them again.
+The run is recorded as `INTERRUPTED`, a cancellation summary is written under
+`.repoprover/runs/`, status/exports are refreshed when possible, and temporary
+batch worktrees are removed. A sudden process or machine interruption receives
+the same `PROVING`-to-`INVALIDATED` recovery on the next project open.
 
 ## When no manuscript change is needed
 
@@ -121,9 +170,11 @@ not necessarily the root `main.tex`.
 
 Proof Assistant uses filesystem notifications only as a wake-up signal. It
 accepts a source update only after two complete inventories agree and the
-staged copy re-hashes successfully. The change review includes all additions,
-modifications, deletions, and renames across the source tree, even if several
-files changed.
+staged copy re-hashes successfully. The change review includes additions,
+modifications, deletions, and renames in the previously or currently resolved
+main-file closure, even if several input files changed together. The complete
+filtered source container is still hashed to reject a confirmation if any file
+changes after review, but alternate roots do not become verification claims.
 
 It then previews:
 
@@ -156,6 +207,15 @@ The project database, not the TUI widget tree, is authoritative. On resume:
 
 Proof Assistant does not regenerate a question or start another verification
 when the source has not changed.
+
+The selected main file is persistent project identity. Resuming a current
+project never asks you to select it again; the backend loads it and resolves its
+input closure before planning or verifying. For a legacy project that predates
+this contract, the backend can migrate an unambiguous source (one LaTeX file or
+one uniquely identifiable document root). If several possible roots remain,
+resume enters recovery and verification stops rather than guessing. Create a
+new managed project for that source and make the explicit root selection; the
+legacy project and its existing evidence remain intact.
 
 ## Advanced status commands
 

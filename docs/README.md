@@ -6,8 +6,8 @@ This index separates ordinary use from implementation and maintenance details.
 
 1. [Installation](INSTALLATION.md) — prerequisites, local installation,
    validation, and upgrades.
-2. [Usage guide](USAGE.md) — use the TUI to start, verify, clarify, edit, and
-   resume a persistent project.
+2. [Usage guide](USAGE.md) — select a main LaTeX file, then use the TUI to
+   verify, clarify, edit, and resume a persistent project.
 3. [Project task and scope](TASK_FILES.md) — the default task, the built-in task
    editor, targets, modes, and policies.
 4. [Troubleshooting and operations](TROUBLESHOOTING.md) — quiet runs, stopped

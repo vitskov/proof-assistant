@@ -30,8 +30,8 @@ closure, invoke Codex directly, or decide certification state.
 
 Owns the UI-neutral application state machine. Immutable contracts live in
 `workflow.contracts`; `workflow.service.ProofAssistantWorkflow` implements
-`default_task_text`, `list_projects`, `create_project`, `resume_project`,
-`plan_changes`, and `confirm_and_verify`. `CancellationFlag` and
+`default_task_text`, `inspect_source`, `list_projects`, `create_project`,
+`resume_project`, `plan_changes`, and `confirm_and_verify`. `CancellationFlag` and
 `StaleChangePlanError` make cancellation and stale confirmation explicit. The
 service maps persisted backend state to screens but contains no Textual imports.
 
@@ -60,16 +60,27 @@ clarifications, certificates, and reports. It has no Textual dependency.
 The interfaces exchange validated, serializable data rather than paths with
 implicit meaning or mutable UI objects.
 
-- `ProjectSpec` contains resolved source/project locations and a validated
-  project-owned task. Project creation rejects overlapping paths and managed
+- `SourceInspection` contains the resolved external folder and every candidate
+  LaTeX root. The TUI must use it instead of implementing its own file
+  discovery.
+- `NewProjectRequest` and the persisted project configuration contain a validated,
+  source-relative `main_file` in addition to resolved source/project locations
+  and a project-owned task. There is no backend state in which a new project
+  has an implicit root. Project creation rejects overlapping paths and managed
   Dropbox destinations.
+- `ProjectSummary` and `ChangeImpactPlan` expose the persisted main file and
+  its ordered, resolved input closure. A UI therefore renders the exact backend
+  interpretation rather than reconstructing inclusion topology.
 - `SourceInventory` contains the complete filtered path/type/size/hash view.
   Two equal inventories plus a verified staged copy are required for stability.
 - `ChangeImpactPlan` binds before/after inventory hashes, source diff, changed
   claims, descendant closure, reusable certificates, superseded questions, and
   project generation. Confirmation fails if the source or generation changed.
-- `VerificationProgress` events are read-only observations. They cannot mutate
-  state or imply success.
+- `ProgressEvent` values are read-only observations. They cannot mutate
+  state or imply success. Their initial context identifies the main file and
+  all resolved inputs; subsequent events distinguish source observation,
+  import, indexing, impact analysis, cache setup, Lean build/extraction, proof
+  batches, independent certification, and reporting.
 - `VerificationResult` uses explicit outcome categories and evidence paths. An
   agent completion marker is never a certificate.
 - `ClarificationView` binds an exact persisted question to source path/span,
@@ -79,6 +90,32 @@ implicit meaning or mutable UI objects.
 
 These contracts make stale UI actions fail closed and let a future web or
 desktop front end reuse the backend unchanged.
+
+## Main-file and input-closure contract
+
+The external folder is a source container, not the manuscript definition. One
+normalized, source-relative `main_file` is mandatory at every project-creation,
+workflow, index, change-plan, resume, and verification boundary. Source
+snapshots preserve the complete filtered container, while their interpretation
+always comes from this persisted root. The backend validates that the root
+names a discovered `.tex` or `.ltx` file, then recursively resolves literal
+`\input` and `\include` commands. Plain forms check the including directory and
+source root and reject distinct dual matches; import-package forms use
+including-file semantics.
+
+Resolution is deterministic and cycle-safe. Absolute paths, directory escape,
+missing files, and dynamic include expressions that cannot be resolved are
+errors. The resulting ordered closure is persisted/exposed as `input_files`.
+The LaTeX object index scans only that closure, while stable source observation
+may still inventory the complete filtered container so changes cannot be
+accepted from a partial multi-file save. Alternate document roots and orphaned
+drafts never contribute claims, labels, or duplicate-label failures.
+
+The TUI has no permission to infer this closure. It displays the candidates
+returned by `inspect_source`, supplies the selected `main_file` to
+`create_project`, and renders the `main_file`/`input_files` returned by the
+backend. A one-file folder is an unambiguous UI shortcut, not an optional
+backend field.
 
 ## Verification authority
 
@@ -137,11 +174,23 @@ available through safe WAL reads. Canonical exports use atomic rename. Bare-Git
 source commits and ordinary Lean Git history remain recoverable after an
 interruption.
 
-The next invocation marks an abandoned `RUNNING` row `INTERRUPTED`. An open
-question is superseded only when its source object changes or the user
-explicitly resolves/dismisses it. Reopening the TUI derives the correct findings,
-clarification, change-review, recovery, or read-only progress screen from this
-state.
+Safe cancellation is observed only at host-controlled boundaries. Worker
+candidates are either discarded before merge or carried through the merged
+project's independent build and kernel certification as one indivisible round.
+Already-issued certificates remain durable; an in-flight `PROVING` marker has
+no authority and is transactionally reset to retryable `INVALIDATED`. The run
+becomes `INTERRUPTED`, its cancellation facts are persisted, and a `finally`
+boundary removes every temporary batch worktree, including worker-failure
+paths. `WorkflowSnapshot.cancellation` carries a typed `CancellationReport`
+with the run ID, preserved certificate IDs, retryable claim IDs, detail, and
+worktree-cleanup result; the TUI cannot infer or overstate those facts.
+
+The next invocation applies the same recovery to an abandoned `RUNNING` row and
+every orphaned `PROVING` claim, including state left by older releases. An open
+question is superseded only when
+its source object changes or the user explicitly resolves/dismisses it.
+Reopening the TUI derives the correct findings, clarification, change-review,
+recovery, or read-only progress screen from this state.
 
 ## Parallelism and storage
 

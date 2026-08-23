@@ -36,6 +36,21 @@ Filesystem notifications are only wake-up signals; they are not evidence that
 a multi-file save has finished. The confirmed source inventory is the strict
 input contract between observation and snapshot preparation.
 
+Each project also persists one mandatory source-relative main file. From that
+root the backend recursively resolves literal `\input` and `\include` commands,
+including inputs of inputs, and records the resulting closure. The source
+snapshot can preserve the complete filtered container, but theorem extraction,
+labels, references, and custom theorem environments come only from the selected
+main-file closure. This allows several papers or abandoned drafts to coexist in
+one author folder without contaminating one another's verification graph.
+
+Include resolution is deterministic, relative to the including file, and
+cycle-safe. A missing include, absolute path, source-root escape, or dynamic
+path that cannot be interpreted causes indexing to fail closed. Changing an
+include command can add or remove an entire source subtree; the next impact
+plan recalculates the closure before deciding which claims and descendants need
+work.
+
 ## Two dependency graphs
 
 The manuscript graph contains definitions, assumptions, theorem-like objects,

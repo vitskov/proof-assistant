@@ -218,11 +218,14 @@ def test_cli_exposes_project_owned_manuscript_interface():
             "init",
             "--manuscript",
             "/input/book",
+            "--main-file",
+            "main.tex",
             "--project",
             "/output/project",
         ]
     )
     assert init.manuscript == "/input/book"
+    assert init.main_file == "main.tex"
     assert init.project == "/output/project"
     assert not hasattr(init, "task_file")
 

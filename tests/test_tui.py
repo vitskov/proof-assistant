@@ -1,24 +1,28 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from collections.abc import Awaitable, Callable, Sequence
 from functools import wraps
 from pathlib import Path
 from typing import Any
 
 from textual.pilot import Pilot
-from textual.widgets import Input, Static, TextArea
+from textual.widgets import Button, Input, Static, TextArea
 
 from proof_assistant.tui import ProofAssistantApp
 from proof_assistant.tui.screens import (
     ChangeReviewScreen,
     ClarificationScreen,
     FindingsScreen,
+    MainFileSelectionScreen,
     NewProjectScreen,
+    ProgressScreen,
     RecoveryScreen,
     WelcomeScreen,
 )
 from proof_assistant.workflow.contracts import (
+    CancellationReport,
     CancellationToken,
     ChangeImpactPlan,
     ClaimChangeKind,
@@ -27,11 +31,13 @@ from proof_assistant.workflow.contracts import (
     FileChange,
     FileChangeKind,
     FindingSummary,
+    LatexSourceCandidate,
     NewProjectRequest,
     ProgressEvent,
     ProgressPhase,
     ProgressSink,
     ProjectSummary,
+    SourceInspection,
     SourceLocation,
     VerificationSettings,
     WorkflowSnapshot,
@@ -57,6 +63,8 @@ def project(*, state: WorkflowState = WorkflowState.PROJECT_READY) -> ProjectSum
         name="Paper One",
         project_path=Path("/tmp/proof-assistant/paper-one"),
         source_path=Path("/Users/writer/Dropbox/paper"),
+        main_file="main.tex",
+        input_files=("sections/introduction.tex", "sections/results.tex"),
         last_opened_at="2026-08-23T12:00:00Z",
         workflow_state=state,
         source_in_dropbox=True,
@@ -103,6 +111,8 @@ def change_plan(p: ProjectSummary) -> ChangeImpactPlan:
         plan_id="plan-1",
         project_path=p.project_path,
         source_path=p.source_path,
+        main_file="candidate-main.tex",
+        input_files=("sections/new-input.tex",),
         base_snapshot="old-snapshot",
         candidate_inventory_sha256="inventory-2",
         file_changes=(
@@ -138,11 +148,20 @@ class FakeWorkflowService:
     def __init__(self) -> None:
         self.project = project()
         self.projects: tuple[ProjectSummary, ...] = (self.project,)
+        self.inspected: list[Path] = []
         self.created: list[NewProjectRequest] = []
         self.resumed: list[Path] = []
         self.planned: list[Path] = []
         self.verified: list[tuple[Path, str | None, VerificationSettings]] = []
         self.plan_result: ChangeImpactPlan | None = None
+        self.inspection = SourceInspection(
+            source_path=self.project.source_path,
+            candidates=(LatexSourceCandidate("main.tex", True),),
+            suggested_main_file="main.tex",
+            source_in_dropbox=True,
+        )
+        self.creation_release: threading.Event | None = None
+        self.verification_release: threading.Event | None = None
         self.create_result = WorkflowSnapshot(WorkflowState.PROJECT_READY, self.project)
         self.resume_result = WorkflowSnapshot(WorkflowState.PROJECT_READY, self.project)
         self.verify_result = WorkflowSnapshot(
@@ -159,8 +178,19 @@ class FakeWorkflowService:
     def list_projects(self) -> Sequence[ProjectSummary]:
         return self.projects
 
+    def inspect_source(self, source: Path) -> SourceInspection:
+        self.inspected.append(source)
+        return SourceInspection(
+            source_path=source,
+            candidates=self.inspection.candidates,
+            suggested_main_file=self.inspection.suggested_main_file,
+            source_in_dropbox=self.inspection.source_in_dropbox,
+        )
+
     def create_project(self, request: NewProjectRequest) -> WorkflowSnapshot:
         self.created.append(request)
+        if self.creation_release is not None:
+            self.creation_release.wait(timeout=3)
         return self.create_result
 
     def resume_project(self, project_path: Path) -> WorkflowSnapshot:
@@ -181,10 +211,29 @@ class FakeWorkflowService:
         cancellation: CancellationToken | None = None,
     ) -> WorkflowSnapshot:
         self.verified.append((project_path, plan_id, settings))
-        if cancellation is not None:
-            cancellation.raise_if_cancelled()
         if progress is not None:
             progress(ProgressEvent(1, ProgressPhase.INDEXING, "Indexed sources", 1, 2))
+        if self.verification_release is not None:
+            self.verification_release.wait(timeout=3)
+        if cancellation is not None and cancellation.cancelled:
+            interrupted = ProjectSummary(
+                **{
+                    **self.project.__dict__,
+                    "workflow_state": WorkflowState.INTERRUPTED,
+                }
+            )
+            return WorkflowSnapshot(
+                WorkflowState.INTERRUPTED,
+                interrupted,
+                cancellation=CancellationReport(
+                    run_id=73,
+                    detail="Stopped after the current claim reached a boundary.",
+                    preserved_certificates=("lem:stable", "thm:finished"),
+                    retryable_claims=("thm:in-flight", "cor:dependent"),
+                    temporary_worktrees_cleaned=True,
+                ),
+            )
+        if progress is not None:
             progress(ProgressEvent(2, ProgressPhase.COMPLETE, "Finished", 2, 2))
         return self.verify_result
 
@@ -199,6 +248,27 @@ async def wait_for(
     raise AssertionError(
         f"condition did not become true; current screen={pilot.app.screen!r}"
     )
+
+
+def progress_log_contains(app: ProofAssistantApp, text: str) -> bool:
+    if not isinstance(app.screen, ProgressScreen):
+        return False
+    nodes = app.screen.query("#progress-log").nodes
+    return bool(nodes) and isinstance(nodes[0], TextArea) and text in nodes[0].text
+
+
+def progress_sources_contain(app: ProofAssistantApp, text: str) -> bool:
+    if not isinstance(app.screen, ProgressScreen):
+        return False
+    nodes = app.screen.query("#progress-sources").nodes
+    return bool(nodes) and isinstance(nodes[0], TextArea) and text in nodes[0].text
+
+
+async def settle_screen(pilot: Pilot[None]) -> None:
+    """Flush Textual 1.0 Header callbacks before another switch or teardown."""
+
+    await wait_for(pilot, lambda: bool(pilot.app.screen.query("HeaderTitle").nodes))
+    await pilot.pause(0.05)
 
 
 @async_test
@@ -225,12 +295,15 @@ async def test_new_project_custom_task_starts_first_verification() -> None:
         await pilot.click("#create")
 
         await wait_for(pilot, lambda: isinstance(app.screen, FindingsScreen))
+        await settle_screen(pilot)
         assert len(service.created) == 1
         request = service.created[0]
         assert request.name == "spectral-paper"
         assert request.source_path == Path("/Users/writer/Dropbox/paper")
+        assert request.main_file == "main.tex"
         assert request.project_path == Path("/Users/writer/proof-assistant/spectral")
         assert request.task_text == "Verify the main spectral theorem."
+        assert service.inspected == [Path("/Users/writer/Dropbox/paper")]
         assert service.verified[0][1] is None
         assert app.screen.query_one("#dropbox-warning", Static)
         assert "All selected claims" in str(
@@ -241,6 +314,7 @@ async def test_new_project_custom_task_starts_first_verification() -> None:
 @async_test
 async def test_default_task_is_backend_owned() -> None:
     service = FakeWorkflowService()
+    service.creation_release = threading.Event()
     app = ProofAssistantApp(service)
 
     async with app.run_test(size=(120, 50)) as pilot:
@@ -253,10 +327,204 @@ async def test_default_task_is_backend_owned() -> None:
             service.default_task_text()
         )
         await pilot.click("#create")
+        await wait_for(
+            pilot,
+            lambda: progress_sources_contain(app, "Main file: main.tex"),
+        )
+        assert not isinstance(app.screen, MainFileSelectionScreen)
+        source_detail = app.screen.query_one("#progress-sources", TextArea)
+        assert source_detail.read_only
+        assert "Main file: main.tex" in source_detail.text
+        service.creation_release.set()
         await wait_for(pilot, lambda: isinstance(app.screen, FindingsScreen))
+        await settle_screen(pilot)
 
         assert service.created[0].task_text is None
         assert service.created[0].project_path is None
+        assert service.created[0].main_file == "main.tex"
+
+
+@async_test
+async def test_multiple_latex_files_require_deliberate_main_selection() -> None:
+    service = FakeWorkflowService()
+    service.inspection = SourceInspection(
+        source_path=Path("/source"),
+        candidates=(
+            LatexSourceCandidate("appendix.tex", False),
+            LatexSourceCandidate("paper.tex", True),
+            LatexSourceCandidate("slides.tex", True),
+        ),
+        suggested_main_file="paper.tex",
+        source_in_dropbox=False,
+    )
+    app = ProofAssistantApp(service)
+
+    async with app.run_test(size=(120, 50)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        await pilot.click("#new-project")
+        await wait_for(pilot, lambda: isinstance(app.screen, NewProjectScreen))
+        app.screen.query_one("#project-name", Input).value = "multi-root"
+        app.screen.query_one("#source-path", Input).value = "/source"
+        await pilot.click("#create")
+        await wait_for(pilot, lambda: isinstance(app.screen, MainFileSelectionScreen))
+
+        # A suggestion is visible but is intentionally not an implicit choice.
+        assert "suggested" in str(app.screen.query_one("#main-option-1").label)
+        await pilot.click("#select-main")
+        assert service.created == []
+        assert "Select one main" in str(
+            app.screen.query_one("#status-line", Static).renderable
+        )
+
+        await pilot.click("#main-option-2")
+        await pilot.click("#select-main")
+        await wait_for(pilot, lambda: isinstance(app.screen, FindingsScreen))
+        await settle_screen(pilot)
+        assert service.created[0].main_file == "slides.tex"
+
+
+@async_test
+async def test_verification_progress_lists_copyable_sources_and_typed_stages() -> None:
+    service = FakeWorkflowService()
+    service.verification_release = threading.Event()
+    app = ProofAssistantApp(service)
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        # Let Textual 1.0 finish mounting Header internals before switching.
+        await pilot.pause(0.1)
+        app.start_verification(service.project, None)
+        await wait_for(
+            pilot,
+            lambda: progress_log_contains(app, "INDEXING"),
+        )
+
+        sources = app.screen.query_one("#progress-sources", TextArea)
+        stages = app.screen.query_one("#progress-stages", TextArea)
+        event_log = app.screen.query_one("#progress-log", TextArea)
+        assert sources.read_only and stages.read_only and event_log.read_only
+        assert "Main file: main.tex" in sources.text
+        assert "sections/introduction.tex" in sources.text
+        assert "sections/results.tex" in sources.text
+        assert "Current stage: INDEXING" in stages.text
+        assert "PROOF_BATCH" in stages.text
+        assert "CERTIFICATION" in stages.text
+        assert "0001 INDEXING: Indexed sources" in event_log.text
+
+        # TextArea is the explicit in-app copy mechanism: selection remains
+        # available even though edits are disabled.
+        sources.select_all()
+        assert "Main file: main.tex" in sources.selected_text
+
+        service.verification_release.set()
+        await wait_for(pilot, lambda: isinstance(app.screen, FindingsScreen))
+        await settle_screen(pilot)
+
+
+@async_test
+async def test_progress_bar_uses_typed_phases_and_never_regresses() -> None:
+    service = FakeWorkflowService()
+    app = ProofAssistantApp(service)
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        await pilot.pause(0.1)
+        screen = ProgressScreen(
+            "Verifying manuscript",
+            project=service.project.project_path,
+            main_file=service.project.main_file,
+            input_files=service.project.input_files,
+        )
+        app.switch_screen(screen)
+        await wait_for(pilot, lambda: bool(screen.query("#progress-bar").nodes))
+        bar = screen.query_one("#progress-bar")
+
+        # Real backend phase events often omit per-unit counts.
+        screen.record_progress(
+            ProgressEvent(1, ProgressPhase.INDEXING, "Indexing selected closure")
+        )
+        assert 27.0 < bar.progress < 28.0
+
+        # A late event from an earlier phase cannot move the bar backward.
+        screen.record_progress(
+            ProgressEvent(
+                2,
+                ProgressPhase.OBSERVING_SOURCE,
+                "Late stability event",
+                completed=1,
+                total=1,
+            )
+        )
+        assert 27.0 < bar.progress < 28.0
+
+        # Counts are interpreted within their typed phase, not as global work.
+        screen.record_progress(
+            ProgressEvent(
+                3,
+                ProgressPhase.PROOF_BATCH,
+                "Half of this proof batch",
+                completed=1,
+                total=2,
+            )
+        )
+        assert 77.0 < bar.progress < 78.0
+        screen.record_progress(
+            ProgressEvent(4, ProgressPhase.LEAN_BUILD, "Build generated project")
+        )
+        screen.record_progress(
+            ProgressEvent(5, ProgressPhase.CERTIFICATION, "Certify finished proofs")
+        )
+        screen.record_progress(
+            ProgressEvent(6, ProgressPhase.PROOF_BATCH, "Start another proof batch")
+        )
+        stages = screen.query_one("#progress-stages", TextArea).text
+        assert "[active ] PROOF_BATCH" in stages
+        assert "[done   ] LEAN_BUILD" in stages
+        assert "[done   ] CERTIFICATION" in stages
+        assert "Current stage: PROOF_BATCH" in stages
+        assert 81.0 < bar.progress < 82.0
+
+        screen.record_progress(ProgressEvent(7, ProgressPhase.COMPLETE, "Complete"))
+        assert bar.progress == 100.0
+
+
+@async_test
+async def test_cooperative_cancellation_waits_for_backend_report() -> None:
+    service = FakeWorkflowService()
+    service.verification_release = threading.Event()
+    app = ProofAssistantApp(service)
+
+    async with app.run_test(size=(110, 35)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        await pilot.pause(0.1)
+        app.start_verification(service.project, None)
+        await wait_for(pilot, lambda: progress_log_contains(app, "INDEXING"))
+
+        cancel_button = app.screen.query_one("#cancel", Button)
+        assert "Request cooperative cancellation" in str(cancel_button.label)
+        cancel_button.press()
+        await pilot.pause()
+        assert isinstance(app.screen, ProgressScreen)
+        waiting = app.screen.query_one("#status-line", TextArea)
+        assert waiting.read_only
+        assert "still running" in waiting.text
+        assert "safely cancelled" not in waiting.text.lower()
+
+        service.verification_release.set()
+        await wait_for(pilot, lambda: isinstance(app.screen, RecoveryScreen))
+        report = app.screen.query_one("#cancellation-report", TextArea)
+        assert report.read_only
+        assert "Run ID: 73" in report.text
+        assert "Preserved certificates (2)" in report.text
+        assert "lem:stable" in report.text
+        assert "thm:finished" in report.text
+        assert "Retryable claims (2)" in report.text
+        assert "thm:in-flight" in report.text
+        assert "cor:dependent" in report.text
+        assert "Temporary worktrees cleaned: yes" in report.text
+        assert "Stopped after the current claim" in report.text
+        report.select_all()
+        assert "Run ID: 73" in report.selected_text
 
 
 @async_test
@@ -327,6 +595,7 @@ async def test_change_impact_requires_explicit_confirmation() -> None:
     service = FakeWorkflowService()
     p = service.project
     service.plan_result = change_plan(p)
+    service.verification_release = threading.Event()
     service.resume_result = WorkflowSnapshot(WorkflowState.PROJECT_READY, p)
     app = ProofAssistantApp(service)
 
@@ -351,10 +620,22 @@ async def test_change_impact_requires_explicit_confirmation() -> None:
         assert "thm:child-b" in text
         assert "lem:independent" in text
         assert "q-1" in text
+        assert "candidate-main.tex" in text
+        assert "sections/new-input.tex" in text
         assert service.verified == []
 
         await pilot.click("#confirm")
+        await wait_for(
+            pilot,
+            lambda: progress_log_contains(app, "INDEXING"),
+        )
+        source_text = app.screen.query_one("#progress-sources", TextArea).text
+        assert "Main file: candidate-main.tex" in source_text
+        assert "sections/new-input.tex" in source_text
+        assert "sections/introduction.tex" not in source_text
+        service.verification_release.set()
         await wait_for(pilot, lambda: isinstance(app.screen, FindingsScreen))
+        await settle_screen(pilot)
         assert service.verified[0][1] == "plan-1"
 
 

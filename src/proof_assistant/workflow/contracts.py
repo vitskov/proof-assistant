@@ -13,7 +13,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Protocol
 
-CONTRACT_SCHEMA_VERSION = 1
+CONTRACT_SCHEMA_VERSION = 2
 
 
 class WorkflowState(StrEnum):
@@ -75,9 +75,32 @@ class VerificationSettings:
 
 
 @dataclass(frozen=True)
+class LatexSourceCandidate:
+    """A LaTeX file that may be selected as a manuscript root."""
+
+    relative_path: str
+    has_documentclass: bool
+
+
+@dataclass(frozen=True)
+class SourceInspection:
+    """Read-only source discovery returned before project creation."""
+
+    source_path: Path
+    candidates: tuple[LatexSourceCandidate, ...]
+    suggested_main_file: str
+    source_in_dropbox: bool
+
+    @property
+    def selection_required(self) -> bool:
+        return len(self.candidates) > 1
+
+
+@dataclass(frozen=True)
 class NewProjectRequest:
     name: str
     source_path: Path
+    main_file: str
     project_path: Path | None = None
     task_text: str | None = None
     settings: VerificationSettings = field(default_factory=VerificationSettings)
@@ -89,6 +112,8 @@ class ProjectSummary:
     name: str
     project_path: Path
     source_path: Path
+    main_file: str
+    input_files: tuple[str, ...]
     last_opened_at: str
     workflow_state: WorkflowState
     latest_outcome: str | None = None
@@ -117,6 +142,8 @@ class ChangeImpactPlan:
     plan_id: str
     project_path: Path
     source_path: Path
+    main_file: str
+    input_files: tuple[str, ...]
     base_snapshot: str | None
     candidate_inventory_sha256: str
     file_changes: tuple[FileChange, ...]
@@ -190,6 +217,23 @@ class ProgressEvent:
 
 
 @dataclass(frozen=True)
+class CancellationReport:
+    """Durable backend facts established at a cooperative stop boundary.
+
+    A UI may describe cancellation as safe only after receiving this report.
+    Certificates listed here were committed before interruption. Claims listed
+    as retryable were in flight and have been moved out of ``PROVING`` so a
+    resumed verification can schedule them again.
+    """
+
+    run_id: int | None
+    detail: str
+    preserved_certificates: tuple[str, ...]
+    retryable_claims: tuple[str, ...]
+    temporary_worktrees_cleaned: bool
+
+
+@dataclass(frozen=True)
 class WorkflowSnapshot:
     state: WorkflowState
     project: ProjectSummary
@@ -197,12 +241,15 @@ class WorkflowSnapshot:
     clarifications: tuple[ClarificationPresentation, ...] = ()
     findings: FindingSummary | None = None
     error: str | None = None
+    cancellation: CancellationReport | None = None
 
 
 ProgressSink = Callable[[ProgressEvent], None]
 
 
 class CancellationToken(Protocol):
+    """Cooperative signal checked only at backend-owned consistency boundaries."""
+
     @property
     def cancelled(self) -> bool: ...
 
@@ -211,6 +258,8 @@ class CancellationToken(Protocol):
 
 class WorkflowServiceContract(Protocol):
     def default_task_text(self) -> str: ...
+
+    def inspect_source(self, source: Path) -> SourceInspection: ...
 
     def list_projects(self) -> Sequence[ProjectSummary]: ...
 

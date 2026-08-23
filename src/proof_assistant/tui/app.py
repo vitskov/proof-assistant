@@ -18,6 +18,8 @@ from proof_assistant.tui.screens import (
     ClarificationScreen,
     DashboardScreen,
     FindingsScreen,
+    MainFileSelectionScreen,
+    NewProjectDraft,
     NewProjectScreen,
     ProgressScreen,
     RecoveryScreen,
@@ -28,6 +30,7 @@ from proof_assistant.workflow.contracts import (
     NewProjectRequest,
     ProgressEvent,
     ProjectSummary,
+    SourceInspection,
     VerificationSettings,
     WorkflowServiceContract,
     WorkflowSnapshot,
@@ -83,7 +86,13 @@ class ProofAssistantApp(App[None]):
     .project-row { height: auto; margin-bottom: 1; }
     .project-row Static { width: 1fr; }
     .project-row Button { width: auto; }
-    #progress-log { height: 1fr; border: round $panel; padding: 1; }
+    #main-file-options { height: auto; border: round $panel; padding: 1; }
+    #progress-sources { height: 7; border: round $accent; }
+    #progress-stages { height: 16; border: round $panel; }
+    #progress-log { height: 1fr; min-height: 6; border: round $panel; }
+    #cancellation-report { height: 1fr; min-height: 14; border: round $warning; }
+    .progress-warning { height: 5; }
+    ProgressScreen #status-line { height: 3; border: none; }
     #source-excerpt {
         height: 1fr; min-height: 10; border: round $accent; overflow: auto;
     }
@@ -122,11 +131,56 @@ class ProofAssistantApp(App[None]):
             if hasattr(screen, "show_notice"):
                 screen.show_notice(f"Could not open {path}: {exc}", error=True)
 
+    def inspect_source_for_project(self, draft: NewProjectDraft) -> None:
+        """Inspect source through the backend before requiring a root choice."""
+
+        progress = ProgressScreen(
+            "Inspecting manuscript source",
+            project=draft.project_path,
+        )
+        self.switch_screen(progress)
+
+        def inspect() -> None:
+            try:
+                result = self.service.inspect_source(draft.source_path)
+            except Exception as exc:
+                self.call_from_thread(
+                    self.show_error,
+                    "Source inspection failed",
+                    str(exc),
+                    draft.project_path,
+                )
+                return
+            self.call_from_thread(self._after_source_inspection, draft, result)
+
+        self.run_worker(inspect, thread=True, exclusive=True, group="workflow")
+
+    def _after_source_inspection(
+        self, draft: NewProjectDraft, inspection: SourceInspection
+    ) -> None:
+        if not inspection.candidates:
+            self.show_error(
+                "Source inspection failed",
+                "No LaTeX source files were found.",
+                draft.project_path,
+            )
+            return
+        if len(inspection.candidates) == 1:
+            # A dedicated choice screen would be redundant. The creation and
+            # verification progress screens explicitly display this inferred root.
+            self.create_project(draft.request(inspection.candidates[0].relative_path))
+            return
+        self.switch_screen(MainFileSelectionScreen(draft, inspection))
+
     def create_project(self, request: NewProjectRequest) -> None:
         """Create and then immediately begin the first verification pass."""
 
         self.settings = request.settings
-        progress = ProgressScreen("Creating project", project=None)
+        progress = ProgressScreen(
+            "Creating project",
+            project=request.project_path,
+            main_file=request.main_file,
+        )
         self.switch_screen(progress)
 
         def create() -> None:
@@ -172,7 +226,10 @@ class ProofAssistantApp(App[None]):
 
     def check_for_changes(self, project: ProjectSummary) -> None:
         progress = ProgressScreen(
-            "Checking all manuscript files", project=project.project_path
+            "Checking selected manuscript source",
+            project=project.project_path,
+            main_file=project.main_file,
+            input_files=project.input_files,
         )
         self.switch_screen(progress)
 
@@ -224,6 +281,9 @@ class ProofAssistantApp(App[None]):
         project: ProjectSummary,
         plan_id: str | None,
         settings: VerificationSettings | None = None,
+        *,
+        main_file: str | None = None,
+        input_files: tuple[str, ...] | None = None,
     ) -> None:
         """Run verification on a thread and stream typed progress events."""
 
@@ -236,6 +296,8 @@ class ProofAssistantApp(App[None]):
             project=project.project_path,
             cancellable=True,
             source_in_dropbox=project.source_in_dropbox,
+            main_file=main_file or project.main_file,
+            input_files=(project.input_files if input_files is None else input_files),
         )
         self.switch_screen(progress_screen)
 

@@ -53,6 +53,15 @@ Preserve the component silos:
   models; and
 - `proof_assistant.incremental` owns verification state and certificates.
 
+The main manuscript file is mandatory backend state. Discover candidates
+through `WorkflowServiceContract.inspect_source`; pass a validated
+source-relative `main_file` in `NewProjectRequest`; and preserve `main_file` and
+the resolved `input_files` closure in project summaries, change plans, resume,
+progress, and verification. A single-file TUI shortcut may auto-select that
+file, but must still call the backend with the explicit value. Never restore an
+all-`.tex` implicit index or make the TUI independently resolve `\input` and
+`\include` topology.
+
 No Textual import may cross into backend/workflow code. Do not let TUI widgets,
 filesystem notifications, unchecked paths, or model prose become state
 authority. Plans must bind the complete source inventory and project generation;
@@ -77,13 +86,16 @@ internally. Do not reintroduce a user-facing external task-file workflow.
 ## Safe workflow
 
 1. Resolve and validate paths without printing secrets.
-2. Observe the full filtered external source until inventories stabilize.
-3. Stage, re-hash, and bind the copy into a `ChangeImpactPlan`.
-4. Require explicit user confirmation; revalidate immediately before import.
-5. Let the incremental engine snapshot/index/invalidate/verify/certify.
-6. Preserve SQLite, Git snapshots, questions, reports, and Lean history across
+2. Inspect candidates and establish one explicit, validated main file.
+3. Observe the full filtered external source until inventories stabilize.
+4. Stage, re-hash, resolve the root's input closure, and bind the copy into a
+   `ChangeImpactPlan`.
+5. Require explicit user confirmation; revalidate immediately before import.
+6. Let the incremental engine snapshot/index/invalidate/verify/certify only the
+   selected main-file closure.
+7. Preserve SQLite, Git snapshots, questions, reports, and Lean history across
    interruptions.
-7. Derive resume screens from persisted state; do not repeat unchanged
+8. Derive resume screens from persisted state; do not repeat unchanged
    clarification questions or start an unrequested iteration.
 
 Never brute-force cache cleanup while jobs are active. Resolve exact targets and

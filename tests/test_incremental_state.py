@@ -37,6 +37,7 @@ def initialize(
         manuscript=source,
         task_file=source / "VERIFY.yaml",
         project=tmp_path / "verification",
+        main_file="main.tex",
     )
     return source, session
 
@@ -85,6 +86,28 @@ def test_project_initialization_creates_clean_persistent_layout(tmp_path):
     assert len(manifest["manuscript_graph_sha256"]) == 64
     assert manifest["lean_graph_sha256"] is None
     assert len(manifest["combined_graph_sha256"]) == 64
+
+
+def test_prepare_pass_emits_real_source_pipeline_boundaries(tmp_path):
+    _source, session = initialize(tmp_path)
+    events = []
+    prepared = session.prepare_pass(
+        event_hook=lambda phase, message, details: events.append(
+            (phase, message, details)
+        )
+    )
+    finish_prepared(session, prepared.run_id)
+    phases = [phase for phase, _message, _details in events]
+    assert phases == [
+        "OBSERVING_SOURCE",
+        "IMPORTING_SOURCE",
+        "IMPORTING_SOURCE",
+        "INDEXING",
+        "INDEXING",
+        "IMPACT_ANALYSIS",
+    ]
+    assert events[0][2]["main_file"] == "main.tex"
+    assert events[3][2]["files"] == 1
 
 
 def test_status_remains_readable_while_a_verification_writer_holds_the_lock(tmp_path):

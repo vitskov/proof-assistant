@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -16,6 +17,8 @@ from textual.widgets import (
     Input,
     Label,
     ProgressBar,
+    RadioButton,
+    RadioSet,
     Static,
     TextArea,
 )
@@ -26,7 +29,9 @@ from proof_assistant.workflow.contracts import (
     FileChange,
     NewProjectRequest,
     ProgressEvent,
+    ProgressPhase,
     ProjectSummary,
+    SourceInspection,
     VerificationSettings,
     WorkflowSnapshot,
     WorkflowState,
@@ -48,6 +53,47 @@ def _dropbox_warning(project: ProjectSummary | ChangeImpactPlan) -> str:
 
 def _path_text(path: Path | None) -> str:
     return str(path) if path is not None else "not available"
+
+
+@dataclass(frozen=True)
+class NewProjectDraft:
+    """TUI-owned form state awaiting backend source inspection."""
+
+    name: str
+    source_path: Path
+    project_path: Path | None
+    task_text: str | None
+    settings: VerificationSettings
+
+    def request(self, main_file: str) -> NewProjectRequest:
+        """Create the strict backend request after a main file is selected."""
+
+        return NewProjectRequest(
+            name=self.name,
+            source_path=self.source_path,
+            main_file=main_file,
+            project_path=self.project_path,
+            task_text=self.task_text,
+            settings=self.settings,
+        )
+
+
+_PHASE_DESCRIPTIONS: dict[ProgressPhase, str] = {
+    ProgressPhase.VALIDATING: "Validate project state and selected main source",
+    ProgressPhase.OBSERVING_SOURCE: "Wait for a stable authoritative source tree",
+    ProgressPhase.IMPORTING_SOURCE: "Copy the stable source into managed storage",
+    ProgressPhase.INDEXING: "Parse claims and the recursive LaTeX input graph",
+    ProgressPhase.IMPACT_ANALYSIS: "Determine changed claims and proof descendants",
+    ProgressPhase.CACHE_SETUP: "Prepare the shared Lean dependency cache",
+    ProgressPhase.LEAN_BUILD: "Build the generated Lean verification project",
+    ProgressPhase.LEAN_EXTRACTION: "Extract candidate formal statements",
+    ProgressPhase.PROOF_BATCH: "Generate and check proof batches",
+    ProgressPhase.CERTIFICATION: "Kernel-check and persist certificates",
+    ProgressPhase.REPORTING: "Write durable findings, reports, and logs",
+    ProgressPhase.COMPLETE: "Finish the verification iteration",
+}
+
+_PHASE_ORDER = tuple(ProgressPhase)
 
 
 class NoticeScreen(Screen[None]):
@@ -133,6 +179,7 @@ class WelcomeScreen(NoticeScreen):
             warning = " · Dropbox source" if project.source_in_dropbox else ""
             detail = Static(
                 f"{project.name}\n{project.project_path}\n"
+                f"Main: {project.main_file}\n"
                 f"{project.workflow_state.value}{warning}",
                 classes="project-summary",
             )
@@ -231,14 +278,84 @@ class NewProjectScreen(NoticeScreen):
                 )
                 return
         project_path = Path(project_text).expanduser() if project_text else None
-        request = NewProjectRequest(
+        draft = NewProjectDraft(
             name=name,
             source_path=Path(source_text).expanduser(),
             project_path=project_path,
             task_text=task_text,
             settings=VerificationSettings(),
         )
-        self.proof_app.create_project(request)
+        self.proof_app.inspect_source_for_project(draft)
+
+
+class MainFileSelectionScreen(NoticeScreen):
+    """Require a deliberate main-file choice for an ambiguous source folder."""
+
+    BINDINGS = [("escape", "back", "Back")]
+
+    def __init__(self, draft: NewProjectDraft, inspection: SourceInspection) -> None:
+        super().__init__()
+        self.draft = draft
+        self.inspection = inspection
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        with VerticalScroll(id="page"):
+            yield Static("Select the manuscript's main LaTeX file", classes="title")
+            yield Static(
+                f"Source folder: {self.inspection.source_path}\n"
+                f"Found {len(self.inspection.candidates)} LaTeX files. Select the "
+                "single root document Proof Assistant should verify. Its recursive "
+                "\\input and \\include files will be resolved by the backend.",
+                markup=False,
+            )
+            buttons: list[RadioButton] = []
+            for index, candidate in enumerate(self.inspection.candidates):
+                hints: list[str] = []
+                if candidate.has_documentclass:
+                    hints.append("contains \\documentclass")
+                if candidate.relative_path == self.inspection.suggested_main_file:
+                    hints.append("suggested")
+                suffix = f"  ({', '.join(hints)})" if hints else ""
+                # Intentionally do not preselect the suggestion. Multiple-source
+                # projects require a deliberate user decision.
+                buttons.append(
+                    RadioButton(
+                        f"{candidate.relative_path}{suffix}",
+                        value=False,
+                        id=f"main-option-{index}",
+                    )
+                )
+            yield RadioSet(*buttons, id="main-file-options")
+            with Horizontal(classes="toolbar"):
+                yield Button(
+                    "Use selected main file", id="select-main", variant="success"
+                )
+                yield Button("Back", id="back")
+            yield Static(
+                "No file is selected yet. The suggestion is only a hint.",
+                id="status-line",
+                classes="muted",
+            )
+        yield Footer()
+
+    def action_back(self) -> None:
+        self.proof_app.show_new_project()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "back":
+            self.action_back()
+            return
+        if event.button.id != "select-main":
+            return
+        index = self.query_one("#main-file-options", RadioSet).pressed_index
+        if index < 0:
+            self.show_notice(
+                "Select one main LaTeX file before continuing.", error=True
+            )
+            return
+        main_file = self.inspection.candidates[index].relative_path
+        self.proof_app.create_project(self.draft.request(main_file))
 
 
 class DashboardScreen(NoticeScreen):
@@ -255,6 +372,9 @@ class DashboardScreen(NoticeScreen):
             yield Static(project.name, classes="title")
             yield Static(f"Project: {project.project_path}")
             yield Static(f"Authoritative source: {project.source_path}")
+            yield Static(f"Main LaTeX file: {project.main_file}")
+            inputs = ", ".join(project.input_files) or "none"
+            yield Static(f"Resolved inputs: {inputs}")
             yield Static(f"State: {self.snapshot.state.value}")
             warning = _dropbox_warning(project)
             if warning:
@@ -293,64 +413,147 @@ class ProgressScreen(NoticeScreen):
         project: Path | None,
         cancellable: bool = False,
         source_in_dropbox: bool = False,
+        main_file: str | None = None,
+        input_files: tuple[str, ...] = (),
     ) -> None:
         super().__init__()
         self.heading = title
         self.project = project
         self.cancellable = cancellable
         self.source_in_dropbox = source_in_dropbox
+        self.main_file = main_file
+        self.input_files = input_files
         self._lines: list[str] = []
+        self._current_phase: ProgressPhase | None = None
+        self._seen_phases: set[ProgressPhase] = set()
+        self._progress_percent = 0.0
 
     def compose(self) -> ComposeResult:
         yield Header()
-        with Vertical(id="page"):
+        # The outer scroll is intentional: every copyable pane remains usable on
+        # a short terminal instead of forcing the full stage list into 24 rows.
+        with VerticalScroll(id="page"):
             yield Static(self.heading, classes="title")
-            yield Static(f"Project: {_path_text(self.project)}")
+            yield TextArea(
+                self._source_detail(),
+                read_only=True,
+                soft_wrap=False,
+                id="progress-sources",
+            )
             if self.source_in_dropbox:
-                yield Static(
+                yield TextArea(
                     "Dropbox source detected. Proof Assistant is verifying a stable "
                     "managed snapshot; finish all related source edits before the next "
                     "change review.",
-                    classes="warning",
+                    read_only=True,
+                    soft_wrap=True,
+                    classes="warning progress-warning",
                     id="dropbox-warning",
                 )
             yield ProgressBar(total=100, show_eta=False, id="progress-bar")
-            yield Static("Waiting for progress…", id="progress-log")
+            yield TextArea(
+                self._stage_detail(),
+                read_only=True,
+                soft_wrap=True,
+                id="progress-stages",
+            )
+            yield TextArea(
+                "Waiting for progress…",
+                read_only=True,
+                soft_wrap=True,
+                id="progress-log",
+            )
             with Horizontal(classes="toolbar"):
                 yield Button(
-                    "Cancel safely",
+                    "Request cooperative cancellation",
                     id="cancel",
                     variant="warning",
                     disabled=not self.cancellable,
                 )
-            yield Static(
+            yield TextArea(
                 (
-                    "Work continues in a background thread; cancellation is checked "
-                    "at safe boundaries."
+                    "Work continues in a background thread. Cancellation is "
+                    "cooperative and is confirmed only when the backend returns a "
+                    "cancellation report."
                     if self.cancellable
                     else "Work continues in a background thread."
                 ),
+                read_only=True,
+                soft_wrap=True,
                 id="status-line",
                 classes="muted",
             )
         yield Footer()
 
+    def _source_detail(self) -> str:
+        inputs = "\n".join(f"  {path}" for path in self.input_files) or "  none"
+        return (
+            f"{self.heading}\n"
+            f"Project: {_path_text(self.project)}\n"
+            f"Main file: {self.main_file or 'not available'}\n"
+            f"Resolved input files ({len(self.input_files)}):\n{inputs}"
+        )
+
+    def _stage_detail(self) -> str:
+        if self._current_phase is None:
+            current = "Current stage: waiting for the verifier"
+        else:
+            current = (
+                f"Current stage: {self._current_phase.value} — "
+                f"{_PHASE_DESCRIPTIONS[self._current_phase]}"
+            )
+        rows = []
+        for index, phase in enumerate(_PHASE_ORDER, start=1):
+            if phase == self._current_phase:
+                marker = "active"
+            elif phase in self._seen_phases:
+                marker = "done"
+            else:
+                marker = "pending"
+            rows.append(
+                f"{index:02d}. [{marker:<7}] {phase.value}: "
+                f"{_PHASE_DESCRIPTIONS[phase]}"
+            )
+        return current + "\n\nVerification stages\n" + "\n".join(rows)
+
     def record_progress(self, event: ProgressEvent) -> None:
+        self._current_phase = event.phase
+        self._seen_phases.add(event.phase)
         claim = f" [{event.claim_id}]" if event.claim_id else ""
         self._lines.append(
             f"{event.sequence:04d} {event.phase.value}{claim}: {event.message}"
         )
         self._lines = self._lines[-200:]
-        self.query_one("#progress-log", Static).update("\n".join(self._lines))
-        if event.completed is not None and event.total:
-            percent = max(0.0, min(100.0, 100.0 * event.completed / event.total))
-            self.query_one("#progress-bar", ProgressBar).update(progress=percent)
+        self.query_one("#progress-stages", TextArea).text = self._stage_detail()
+        self.query_one("#progress-log", TextArea).text = "\n".join(self._lines)
+        candidate_percent = self._event_progress_percent(event)
+        self._progress_percent = max(self._progress_percent, candidate_percent)
+        self.query_one("#progress-bar", ProgressBar).update(
+            progress=self._progress_percent
+        )
+
+    def _event_progress_percent(self, event: ProgressEvent) -> float:
+        """Map typed phases and optional phase-local counts to overall progress."""
+
+        phase_index = _PHASE_ORDER.index(event.phase)
+        last_index = len(_PHASE_ORDER) - 1
+        if phase_index >= last_index:
+            return 100.0
+        phase_start = 100.0 * phase_index / last_index
+        phase_end = 100.0 * (phase_index + 1) / last_index
+        if event.completed is None or event.total is None or event.total <= 0:
+            return phase_start
+        unit_ratio = max(0.0, min(1.0, event.completed / event.total))
+        return phase_start + unit_ratio * (phase_end - phase_start)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "cancel" and self.cancellable:
             self.proof_app.cancel_verification()
             event.button.disabled = True
-            self.show_notice("Cancellation requested; waiting for a safe boundary.")
+            self.query_one("#status-line", TextArea).text = (
+                "Cooperative cancellation requested. Verification is still running "
+                "until the backend confirms a stop boundary."
+            )
 
 
 class ClarificationScreen(NoticeScreen):
@@ -513,7 +716,10 @@ class ChangeReviewScreen(NoticeScreen):
             "\n".join(f"  {question}" for question in plan.superseded_questions)
             or "  none"
         )
+        inputs = "\n".join(f"  {path}" for path in plan.input_files) or "  none"
         return (
+            f"Selected main file\n  {plan.main_file}\n\n"
+            f"Resolved input closure\n{inputs}\n\n"
             f"Files\n{files}\n\nDirect claim changes\n{direct}\n\n"
             f"Full affected proof-tree closure\n{affected}\n\n"
             f"Certificates expected to remain unaffected\n{unaffected}\n\n"
@@ -525,7 +731,11 @@ class ChangeReviewScreen(NoticeScreen):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "confirm":
             self.proof_app.start_verification(
-                self.snapshot.project, self.plan.plan_id, self.proof_app.settings
+                self.snapshot.project,
+                self.plan.plan_id,
+                self.proof_app.settings,
+                main_file=self.plan.main_file,
+                input_files=self.plan.input_files,
             )
         elif event.button.id == "wait":
             self.proof_app.switch_screen(DashboardScreen(self.snapshot))
@@ -653,9 +863,17 @@ class RecoveryScreen(NoticeScreen):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        with Vertical(id="page"):
+        with VerticalScroll(id="page"):
             yield Static(self.heading, classes="title")
-            yield Static(self.detail, classes="error")
+            if self._has_cancellation_report:
+                yield TextArea(
+                    self._cancellation_detail(),
+                    read_only=True,
+                    soft_wrap=True,
+                    id="cancellation-report",
+                )
+            else:
+                yield Static(self.detail, classes="error")
             if (
                 self.snapshot is not None
                 and self.snapshot.state == WorkflowState.BUSY_EXTERNAL
@@ -676,12 +894,63 @@ class RecoveryScreen(NoticeScreen):
                     disabled=self.project is None,
                 )
                 yield Button("Projects", id="projects", variant="primary")
-            yield Static(
-                "Existing project state is preserved.",
-                id="status-line",
-                classes="muted",
-            )
+            if self._has_cancellation_report:
+                status = (
+                    "The backend confirmed the cooperative stop boundary. Resume to "
+                    "retry the listed claims."
+                )
+            elif self._interrupted_without_report:
+                status = (
+                    "No backend cancellation report was received; certificate "
+                    "preservation, retry state, and temporary-worktree cleanup are "
+                    "not confirmed."
+                )
+            else:
+                status = "Existing project state is preserved."
+            yield Static(status, id="status-line", classes="muted")
         yield Footer()
+
+    @property
+    def _has_cancellation_report(self) -> bool:
+        return (
+            self.snapshot is not None
+            and self.snapshot.state == WorkflowState.INTERRUPTED
+            and self.snapshot.cancellation is not None
+        )
+
+    @property
+    def _interrupted_without_report(self) -> bool:
+        snapshot_interrupted = (
+            self.snapshot is not None
+            and self.snapshot.state == WorkflowState.INTERRUPTED
+        )
+        return (snapshot_interrupted or "interrupt" in self.heading.lower()) and not (
+            self._has_cancellation_report
+        )
+
+    def _cancellation_detail(self) -> str:
+        if self.snapshot is None or self.snapshot.cancellation is None:
+            return "No backend cancellation report was received."
+        report = self.snapshot.cancellation
+        preserved = (
+            "\n".join(f"  {claim_id}" for claim_id in report.preserved_certificates)
+            or "  none"
+        )
+        retryable = (
+            "\n".join(f"  {claim_id}" for claim_id in report.retryable_claims)
+            or "  none"
+        )
+        cleanup = "yes" if report.temporary_worktrees_cleaned else "no"
+        return (
+            "Cooperative cancellation confirmed by the backend\n"
+            f"Project: {_path_text(self.project)}\n"
+            f"Run ID: {report.run_id if report.run_id is not None else 'not available'}\n"
+            f"Detail: {report.detail}\n\n"
+            f"Preserved certificates ({len(report.preserved_certificates)}):\n"
+            f"{preserved}\n\n"
+            f"Retryable claims ({len(report.retryable_claims)}):\n{retryable}\n\n"
+            f"Temporary worktrees cleaned: {cleanup}"
+        )
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "retry" and self.project is not None:

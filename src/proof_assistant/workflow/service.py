@@ -14,7 +14,13 @@ from ..incremental.graph import (
     source_changes,
 )
 from ..incremental.io import atomic_write_json, atomic_write_text, canonical_hash
-from ..incremental.latex import explicit_reference_graph, index_manuscript
+from ..incremental.latex import (
+    LatexIndexError,
+    discover_latex_sources,
+    explicit_reference_graph,
+    index_manuscript,
+    resolve_latex_closure,
+)
 from ..incremental.models import (
     ClaimState,
     ManuscriptEdge,
@@ -49,17 +55,20 @@ from ..workspace.paths import (
 )
 from ..workspace.source import compare_inventories, stable_source_copy
 from .contracts import (
+    CancellationReport,
     ChangeImpactPlan,
     ClaimChangeKind,
     ClaimImpact,
     FileChange,
     FileChangeKind,
     FindingSummary,
+    LatexSourceCandidate,
     NewProjectRequest,
     ProgressEvent,
     ProgressPhase,
     ProgressSink,
     ProjectSummary,
+    SourceInspection,
     VerificationSettings,
     WorkflowSnapshot,
     WorkflowState,
@@ -154,6 +163,46 @@ class ProofAssistantWorkflow:
         """Return the validated instructions seeded into the TUI task editor."""
         return DEFAULT_TASK_INSTRUCTIONS
 
+    def inspect_source(self, source: Path) -> SourceInspection:
+        source = source.expanduser().resolve()
+        try:
+            discovered = discover_latex_sources(source)
+        except LatexIndexError as exc:
+            raise ValueError(str(exc)) from exc
+        candidates = tuple(
+            LatexSourceCandidate(relative_path, has_documentclass)
+            for relative_path, has_documentclass in discovered
+        )
+        document_roots = tuple(item for item in candidates if item.has_documentclass)
+        suggestion_pool = document_roots or candidates
+        preferred_names = {
+            "main.tex": 0,
+            "main.ltx": 1,
+            "paper.tex": 2,
+            "paper.ltx": 3,
+            "manuscript.tex": 4,
+            "manuscript.ltx": 5,
+            "article.tex": 6,
+            "article.ltx": 7,
+        }
+        suggested = min(
+            suggestion_pool,
+            key=lambda item: (
+                preferred_names.get(
+                    Path(item.relative_path).name.casefold(), len(preferred_names)
+                ),
+                len(Path(item.relative_path).parts),
+                item.relative_path.casefold(),
+                item.relative_path,
+            ),
+        )
+        return SourceInspection(
+            source_path=source,
+            candidates=candidates,
+            suggested_main_file=suggested.relative_path,
+            source_in_dropbox=is_in_dropbox(source),
+        )
+
     def list_projects(self) -> tuple[ProjectSummary, ...]:
         summaries: list[ProjectSummary] = []
         for record in self.catalog.records():
@@ -165,8 +214,19 @@ class ProofAssistantWorkflow:
 
     def create_project(self, request: NewProjectRequest) -> WorkflowSnapshot:
         source = request.source_path.expanduser().resolve()
-        if not source.is_dir():
-            raise ValueError(f"Manuscript source folder does not exist: {source}")
+        inspection = self.inspect_source(source)
+        selected = Path(str(request.main_file)).as_posix()
+        candidate_paths = {item.relative_path for item in inspection.candidates}
+        if selected not in candidate_paths:
+            choices = ", ".join(sorted(candidate_paths))
+            raise ValueError(
+                f"Selected main LaTeX file is not a source candidate: {selected!r}. "
+                f"Choose one of: {choices}"
+            )
+        try:
+            resolve_latex_closure(source, selected)
+        except LatexIndexError as exc:
+            raise ValueError(str(exc)) from exc
         project = validate_managed_project_path(
             request.project_path or default_project_path(request.name)
         )
@@ -177,6 +237,7 @@ class ProofAssistantWorkflow:
             project=project,
             project_name=request.name,
             source_in_dropbox=source_in_dropbox,
+            main_file=selected,
         )
         self._record_workflow_state(project, WorkflowState.PROJECT_READY)
         self.catalog.upsert(project)
@@ -241,10 +302,16 @@ class ProofAssistantWorkflow:
         session = IncrementalSession(project)
         config = session._load_config()
         source = Path(str(config["manuscript"])).expanduser().resolve()
+        main_file = str(config["main_file"])
         task_path = session._task_path_from_config(config)
         _task_path, _task_text, task_sha, task = parse_task_file(task_path)
 
         with stable_source_copy(source) as (candidate_source, inventory):
+            try:
+                source_files = resolve_latex_closure(candidate_source, main_file)
+            except LatexIndexError as exc:
+                raise ValueError(str(exc)) from exc
+            input_files = source_files[1:]
             with StateStore(session.database_path) as store:
                 snapshot = store.previous_snapshot()
                 previous_rows = (
@@ -284,7 +351,9 @@ class ProofAssistantWorkflow:
                 store.backup_to(database_copy)
             try:
                 with StateStore(database_copy) as candidate_store:
-                    objects = index_manuscript(candidate_source, candidate_store)
+                    objects = index_manuscript(
+                        candidate_source, candidate_store, main_file=main_file
+                    )
                 explicit_edges, _unresolved = explicit_reference_graph(objects)
             finally:
                 import shutil
@@ -382,7 +451,17 @@ class ProofAssistantWorkflow:
             for claim_id in sorted(deleted)
         )
         direct.extend(task_impacts)
-        deltas = compare_inventories(prior_files, inventory)
+        relevant_files = {
+            main_file,
+            *input_files,
+            *(str(value) for value in config.get("input_files", [])),
+        }
+        deltas = tuple(
+            item
+            for item in compare_inventories(prior_files, inventory)
+            if item.path in relevant_files
+            or (item.old_path is not None and item.old_path in relevant_files)
+        )
         file_changes = tuple(
             FileChange(
                 delta.path,
@@ -406,6 +485,8 @@ class ProofAssistantWorkflow:
             "schema_version": 1,
             "project": str(project),
             "source": str(source),
+            "main_file": main_file,
+            "input_files": list(input_files),
             "base_snapshot": snapshot,
             "candidate_inventory_sha256": inventory.sha256,
             "task_sha256": task_sha,
@@ -433,6 +514,8 @@ class ProofAssistantWorkflow:
             plan_id=canonical_hash(identity),
             project_path=project,
             source_path=source,
+            main_file=main_file,
+            input_files=input_files,
             base_snapshot=snapshot,
             candidate_inventory_sha256=inventory.sha256,
             file_changes=file_changes,
@@ -464,10 +547,26 @@ class ProofAssistantWorkflow:
             raise StaleChangePlanError(
                 "A manuscript or task change requires explicit review and confirmation"
             )
-        self._checkpoint(cancellation)
+        try:
+            self._checkpoint(cancellation)
+        except WorkflowCancelled as exc:
+            return self._interrupted_snapshot(project, exc)
         self._record_workflow_state(project, WorkflowState.VERIFYING)
+        project_summary = self._summary(project)
+        active_main_file = current.main_file if current else project_summary.main_file
+        active_input_files = (
+            current.input_files if current else project_summary.input_files
+        )
         self._emit(
-            progress, ProgressPhase.VALIDATING, "Validated the reviewed change plan"
+            progress,
+            ProgressPhase.VALIDATING,
+            f"Validated {active_main_file} and "
+            f"{len(active_input_files)} recursive input file(s)",
+            details={
+                "main_file": active_main_file,
+                "input_files": active_input_files,
+                "source_path": str(project_summary.source_path),
+            },
         )
 
         def event_hook(phase: str, message: str, details: dict[str, Any]) -> None:
@@ -507,12 +606,7 @@ class ProofAssistantWorkflow:
             self._record_workflow_state(project, WorkflowState.CHANGE_REVIEW)
             raise StaleChangePlanError(str(exc)) from exc
         except (WorkflowCancelled, VerificationCancelled) as exc:
-            self._record_workflow_state(
-                project, WorkflowState.INTERRUPTED, error=str(exc)
-            )
-            return WorkflowSnapshot(
-                WorkflowState.INTERRUPTED, self._summary(project), error=str(exc)
-            )
+            return self._interrupted_snapshot(project, exc)
         except Exception as exc:
             self._record_workflow_state(project, WorkflowState.FAILED, error=str(exc))
             return WorkflowSnapshot(
@@ -596,6 +690,8 @@ class ProofAssistantWorkflow:
             name=str(config.get("name") or project.name),
             project_path=project.resolve(),
             source_path=Path(str(config["manuscript"])).expanduser().resolve(),
+            main_file=str(config["main_file"]),
+            input_files=tuple(str(value) for value in config.get("input_files", [])),
             last_opened_at=str(
                 persisted.get("updated_at") or config.get("created_at") or ""
             ),
@@ -626,6 +722,44 @@ class ProofAssistantWorkflow:
             ),
             report_path=project / "VERIFICATION_REPORT.md",
             project_path=project,
+        )
+
+    def _interrupted_snapshot(
+        self, project: Path, exc: WorkflowCancelled | VerificationCancelled
+    ) -> WorkflowSnapshot:
+        if isinstance(exc, VerificationCancelled) and exc.run_id is not None:
+            report = CancellationReport(
+                run_id=exc.run_id,
+                detail=str(exc),
+                preserved_certificates=tuple(exc.preserved_certificates),
+                retryable_claims=tuple(exc.retryable_claims),
+                temporary_worktrees_cleaned=exc.temporary_worktrees_cleaned,
+            )
+        else:
+            session = IncrementalSession(project)
+            with StateStore(session.database_path) as store:
+                preserved = tuple(
+                    sorted(str(row["claim_id"]) for row in store.certificate_rows())
+                )
+            report = CancellationReport(
+                run_id=None,
+                detail=str(exc),
+                preserved_certificates=preserved,
+                retryable_claims=(),
+                temporary_worktrees_cleaned=(
+                    exc.temporary_worktrees_cleaned
+                    if isinstance(exc, VerificationCancelled)
+                    else True
+                ),
+            )
+        self._record_workflow_state(
+            project, WorkflowState.INTERRUPTED, error=report.detail
+        )
+        return WorkflowSnapshot(
+            WorkflowState.INTERRUPTED,
+            self._summary(project),
+            error=report.detail,
+            cancellation=report,
         )
 
     def _ensure_project_task(self, project: Path) -> None:
@@ -695,4 +829,26 @@ class ProofAssistantWorkflow:
         if sink is None:
             return
         self._sequence += 1
-        sink(ProgressEvent(self._sequence, phase, message, details=details or {}))
+        payload = details or {}
+        completed = payload.get("completed")
+        total = payload.get("total")
+        claim_id = payload.get("claim_id")
+        sink(
+            ProgressEvent(
+                self._sequence,
+                phase,
+                message,
+                completed=(
+                    completed
+                    if isinstance(completed, int) and not isinstance(completed, bool)
+                    else None
+                ),
+                total=(
+                    total
+                    if isinstance(total, int) and not isinstance(total, bool)
+                    else None
+                ),
+                claim_id=claim_id if isinstance(claim_id, str) else None,
+                details=payload,
+            )
+        )

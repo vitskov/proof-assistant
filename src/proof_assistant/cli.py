@@ -973,6 +973,7 @@ def cmd_manuscript_init(args) -> int:
         ensure_project_outside_dropbox(project, layout)
         session = IncrementalSession.initialize(
             manuscript=args.manuscript,
+            main_file=args.main_file,
             project=project,
         )
     except Exception as exc:
@@ -980,6 +981,10 @@ def cmd_manuscript_init(args) -> int:
         return 20
     status = session.status()
     print(f"project: {session.project}")
+    print(f"main file: {status['main_file']}")
+    print(f"input files: {len(status['input_files'])}")
+    for input_file in status["input_files"]:
+        print(f"  {input_file}")
     print(f"snapshot: {status['snapshot']}")
     print(f"indexed claims: {sum(status['claim_states'].values())}")
     print("status: initialized")
@@ -1488,6 +1493,11 @@ def build_parser() -> argparse.ArgumentParser:
         "init", help="Create a persistent verification project and index its manuscript"
     )
     manuscript_init.add_argument("--manuscript", required=True)
+    manuscript_init.add_argument(
+        "--main-file",
+        required=True,
+        help="LaTeX root relative to --manuscript (its input/include closure is indexed)",
+    )
     manuscript_init.add_argument("--project", required=True)
     manuscript_init.set_defaults(func=cmd_manuscript_init)
 

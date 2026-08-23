@@ -47,10 +47,16 @@ defaults to:
 $HOME/proof-assistant/<project-name>
 ```
 
-Select an existing folder containing the LaTeX source. The source may be in
-Dropbox: Proof Assistant warns you, waits for a stable multi-file snapshot, and
-copies the files into its managed project. The managed project, Python
-environment, and Lean cache must remain outside Dropbox.
+Select an existing folder containing the LaTeX source. Proof Assistant then
+establishes one explicit manuscript root. With one LaTeX file it announces that
+file and continues; with several, it lists them and requires you to select the
+main file. That main file may recursively `\input` or `\include` other files.
+Only this resolved source closure is interpreted as the manuscript, so an
+alternate paper or orphaned draft in the same folder is not silently verified.
+
+The source may be in Dropbox: Proof Assistant warns you, waits for a stable
+multi-file snapshot, and copies the files into its managed project. The managed
+project, Python environment, and Lean cache must remain outside Dropbox.
 
 Choose **Use default task** to check every theorem-like claim, or **Customize
 task** to edit the request inside the TUI. The resulting task is owned and
@@ -75,6 +81,11 @@ needed, it identifies the actual input file and source lines, explains the
 question, and waits while you edit the original source folder. It then detects
 all stable changes, previews their proof-graph impact, and starts the next
 iteration only after your explicit confirmation.
+
+While verification runs, the progress screen names the selected main file and
+every resolved input, explains the current preparation/proof/certification
+stage, and keeps read-only source, stage, and event panes whose text can be
+selected and copied.
 
 ## Help topics
 
@@ -115,3 +126,6 @@ Authentication remains inside Codex CLI. Proof Assistant never reads
 MCP servers, apps, plugins, and skills disabled and verified absent. This
 independently maintained project does not modify or publish to
 `facebookresearch/repoprover`.
+
+Proof Assistant is distributed under the Creative Commons
+Attribution-NonCommercial 4.0 International license; see [LICENSE](LICENSE).
