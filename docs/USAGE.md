@@ -150,6 +150,18 @@ evidence, and run artifacts. “Not verified” never means “false.” Only a
 kernel-checked counterexample with reviewed statement correspondence supports
 the counterexample outcome.
 
+Choose **View report in terminal** to open the canonical report without leaving
+the TUI. The **Rendered** tab displays Markdown with headings, code blocks,
+tables, scrolling, and a table of contents. The **Copyable source** tab exposes
+the exact read-only Markdown; focus it and use `Ctrl+A`, then `Ctrl+C`. The
+report path and any load error are selectable as well. This is the supported
+viewer over SSH—no browser, Finder, or desktop file handler is required.
+
+Copyability is a TUI-wide rule. Paths, candidate main files, commands,
+progress values, findings, warnings, errors, and source excerpts appear in
+read-only selectable panes. When Rich or Markdown rendering is useful, an exact
+selectable source twin is provided.
+
 ## When clarification is needed
 
 The clarification screen displays:

@@ -10,14 +10,18 @@ multi-root manuscript acceptance, and cache and repository hygiene checks. The
 earlier provider-backed two-claim acceptance remains recorded separately below
 and was not rerun for this main-source/TUI development pass.
 
-- Complete automated suite: **214 passed**.
+- Complete automated suite: **223 passed**.
 - Supported installer: **passed**, including its mandatory compiler check and
   complete suite in a disposable Python 3.13 environment.
 - uv bootstrap contract: **19 installer tests passed**, including offline
   curl/wget, missing/broken executable, custom destination, and failure cases;
   no test contacted the network.
 - Fresh wheel and Python 3.13 environment: **passed**.
-- Textual Pilot suite: **13 passed**.
+- Textual Pilot suite: **16 passed**, including the report viewer at 80×24.
+- Terminal report viewer: rendered Markdown/TOC and exact selectable source
+  tabs passed; no OS opener was called.
+- TUI copyability: paths, main-file candidates, progress values, findings,
+  warnings, errors, and rendered-source twins are guarded by tests.
 - Live catalog regression: the installed backend surfaced the existing
   `laplacians` project as **NEEDS_MAIN_FILE** with 17 candidates without
   modifying its legacy configuration.
@@ -62,7 +66,7 @@ Command:
 /Users/vui1/.venvs/proof-assistant/bin/python -m pytest -q
 ```
 
-Result: `214 passed` (56.88 seconds in the isolated uv-only gate; 103.86
+Result: `223 passed` (65.80 seconds in the complete pre-install gate; 67.07
 seconds in the final installer run).
 
 The suite covers:
@@ -81,6 +85,8 @@ The suite covers:
   certificates;
 - project-owned default/custom `VERIFY.yaml` and migration of older external
   task configurations;
+- backend-owned canonical report loading with non-mutating project
+  classification, UTF-8/error normalization, and managed-root containment;
 - backend-owned project catalog reconciliation, default-path resolution,
   destination occupancy, incomplete-directory visibility, explicit ambiguous
   legacy-root migration, and non-destructive conflict handling;
@@ -93,7 +99,8 @@ The suite covers:
 - Textual one-file/multi-file root selection, pre-creation review, stateful
   wizard back-navigation, new/resume, task editing, copyable detailed progress,
   cooperative cancellation reports, exact source display, change confirmation,
-  findings, and recovery screens;
+  findings, 80×24 terminal-native rendered/copyable report viewing, and
+  recovery screens;
 - cancellation boundary cleanup, durable certificate preservation, retryable
   in-flight claims, and legacy orphaned-`PROVING` recovery; and
 - the architecture rule that backend code cannot import Textual or Rich.
@@ -115,7 +122,7 @@ It reused the verified uv at `/Users/vui1/.local/bin/uv`, installed the package
 and development dependencies into a disposable Python 3.13 environment outside
 Dropbox, executed `proof-assistant compiler-check` before cache/test work,
 compiled and ran a C program with `/usr/bin/clang`, initialized the preserved
-cache, and ran all 214 tests. The missing/broken-uv bootstrap paths were tested
+cache, and ran all 223 tests. The missing/broken-uv bootstrap paths were tested
 with fake uv/curl/wget executables and an offline fake Astral installer, so the
 test suite made no bootstrap network requests.
 
@@ -128,6 +135,8 @@ fresh Python 3.13.15 environment and validated for:
 - packaged `proof_assistant.lean/DependencyExtractor.lean` resource;
 - pinned supported Textual 1.x resolution (`1.0.0` in the test);
 - packaged main-file/cancellation contracts and Textual screens import cleanly;
+- packaged `ReportDocument`, `ReportUnavailableError`, copyable TUI surfaces,
+  and the tabbed terminal report viewer import cleanly;
 - native compiler compile/run; and
 - cache doctor against the existing shared cache.
 
@@ -159,7 +168,7 @@ the evidence was recorded.
 ## Earlier real verification acceptance
 
 The following provider-backed evidence was produced before this main-source/TUI
-pass and remains useful regression context. It was not rerun in the final 201-test
+pass and remains useful regression context. It was not rerun in the final 223-test
 gate.
 
 A fresh managed project outside Dropbox was initialized from the two-claim
@@ -198,7 +207,7 @@ Final cache status:
 root: /Users/vui1/.cache/repoprover-codex
 managed: 8.84 GiB
 limit: 16.00 GiB
-filesystem free: 118.84 GiB
+filesystem free: 118.27 GiB
 minimum free: 25.00 GiB
 dependency depots: 7.06 GiB
 isolated project builds: 1.38 GiB

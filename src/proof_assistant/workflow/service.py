@@ -55,6 +55,7 @@ from ..workspace.management import (
     ProjectManager,
 )
 from ..workspace.paths import (
+    ManagedProjectPathError,
     is_in_dropbox,
     validate_managed_project_path,
 )
@@ -76,6 +77,7 @@ from .contracts import (
     ProjectCatalogEntry,
     ProjectDestinationInspection,
     ProjectSummary,
+    ReportDocument,
     SourceInspection,
     VerificationSettings,
     WorkflowSnapshot,
@@ -99,6 +101,10 @@ class ProjectDestinationError(RuntimeError):
         super().__init__(
             inspection.issue or "Managed project destination is unavailable"
         )
+
+
+class ReportUnavailableError(RuntimeError):
+    """A canonical verification report could not be loaded for presentation."""
 
 
 class CancellationFlag:
@@ -364,6 +370,54 @@ class ProofAssistantWorkflow:
                 )
             ) from exc
         return self.resume_project(project)
+
+    def load_report(self, project: Path) -> ReportDocument:
+        """Load the canonical project report without delegating to a GUI opener."""
+
+        try:
+            project = validate_managed_project_path(project)
+            managed = self.projects.inspect(project)
+        except (ManagedProjectPathError, OSError) as exc:
+            raise ReportUnavailableError(
+                f"Cannot load a report from unmanaged project root {project}: {exc}"
+            ) from exc
+        allowed = {
+            ManagedProjectKind.RESUMABLE,
+            ManagedProjectKind.MIGRATION_READY,
+            ManagedProjectKind.NEEDS_MAIN_FILE,
+        }
+        if managed.kind not in allowed:
+            detail = managed.issue or f"project classification is {managed.kind.value}"
+            raise ReportUnavailableError(
+                f"Cannot load a report from unmanaged project root {project}: {detail}"
+            )
+        report_path = project / "VERIFICATION_REPORT.md"
+        try:
+            resolved_report = report_path.resolve(strict=False)
+        except OSError as exc:
+            raise ReportUnavailableError(
+                f"Could not resolve verification report: {report_path}: {exc}"
+            ) from exc
+        if not resolved_report.is_relative_to(project):
+            raise ReportUnavailableError(
+                "Verification report escapes the managed project root: "
+                f"{report_path} -> {resolved_report}"
+            )
+        try:
+            markdown = resolved_report.read_text(encoding="utf-8")
+        except FileNotFoundError as exc:
+            raise ReportUnavailableError(
+                f"Verification report does not exist: {report_path}"
+            ) from exc
+        except UnicodeError as exc:
+            raise ReportUnavailableError(
+                f"Verification report is not valid UTF-8: {report_path}: {exc}"
+            ) from exc
+        except OSError as exc:
+            raise ReportUnavailableError(
+                f"Could not read verification report: {report_path}: {exc}"
+            ) from exc
+        return ReportDocument(resolved_report, markdown)
 
     def plan_changes(self, project: Path) -> ChangeImpactPlan | None:
         """Compute a complete candidate plan without changing project authority."""

@@ -72,7 +72,10 @@ Test the Textual app with its pilot/headless driver. Cover:
 11. explicit confirmation, plus rejection/recomputation of stale plans;
 12. no-change resume returning to the existing clarification screen;
 13. interrupted/failure recovery and read-only active-project status; and
-14. findings categories and evidence paths.
+14. findings categories and evidence paths; and
+15. an 80×24 terminal-native report viewer with rendered Markdown, a selectable
+    source tab, no OS opener call, normalized load errors, and Back/Close
+    navigation.
 
 Backend source tests must cover rapid editor-style replace sequences,
 simultaneous changes to several `\input` files, adds/deletes/renames, and staged

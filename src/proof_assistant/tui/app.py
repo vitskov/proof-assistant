@@ -26,6 +26,7 @@ from proof_assistant.tui.screens import (
     ProjectDestinationConflictScreen,
     ProjectReviewScreen,
     RecoveryScreen,
+    ReportViewerScreen,
     WelcomeScreen,
 )
 from proof_assistant.workflow.contracts import (
@@ -35,6 +36,7 @@ from proof_assistant.workflow.contracts import (
     ProjectCatalogEntry,
     ProjectDestinationInspection,
     ProjectSummary,
+    ReportDocument,
     SourceInspection,
     VerificationSettings,
     WorkflowServiceContract,
@@ -87,9 +89,12 @@ class ProofAssistantApp(App[None]):
     .toolbar Button { margin-right: 1; }
     Input { margin-bottom: 1; }
     TextArea { height: 12; border: round $accent; margin-bottom: 1; }
+    .copyable-info {
+        border: none; padding: 0; margin: 0; background: transparent;
+    }
     #project-list { height: 1fr; border: round $panel; padding: 1; }
     .project-row { height: auto; margin-bottom: 1; }
-    .project-row Static { width: 1fr; }
+    .project-row .project-summary { width: 1fr; }
     .project-row Button { width: auto; }
     #main-file-options { height: auto; border: round $panel; padding: 1; }
     #project-review { height: auto; border: round $accent; padding: 1; }
@@ -97,6 +102,9 @@ class ProofAssistantApp(App[None]):
     #progress-stages { height: 16; border: round $panel; }
     #progress-log { height: 1fr; min-height: 6; border: round $panel; }
     #cancellation-report { height: 1fr; min-height: 14; border: round $warning; }
+    #report-tabs { height: 1fr; min-height: 8; }
+    #report-markdown { height: 1fr; border: round $panel; }
+    #report-source { height: 1fr; border: round $accent; }
     .progress-warning { height: 5; }
     ProgressScreen #status-line { height: 3; border: none; }
     #source-excerpt {
@@ -175,6 +183,41 @@ class ProofAssistantApp(App[None]):
             screen = self.screen
             if hasattr(screen, "show_notice"):
                 screen.show_notice(f"Could not open {path}: {exc}", error=True)
+
+    def view_report(self, snapshot: WorkflowSnapshot) -> None:
+        """Load a report through the backend and render it inside the terminal."""
+
+        project = snapshot.project.project_path
+        progress = ProgressScreen("Loading verification report", project=project)
+        self.switch_screen(progress)
+
+        def load() -> None:
+            try:
+                document = self.service.load_report(project)
+            except Exception as exc:
+                self.call_from_thread(
+                    self._show_report_viewer,
+                    snapshot,
+                    None,
+                    str(exc),
+                )
+                return
+            self.call_from_thread(
+                self._show_report_viewer,
+                snapshot,
+                document,
+                None,
+            )
+
+        self.run_worker(load, thread=True, exclusive=True, group="workflow")
+
+    def _show_report_viewer(
+        self,
+        snapshot: WorkflowSnapshot,
+        document: ReportDocument | None,
+        error: str | None,
+    ) -> None:
+        self.switch_screen(ReportViewerScreen(snapshot, document=document, error=error))
 
     def inspect_source_for_project(self, draft: NewProjectDraft) -> None:
         """Preflight destination and source through backend-owned contracts."""

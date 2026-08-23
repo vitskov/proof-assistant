@@ -84,16 +84,24 @@ user edits exact requested source <- clarification or findings
 ```
 
 If no author action is needed, the TUI finishes with a human-readable findings
-screen and tells you where the full evidence is stored. If clarification is
-needed, it identifies the actual input file and source lines, explains the
-question, and waits while you edit the original source folder. It then detects
-all stable changes, previews their proof-graph impact, and starts the next
-iteration only after your explicit confirmation.
+screen and tells you where the full evidence is stored. **View report in
+terminal** opens a scrollable, rendered Markdown viewer with a table of contents
+and a separate selectable source tab, so it works over SSH without a graphical
+file opener. If clarification is needed, the TUI identifies the actual input
+file and source lines, explains the question, and waits while you edit the
+original source folder. It then detects all stable changes, previews their
+proof-graph impact, and starts the next iteration only after your explicit
+confirmation.
 
 While verification runs, the progress screen names the selected main file and
 every resolved input, explains the current preparation/proof/certification
 stage, and keeps read-only source, stage, and event panes whose text can be
 selected and copied.
+
+Informational values throughout the TUI—including paths, candidate files,
+commands, progress, findings, warnings, and errors—are exposed in selectable
+read-only text. Syntax-highlighted or rendered views have an adjacent copyable
+source representation.
 
 ## Help topics
 

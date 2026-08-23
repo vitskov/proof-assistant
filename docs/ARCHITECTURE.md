@@ -28,6 +28,8 @@ Owns Textual screens, widgets, Rich syntax rendering, key bindings, and
 background worker lifecycles. It may call workflow interfaces and render typed
 results. It must not write SQLite, copy manuscript trees, calculate graph
 closure, invoke Codex directly, or decide certification state.
+Informational values are rendered through selectable read-only surfaces;
+nonselectable syntax/Markdown renderers require an exact copyable source twin.
 
 ### `proof_assistant.workflow`
 
@@ -95,6 +97,10 @@ implicit meaning or mutable UI objects.
   batches, independent certification, and reporting.
 - `VerificationResult` uses explicit outcome categories and evidence paths. An
   agent completion marker is never a certificate.
+- `ReportDocument` contains the backend-validated canonical report path and
+  UTF-8 Markdown. `load_report` classifies the managed project without migration
+  or mutation, rejects paths that escape the project root, and normalizes load
+  errors. The TUI renders this document and never reads project files itself.
 - `ClarificationView` binds an exact persisted question to source path/span,
   quoted text, diagnostics, possible resolutions, and blocked claims.
 - `ResumeDecision` is derived from project state, open questions, source

@@ -12,6 +12,16 @@ Do not delete the project. The next backend mutation marks an abandoned
 `RUNNING` record `INTERRUPTED` and routes to recovery. Source snapshots,
 certificates, open questions, Lean code, and reports remain durable.
 
+## The report button appears to do nothing over SSH
+
+Upgrade and restart the TUI. **View report in terminal** loads the canonical
+project report through the backend and displays it inside Textual; it does not
+call the operating system's graphical opener. Use the rendered tab for
+navigation and the copyable-source tab for exact selection. If the report is
+missing, unreadable, invalid UTF-8, or outside the managed project boundary,
+the viewer shows a selectable error and preserves the findings screen behind
+its **Back** action.
+
 ## A project appears quiet
 
 The TUI progress screen names the selected main file, lists its resolved input

@@ -13,6 +13,7 @@ from proof_assistant.workflow.contracts import (
 from proof_assistant.workflow.service import (
     ProjectDestinationError,
     ProofAssistantWorkflow,
+    ReportUnavailableError,
 )
 
 
@@ -196,3 +197,80 @@ def test_malformed_catalogued_project_is_not_silently_dropped(tmp_path):
     assert first.availability == second.availability == ProjectAvailability.INCOMPLETE
     assert first.project_path == project
     assert "invalid JSON" in (first.issue or "")
+
+
+def test_backend_loads_canonical_markdown_report(tmp_path):
+    service, _source, project = create_project(tmp_path)
+    report = project / "VERIFICATION_REPORT.md"
+    markdown = "# Verified\n\n- `main`\n"
+    report.write_text(markdown, encoding="utf-8")
+
+    document = service.load_report(project)
+    assert document.path == report.resolve()
+    assert document.markdown == markdown
+
+
+def test_backend_report_load_is_nonmutating_for_legacy_project(tmp_path):
+    service, _source, project = create_project(tmp_path)
+    config_path = project / ".repoprover/config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["schema_version"] = 1
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    before = config_path.read_bytes()
+    report = project / "VERIFICATION_REPORT.md"
+    report.write_text("# Historical report\n", encoding="utf-8")
+
+    assert service.load_report(project).markdown == "# Historical report\n"
+    assert config_path.read_bytes() == before
+
+
+def test_backend_report_load_normalizes_missing_and_invalid_utf8(tmp_path):
+    service, _source, project = create_project(tmp_path)
+    report = project / "VERIFICATION_REPORT.md"
+    report.unlink(missing_ok=True)
+    with pytest.raises(ReportUnavailableError, match="does not exist") as missing:
+        service.load_report(project)
+    assert str(report) in str(missing.value)
+
+    report.write_bytes(b"\xff\xfe\x00")
+    with pytest.raises(ReportUnavailableError, match="not valid UTF-8") as invalid:
+        service.load_report(project)
+    assert str(report) in str(invalid.value)
+
+
+def test_backend_report_load_rejects_arbitrary_project_root(tmp_path):
+    arbitrary = tmp_path / "not-a-project"
+    arbitrary.mkdir()
+    report = arbitrary / "VERIFICATION_REPORT.md"
+    report.write_text("# private unrelated file\n", encoding="utf-8")
+
+    with pytest.raises(ReportUnavailableError, match="unmanaged project root"):
+        workflow(tmp_path).load_report(arbitrary)
+
+
+def test_backend_report_load_normalizes_read_failure(tmp_path, monkeypatch):
+    service, _source, project = create_project(tmp_path)
+    report = project / "VERIFICATION_REPORT.md"
+    report.write_text("# report\n", encoding="utf-8")
+    original = Path.read_text
+
+    def fail_report_read(path: Path, *args, **kwargs):
+        if path == report:
+            raise PermissionError("permission denied by test")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", fail_report_read)
+    with pytest.raises(ReportUnavailableError, match="permission denied by test"):
+        service.load_report(project)
+
+
+def test_backend_report_cannot_escape_managed_project(tmp_path):
+    service, _source, project = create_project(tmp_path)
+    private = tmp_path / "private.md"
+    private.write_text("must not be displayed\n", encoding="utf-8")
+    report = project / "VERIFICATION_REPORT.md"
+    report.unlink()
+    report.symlink_to(private)
+
+    with pytest.raises(ReportUnavailableError, match="escapes the managed project"):
+        service.load_report(project)

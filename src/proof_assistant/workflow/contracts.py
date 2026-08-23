@@ -268,6 +268,14 @@ class FindingSummary:
 
 
 @dataclass(frozen=True)
+class ReportDocument:
+    """Backend-loaded verification report for terminal-native presentation."""
+
+    path: Path
+    markdown: str
+
+
+@dataclass(frozen=True)
 class ProgressEvent:
     sequence: int
     phase: ProgressPhase
@@ -334,6 +342,8 @@ class WorkflowServiceContract(Protocol):
     def select_project_main_file(
         self, project: Path, main_file: str
     ) -> WorkflowSnapshot: ...
+
+    def load_report(self, project: Path) -> ReportDocument: ...
 
     def resume_project(self, project: Path) -> WorkflowSnapshot: ...
 

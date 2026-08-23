@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import asyncio
 import threading
 from collections.abc import Awaitable, Callable, Sequence
@@ -8,8 +9,9 @@ from pathlib import Path
 from typing import Any
 
 from textual.pilot import Pilot
-from textual.widgets import Button, Input, Static, TextArea
+from textual.widgets import Button, Input, MarkdownViewer, TabbedContent, TextArea
 
+import proof_assistant.tui.screens as tui_screens
 from proof_assistant.tui import ProofAssistantApp
 from proof_assistant.tui.screens import (
     ChangeReviewScreen,
@@ -22,6 +24,7 @@ from proof_assistant.tui.screens import (
     ProjectDestinationConflictScreen,
     ProjectReviewScreen,
     RecoveryScreen,
+    ReportViewerScreen,
     WelcomeScreen,
 )
 from proof_assistant.workflow.contracts import (
@@ -43,6 +46,7 @@ from proof_assistant.workflow.contracts import (
     ProjectCatalogEntry,
     ProjectDestinationInspection,
     ProjectSummary,
+    ReportDocument,
     SourceInspection,
     SourceLocation,
     VerificationSettings,
@@ -174,6 +178,7 @@ class FakeWorkflowService:
         self.inspected: list[Path] = []
         self.inspected_destinations: list[tuple[str, Path | None]] = []
         self.selected_main_files: list[tuple[Path, str]] = []
+        self.loaded_reports: list[Path] = []
         self.created: list[NewProjectRequest] = []
         self.resumed: list[Path] = []
         self.planned: list[Path] = []
@@ -196,6 +201,11 @@ class FakeWorkflowService:
         self.select_main_result = WorkflowSnapshot(
             WorkflowState.PROJECT_READY, self.project
         )
+        self.report_result = ReportDocument(
+            self.project.project_path / "VERIFICATION_REPORT.md",
+            "# Verification report\n\n**Verified:** yes\n\n```lean\nexample : True := by trivial\n```\n",
+        )
+        self.report_error: Exception | None = None
         self.verify_result = WorkflowSnapshot(
             WorkflowState.COMPLETED,
             ProjectSummary(
@@ -241,6 +251,12 @@ class FakeWorkflowService:
     ) -> WorkflowSnapshot:
         self.selected_main_files.append((project_path, main_file))
         return self.select_main_result
+
+    def load_report(self, project_path: Path) -> ReportDocument:
+        self.loaded_reports.append(project_path)
+        if self.report_error is not None:
+            raise self.report_error
+        return self.report_result
 
     def resume_project(self, project_path: Path) -> WorkflowSnapshot:
         self.resumed.append(project_path)
@@ -320,6 +336,30 @@ async def settle_screen(pilot: Pilot[None]) -> None:
     await pilot.pause(0.05)
 
 
+def test_nonselectable_static_output_has_an_explicit_copyable_twin() -> None:
+    """Guard the TUI-wide rule that useful informational values are selectable."""
+
+    source_path = Path(tui_screens.__file__)
+    tree = ast.parse(source_path.read_text(encoding="utf-8"))
+    static_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "Static"
+    ]
+    # Rich's rendered LaTeX excerpt is the sole exception; the same screen renders
+    # `#source-excerpt-copy` as a read-only TextArea immediately beside it.
+    assert len(static_calls) == 1
+    ids = {
+        keyword.value.value
+        for keyword in static_calls[0].keywords
+        if keyword.arg == "id" and isinstance(keyword.value, ast.Constant)
+    }
+    assert ids == {"source-excerpt"}
+    assert "source-excerpt-copy" in source_path.read_text(encoding="utf-8")
+
+
 @async_test
 async def test_new_project_custom_task_starts_first_verification() -> None:
     service = FakeWorkflowService()
@@ -344,7 +384,7 @@ async def test_new_project_custom_task_starts_first_verification() -> None:
         await pilot.click("#continue")
         await wait_for(pilot, lambda: isinstance(app.screen, ProjectReviewScreen))
         assert service.created == []
-        review = str(app.screen.query_one("#project-review", Static).renderable)
+        review = app.screen.query_one("#project-review", TextArea).text
         assert "Main LaTeX file: main.tex" in review
         assert "automatically selected" in review
         await pilot.click("#confirm-create")
@@ -360,10 +400,87 @@ async def test_new_project_custom_task_starts_first_verification() -> None:
         assert request.task_text == "Verify the main spectral theorem."
         assert service.inspected == [Path("/Users/writer/Dropbox/paper")]
         assert service.verified[0][1] is None
-        assert app.screen.query_one("#dropbox-warning", Static)
+        assert app.screen.query_one("#dropbox-warning", TextArea)
         assert "All selected claims" in str(
-            app.screen.query_one("#findings-detail", Static).renderable
+            app.screen.query_one("#findings-detail", TextArea).text
         )
+
+
+@async_test
+async def test_report_opens_in_terminal_with_rendered_and_copyable_content() -> None:
+    service = FakeWorkflowService()
+    opened: list[Path] = []
+    app = ProofAssistantApp(service, location_opener=opened.append)
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        await settle_screen(pilot)
+        app.show_snapshot(service.verify_result)
+        await wait_for(pilot, lambda: isinstance(app.screen, FindingsScreen))
+        await settle_screen(pilot)
+        app.screen.query_one("#open-report", Button).press()
+        await pilot.pause()
+        await wait_for(pilot, lambda: isinstance(app.screen, ReportViewerScreen))
+        await wait_for(pilot, lambda: bool(app.screen.query("#report-source").nodes))
+
+        assert service.loaded_reports == [service.project.project_path]
+        assert opened == []
+        path = app.screen.query_one("#report-path", TextArea)
+        assert path.read_only
+        assert str(service.report_result.path) in path.text
+        viewer = app.screen.query_one("#report-markdown", MarkdownViewer)
+        await wait_for(
+            pilot,
+            lambda: (
+                bool(viewer.document.query("MarkdownH1").nodes)
+                and bool(viewer.document.query("MarkdownFence").nodes)
+            ),
+        )
+        tabs = app.screen.query_one("#report-tabs", TabbedContent)
+        tabs.active = "report-source-pane"
+        await pilot.pause()
+        source = app.screen.query_one("#report-source", TextArea)
+        assert source.read_only
+        assert source.text == service.report_result.markdown
+        source.select_all()
+        assert "example : True" in source.selected_text
+        tabs.active = "report-rendered-pane"
+        await pilot.pause()
+        viewer.focus()
+        await pilot.press("pagedown")
+
+        app.screen.query_one("#back", Button).press()
+        await pilot.pause()
+        await wait_for(pilot, lambda: isinstance(app.screen, FindingsScreen))
+        await settle_screen(pilot)
+
+
+@async_test
+async def test_report_read_error_is_copyable_and_stays_in_terminal() -> None:
+    service = FakeWorkflowService()
+    report_path = service.project.project_path / "VERIFICATION_REPORT.md"
+    service.report_error = RuntimeError(
+        f"Could not read verification report: {report_path}: Permission denied"
+    )
+    opened: list[Path] = []
+    app = ProofAssistantApp(service, location_opener=opened.append)
+
+    async with app.run_test(size=(110, 40)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        await settle_screen(pilot)
+        app.show_snapshot(service.verify_result)
+        await wait_for(pilot, lambda: isinstance(app.screen, FindingsScreen))
+        await settle_screen(pilot)
+        app.screen.query_one("#open-report", Button).press()
+        await pilot.pause()
+        await wait_for(pilot, lambda: isinstance(app.screen, ReportViewerScreen))
+        error = app.screen.query_one("#report-error", TextArea)
+        assert error.read_only
+        assert str(report_path) in error.text
+        assert "Permission denied" in error.text
+        error.select_all()
+        assert "Could not read verification report" in error.selected_text
+        assert opened == []
 
 
 @async_test
@@ -385,7 +502,7 @@ async def test_default_task_is_backend_owned() -> None:
         await wait_for(pilot, lambda: isinstance(app.screen, ProjectReviewScreen))
         assert service.created == []
         assert "automatically selected" in str(
-            app.screen.query_one("#project-review", Static).renderable
+            app.screen.query_one("#project-review", TextArea).text
         )
         await pilot.click("#confirm-create")
         await wait_for(
@@ -433,17 +550,23 @@ async def test_multiple_latex_files_require_deliberate_main_selection() -> None:
 
         # A suggestion is visible but is intentionally not an implicit choice.
         assert "suggested" in str(app.screen.query_one("#main-option-1").label)
+        candidates = app.screen.query_one("#main-file-candidates-copy", TextArea)
+        candidates.select_all()
+        assert "appendix.tex" in candidates.selected_text
+        assert "paper.tex" in candidates.selected_text
+        assert "slides.tex" in candidates.selected_text
+        assert "suggested" in candidates.selected_text
         await pilot.click("#select-main")
         assert service.created == []
         assert "Select one main" in str(
-            app.screen.query_one("#status-line", Static).renderable
+            app.screen.query_one("#status-line", TextArea).text
         )
 
         await pilot.click("#main-option-2")
         await pilot.click("#select-main")
         await wait_for(pilot, lambda: isinstance(app.screen, ProjectReviewScreen))
         assert service.created == []
-        review = str(app.screen.query_one("#project-review", Static).renderable)
+        review = app.screen.query_one("#project-review", TextArea).text
         assert "Main LaTeX file: slides.tex" in review
         assert "selected by user" in review
         await pilot.click("#confirm-create")
@@ -535,7 +658,8 @@ async def test_legacy_catalog_project_selects_main_and_recovers() -> None:
             lambda: bool(app.screen.query("#select-existing-main-0").nodes),
         )
         catalog_text = "\n".join(
-            str(widget.renderable) for widget in app.screen.query(".project-summary")
+            widget.text
+            for widget in app.screen.query(TextArea).filter(".project-summary")
         )
         assert "Legacy Paper" in catalog_text
         assert "NEEDS_MAIN_FILE" in catalog_text
@@ -549,6 +673,13 @@ async def test_legacy_catalog_project_selects_main_and_recovers() -> None:
         )
         assert service.selected_main_files == []
         assert "suggested" in str(app.screen.query_one("#existing-main-option-0").label)
+        candidates = app.screen.query_one(
+            "#existing-main-file-candidates-copy", TextArea
+        )
+        candidates.select_all()
+        assert "article.tex" in candidates.selected_text
+        assert "alternate.tex" in candidates.selected_text
+        assert "suggested" in candidates.selected_text
         await pilot.click("#existing-main-option-1")
         await pilot.click("#confirm-existing-main")
         await wait_for(
@@ -583,7 +714,8 @@ async def test_occupied_and_incomplete_catalog_entries_remain_visible() -> None:
             pilot, lambda: len(app.screen.query(".project-summary").nodes) == 2
         )
         catalog_text = "\n".join(
-            str(widget.renderable) for widget in app.screen.query(".project-summary")
+            widget.text
+            for widget in app.screen.query(TextArea).filter(".project-summary")
         )
         assert "OCCUPIED" in catalog_text
         assert "Folder contains unrelated files" in catalog_text
@@ -623,7 +755,7 @@ async def test_destination_conflict_stops_before_source_inspection_or_creation()
             pilot, lambda: isinstance(app.screen, ProjectDestinationConflictScreen)
         )
 
-        detail = str(app.screen.query_one("#destination-conflict", Static).renderable)
+        detail = app.screen.query_one("#destination-conflict", TextArea).text
         assert str(conflict_path) in detail
         assert "OCCUPIED" in detail
         assert "unrelated user files" in detail
@@ -740,6 +872,7 @@ async def test_progress_bar_uses_typed_phases_and_never_regresses() -> None:
         assert "[done   ] LEAN_BUILD" in stages
         assert "[done   ] CERTIFICATION" in stages
         assert "Current stage: PROOF_BATCH" in stages
+        assert "Progress:" in stages
         assert 81.0 < bar.progress < 82.0
 
         screen.record_progress(ProgressEvent(7, ProgressPhase.COMPLETE, "Complete"))
@@ -816,13 +949,17 @@ async def test_resume_clarification_exact_source_and_no_change() -> None:
         await pilot.click("#resume-0")
         await wait_for(pilot, lambda: isinstance(app.screen, ClarificationScreen))
 
-        detail = str(app.screen.query_one("#clarification-detail", Static).renderable)
+        detail = app.screen.query_one("#clarification-detail", TextArea).text
         assert "thm:child-a" in detail
         assert "Strengthen the assumptions" in detail
         assert "sections/main.tex:42:1" in str(
-            app.screen.query_one("#source-location", Static).renderable
+            app.screen.query_one("#source-location", TextArea).text
         )
-        assert app.screen.query_one("#dropbox-warning", Static)
+        assert app.screen.query_one("#dropbox-warning", TextArea)
+        excerpt_copy = app.screen.query_one("#source-excerpt-copy", TextArea)
+        assert excerpt_copy.read_only
+        excerpt_copy.select_all()
+        assert "The restriction is positive definite" in excerpt_copy.selected_text
 
         await pilot.click("#open-file")
         await pilot.click("#open-folder")
@@ -839,11 +976,11 @@ async def test_resume_clarification_exact_source_and_no_change() -> None:
                 bool(service.planned)
                 and isinstance(app.screen, ClarificationScreen)
                 and "No stable manuscript changes"
-                in str(app.screen.query_one("#status-line", Static).renderable)
+                in app.screen.query_one("#status-line", TextArea).text
             ),
         )
         assert "No stable manuscript changes" in str(
-            app.screen.query_one("#status-line", Static).renderable
+            app.screen.query_one("#status-line", TextArea).text
         )
         assert service.verified == []
 
@@ -873,7 +1010,7 @@ async def test_change_impact_requires_explicit_confirmation() -> None:
         await pilot.click("#check-changes")
         await wait_for(pilot, lambda: isinstance(app.screen, ChangeReviewScreen))
 
-        text = str(app.screen.query_one("#impact-detail", Static).renderable)
+        text = app.screen.query_one("#impact-detail", TextArea).text
         assert "sections/main.tex" in text
         assert "thm:child-b" in text
         assert "lem:independent" in text
@@ -923,6 +1060,4 @@ async def test_busy_project_opens_recovery_screen() -> None:
         )
         await pilot.click("#resume-0")
         await wait_for(pilot, lambda: isinstance(app.screen, RecoveryScreen))
-        assert "separate verifier" in str(
-            app.screen.query_one(".error", Static).renderable
-        )
+        assert "separate verifier" in str(app.screen.query_one(".error", TextArea).text)
