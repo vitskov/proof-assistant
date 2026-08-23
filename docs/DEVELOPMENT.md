@@ -73,12 +73,15 @@ machine cannot hide a reintroduction of the nested-rescan algorithm.
 Use a model/effort pair printed by `models`, then run one deliberately trivial
 RepoProver proof and one file-based manuscript task. Successful manuscript exit
 requires the separate final Lean build and all evidence conditions documented
-in [MANUSCRIPT_RUNS.md](MANUSCRIPT_RUNS.md).
+in the [Usage guide](USAGE.md#results-and-evidence).
 
 Only after single-agent success, run exactly two concurrent Codex-backed
 agents. This is a local-mode package target; SLURM is not required on macOS.
 
 ## Release checks
+
+The current release line is `0.4.x`. Increment patch versions conservatively;
+do not enter the `0.5.x` series without explicit user authorization.
 
 ```bash
 git diff --check

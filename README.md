@@ -1,30 +1,57 @@
-# repoprover-codex
+# RepoProver Codex
 
-`repoprover-codex` connects
-[`facebookresearch/repoprover`](https://github.com/facebookresearch/repoprover)
-to the locally authenticated Codex CLI. It can verify a free-form task against
-a folder of LaTeX manuscript sources and retain the Lean evidence, report,
-logs, and Git history in a caller-selected output folder.
+Use a locally authenticated Codex CLI to investigate mathematical claims in a
+LaTeX manuscript and retain the resulting Lean evidence, reports, logs, and Git
+history in an output folder you control.
 
-This is an independently maintained project. It does not modify upstream
-RepoProver, read Codex authentication files, extract OAuth tokens, or require
-an `OPENAI_API_KEY`.
+RepoProver Codex is for authors and researchers who want more than a prose
+review. It gives Codex the formal tools exposed by
+[`facebookresearch/repoprover`](https://github.com/facebookresearch/repoprover),
+lets it formalize and test manuscript claims in Lean, and then independently
+builds the final Lean project before reporting success.
+
+## What it does
+
+Given a manuscript folder, a plain-text task, and an empty output folder, the
+package:
+
+1. copies the manuscript into an isolated Git workspace without modifying the
+   original;
+2. runs one RepoProver agent through the existing Codex login, with external
+   MCP servers, apps, plugins, and skills disabled for that child process;
+3. records the formalization, tool calls, logs, report, and commits; and
+4. requires independent Lean evidence before classifying a run as verified.
+
+The tool distinguishes verified, unverified, incomplete, setup failure, and
+tool failure outcomes. Failure to verify a claim is never presented as proof
+that the claim is false.
+
+A successful Lean build proves the generated formal statements, not by itself
+that those statements faithfully encode the manuscript's prose. Review the
+report's claim-to-formalization mapping and assumptions before relying on the
+result.
 
 ## Quick start
 
-Requirements: macOS or Linux, Codex CLI already logged in, `uv`, Lean/Lake,
-Git, and a native C compiler.
+Requirements: macOS or Linux, Python 3.13, `uv`, Git, Lean/Lake, a native C
+compiler, and a Codex CLI session authenticated with `codex login`.
 
 ```bash
 git clone https://github.com/vitskov/repoprover-codex.git "$HOME/src/repoprover-codex"
 cd "$HOME/src/repoprover-codex"
 scripts/install-dev.sh
+export PATH="$HOME/.venvs/repoprover-codex/bin:$PATH"
+
+git clone https://github.com/facebookresearch/repoprover.git "$HOME/src/repoprover"
+git -C "$HOME/src/repoprover" checkout 386adba3df572cb71df534add2c764e071898a2e
+uv pip install --python "$HOME/.venvs/repoprover-codex/bin/python" \
+  -e "$HOME/src/repoprover"
 ```
 
-The installer uses Python 3.13 and uv, creates the environment at
-`$HOME/.venvs/repoprover-codex`, performs a real compile-and-execute compiler
-check, initializes the bounded cache, and runs the tests. Python environments
-and Lean caches are rejected if they resolve into Dropbox.
+The installer creates the Python environment and Lean cache outside Dropbox,
+compiles and executes a native test program, and runs the complete package test
+suite. RepoProver is installed separately from its pinned source checkout; it
+is not modified by RepoProver Codex.
 
 Check the installation:
 
@@ -32,12 +59,15 @@ Check the installation:
 repoprover-codex doctor
 repoprover-codex models
 repoprover-codex cache doctor
-repoprover-codex cache status
 ```
 
-Run a manuscript verification:
+Choose your three paths and run a verification:
 
 ```bash
+export MANUSCRIPT=/absolute/path/to/manuscript
+export TASK="$HOME/repoprover-tasks/check-manuscript.md"
+export OUTPUT="$HOME/repoprover-runs/manuscript-001"
+
 repoprover-codex manuscript-run \
   --manuscript "$MANUSCRIPT" \
   --task-file "$TASK" \
@@ -48,93 +78,56 @@ repoprover-codex manuscript-run \
 ```
 
 `$TASK` is a UTF-8 text or Markdown file containing the complete free-form
-verification request. `$OUTPUT` must be new or empty and outside Dropbox. The
-input manuscript is copied and never modified.
+verification request. Start from [the example task](examples/verify-task.md) or
+write your own. `$OUTPUT` must be new or empty and outside Dropbox.
 
-## What is implemented
+When the command finishes, begin with:
 
-- Persistent `codex app-server` sessions using the existing Codex login.
-- Exact model and reasoning-effort validation against `model/list`.
-- RepoProver tools exposed as Codex dynamic tools.
-- Child-process isolation from local MCP servers, apps, plugins, and skills.
-- File-based manuscript, task, and output interface.
-- Independent final Lean build and evidence-based result classification.
-- Shared content-addressed Mathlib/REPL dependency depots across projects whose
-  package names and source roots differ but whose dependency declarations match.
-- Isolated per-project root builds with process-held cache leases.
-- Transactional capacity reservations and a persistent coarse-grained cache
-  index with crash recovery.
-- Deadline-bounded garbage collection, a 16 GiB default cache ceiling, and a
-  25 GiB default filesystem free-space reserve.
-- macOS and Linux local-mode support.
+- `$OUTPUT/VERIFICATION_REPORT.md` for the human-readable findings;
+- `$OUTPUT/RUN_STATUS.json` and `$OUTPUT/artifacts/result.json` for the outcome;
+- `$OUTPUT/workspace/` for the manuscript snapshot, Lean source, and Git
+  history; and
+- `$OUTPUT/artifacts/` for setup, tool-call, event, and final-build evidence.
 
-## Commands
+## Help topics
 
-| Command | Purpose |
+| If you want to… | Read… |
 | --- | --- |
-| `doctor` | Verify Codex app-server connectivity and authentication. |
-| `models` | List exact models and supported effort levels. |
-| `smoke` | Run a real Codex dynamic-tool round trip. |
-| `compiler-check` | Compile and execute a native test program. |
-| `manuscript-run` | Verify a task file against a manuscript folder. |
-| `repoprover-prove` | Run one RepoProver PROVE task on an existing Lean project. |
-| `cache status` | Show cache usage, limits, and disk headroom. |
-| `cache prepare` | Prepare and build a Lean project without starting Codex. |
-| `cache gc` | Enforce limits with bounded, coarse-unit eviction. |
+| install, verify, or upgrade the package | [Installation](docs/INSTALLATION.md) |
+| run a manuscript task from start to finish | [Usage guide](docs/USAGE.md) |
+| understand commands and timeout options | [Command reference](docs/COMMAND_REFERENCE.md) |
+| interpret outcomes and output files | [Usage: results and evidence](docs/USAGE.md#results-and-evidence) |
+| monitor a run or diagnose a failure | [Troubleshooting and operations](docs/TROUBLESHOOTING.md) |
+| understand or clean disk usage | [Cache and storage](docs/CACHE_AND_STORAGE.md) |
+| understand authentication and isolation | [Architecture and security](docs/ARCHITECTURE.md) |
+| develop, test, or release the package | [Development and testing](docs/DEVELOPMENT.md) |
+| see the exact tested versions and evidence | [Test report](TEST_REPORT.md) |
+| navigate all documentation | [Documentation index](docs/README.md) |
 
-## Storage model
+> **If you are an AI agent:** read [Working on RepoProver Codex as an AI
+> agent](docs/AI_AGENTS.md) before running commands or changing files.
 
-Large Lean dependencies are stored once per compatible dependency fingerprint:
+## Safety and storage
 
-```text
-~/.cache/repoprover-codex/
-├── cache-index.sqlite3                    # transactional accounting
-├── lake/dependencies/deps-<fingerprint>/  # shared Mathlib/REPL depot
-├── lake/builds/<project>-<path-hash>/     # small isolated root build
-├── mathlib-downloads/
-├── lake/system/
-├── locks/
-├── trash/                                 # atomic GC quarantine
-└── config.json                            # compiler and disk policy
-```
+Authentication remains inside the Codex CLI. This package does not read Codex
+authentication files, extract OAuth tokens, or require an `OPENAI_API_KEY`.
+This is not an offline verifier: manuscript context and tool results needed for
+the task are processed through the authenticated Codex service. Apply the same
+confidentiality policy you would apply to other Codex CLI work.
 
-For standard `lakefile.lean` Git requirements, the fingerprint uses normalized
-dependency name/URL/revision triples rather than project package declarations
-or source roots. It also includes the Lean toolchain, operating system,
-architecture, and native compiler identity. Unknown Lake syntax falls back to
-a conservative whole-file hash. Compatible projects share the dependency
-depot but never their manuscript/root build products.
-
-Before expensive setup, an admission lock makes cleanup and a conservative
-capacity reservation atomic. The index contains one row per build, depot, or
-bulk cache—not one row per Mathlib archive. Changed entries are measured once;
-the eviction loop never recursively rescans the cache. Deletion first renames a
-whole unit into `trash/`, then traverses it once with a deadline and progress
-messages. Active entries are protected by advisory locks that the operating
-system releases if a process exits or is killed; stale reservations and
-interrupted quarantines are recovered automatically.
-
-The default GC deadline is 900 seconds and can be changed per command with
-`--gc-timeout`. If accounting or deletion reaches that deadline, the command
-fails explicitly and leaves any partial deletion isolated in `trash/` for the
-next bounded recovery pass.
-
-## Documentation
-
-- [Installation and upgrades](docs/INSTALLATION.md)
-- [Running manuscript verification](docs/MANUSCRIPT_RUNS.md)
-- [Cache and storage guarantees](docs/CACHE_AND_STORAGE.md)
-- [Architecture and security boundary](docs/ARCHITECTURE.md)
-- [Development and testing](docs/DEVELOPMENT.md)
-- [Latest tested configuration](TEST_REPORT.md)
-
-`CODEX_HANDOFF.md` is retained as historical development context, not as the
-primary operating manual.
+Large compatible Mathlib/REPL dependencies are shared rather than copied for
+every manuscript. Transactional reservations, active-process leases, a
+coarse-grained accounting index, and deadline-bounded garbage collection keep
+managed storage predictable. The default cache is
+`$HOME/.cache/repoprover-codex`; Python environments and Lean caches are
+rejected if they resolve into Dropbox.
 
 ## Project status
 
-Version 0.4.0 is tested locally on macOS with Python 3.13, Lean 4.28, Lake 5,
-and the pinned RepoProver checkout recorded in `TEST_REPORT.md`.
+Version 0.4.0 is tested on macOS with Python 3.13, Lean 4.28, Lake 5, and the
+pinned RepoProver checkout recorded in [TEST_REPORT.md](TEST_REPORT.md). Linux
+is supported by the implementation but was not exercised in the latest local
+acceptance pass.
 
-No pull request, issue, or push has been made to
-`facebookresearch/repoprover`.
+This is an independently maintained project. No pull request, issue, or push
+has been made to `facebookresearch/repoprover`.

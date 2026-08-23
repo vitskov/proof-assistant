@@ -29,6 +29,11 @@ The isolation configuration does not change the user's persistent Codex
 configuration. Authentication remains inside Codex; this package never reads
 `~/.codex/auth.json` and never converts the login into an API key.
 
+The integration is not offline. Manuscript context and dynamic-tool results
+needed by the agent are processed through the authenticated Codex service.
+Users remain responsible for applying their organization's confidentiality and
+data-handling policy to manuscript inputs.
+
 One persistent Codex thread is used per logical RepoProver agent. Exact model
 and effort values are validated against the installed app-server's
 `model/list` result and sent explicitly with the request.
