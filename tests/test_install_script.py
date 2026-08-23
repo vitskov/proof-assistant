@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -8,11 +9,162 @@ ROOT = Path(__file__).resolve().parents[1]
 INSTALLER = ROOT / "scripts" / "install-dev.sh"
 
 
+def _write_executable(path: Path, text: str) -> None:
+    path.write_text(text, encoding="utf-8")
+    path.chmod(0o755)
+
+
+def _fake_command_path(root: Path) -> Path:
+    commands = root / "commands"
+    commands.mkdir()
+    for name in ("bash", "chmod", "cp", "dirname", "env", "mkdir", "sh"):
+        target = shutil.which(name)
+        assert target is not None
+        (commands / name).symlink_to(target)
+    return commands
+
+
+def _fake_venv(home: Path, log: Path) -> Path:
+    venv = home / ".venvs" / "proof-assistant"
+    binary = venv / "bin"
+    binary.mkdir(parents=True)
+    _write_executable(
+        binary / "python",
+        '#!/bin/sh\nprintf \'python:%s\\n\' "$*" >> "$FAKE_LOG"\n',
+    )
+    _write_executable(
+        binary / "proof-assistant",
+        '#!/bin/sh\nprintf \'proof:%s|PATH=%s\\n\' "$*" "$PATH" >> "$FAKE_LOG"\n',
+    )
+    log.touch()
+    return venv
+
+
+def _fake_uv(path: Path, *, tag: str, working: bool = True) -> None:
+    version_status = 0 if working else 19
+    _write_executable(
+        path,
+        "#!/bin/sh\n"
+        f'printf \'{tag}:%s\\n\' "$*" >> "$FAKE_LOG"\n'
+        'if [ "${1:-}" = "--version" ]; then\n'
+        f"  exit {version_status}\n"
+        "fi\n"
+        'if [ "${1:-}" = "venv" ]; then\n'
+        '  mkdir -p "$4/bin"\n'
+        '  cp "$FAKE_PYTHON_TEMPLATE" "$4/bin/python"\n'
+        '  cp "$FAKE_PROOF_TEMPLATE" "$4/bin/proof-assistant"\n'
+        '  chmod +x "$4/bin/python" "$4/bin/proof-assistant"\n'
+        "fi\n"
+        "exit 0\n",
+    )
+
+
+def _bootstrap_harness(
+    tmp_path: Path,
+    *,
+    existing_uv: str = "missing",
+    downloader: str = "curl",
+    custom_install_dir: Path | None = None,
+    installer_creates_uv: bool = True,
+    installed_uv_working: bool = True,
+    downloader_succeeds: bool = True,
+    block_install_dir: bool = False,
+    precreate_venv: bool = True,
+    preexisting_local_uv: bool = False,
+) -> tuple[subprocess.CompletedProcess[str], Path, Path, Path]:
+    home = tmp_path / "home"
+    home.mkdir()
+    install_dir = custom_install_dir or home / ".local/bin"
+    if block_install_dir:
+        install_dir.parent.mkdir(parents=True, exist_ok=True)
+        install_dir.write_text("not a directory", encoding="utf-8")
+    log = tmp_path / "calls.log"
+    python_template = tmp_path / "fake-python"
+    proof_template = tmp_path / "fake-proof-assistant"
+    _write_executable(
+        python_template,
+        '#!/bin/sh\nprintf \'python:%s\\n\' "$*" >> "$FAKE_LOG"\n',
+    )
+    _write_executable(
+        proof_template,
+        '#!/bin/sh\nprintf \'proof:%s|PATH=%s\\n\' "$*" "$PATH" >> "$FAKE_LOG"\n',
+    )
+    if precreate_venv:
+        _fake_venv(home, log)
+    else:
+        log.touch()
+    commands = _fake_command_path(tmp_path)
+    if existing_uv != "missing":
+        if existing_uv == "install_dir":
+            install_dir.mkdir(parents=True)
+            _fake_uv(install_dir / "uv", tag="existing-local")
+        else:
+            _fake_uv(
+                commands / "uv",
+                tag="existing",
+                working=existing_uv == "working",
+            )
+    if preexisting_local_uv:
+        install_dir.mkdir(parents=True, exist_ok=True)
+        _fake_uv(install_dir / "uv", tag="existing-local")
+
+    installed_template = tmp_path / "installed-uv"
+    _fake_uv(installed_template, tag="installed", working=installed_uv_working)
+    fake_installer = tmp_path / "uv-install.sh"
+    create = (
+        'mkdir -p "$UV_INSTALL_DIR"\n'
+        'cp "$FAKE_UV_TEMPLATE" "$UV_INSTALL_DIR/uv"\n'
+        'chmod +x "$UV_INSTALL_DIR/uv"\n'
+        if installer_creates_uv
+        else ":\n"
+    )
+    _write_executable(
+        fake_installer,
+        "#!/bin/sh\n"
+        "printf 'installer:dir=%s:no_modify=%s\\n' "
+        '"$UV_INSTALL_DIR" "$UV_NO_MODIFY_PATH" >> "$FAKE_LOG"\n' + create,
+    )
+
+    def add_downloader(name: str) -> None:
+        action = '/bin/cat "$FAKE_INSTALLER"\n' if downloader_succeeds else "exit 55\n"
+        _write_executable(
+            commands / name,
+            f'#!/bin/sh\nprintf \'{name}:%s\\n\' "$*" >> "$FAKE_LOG"\n' + action,
+        )
+
+    if downloader == "curl":
+        add_downloader("curl")
+        add_downloader("wget")
+    elif downloader == "wget":
+        add_downloader("wget")
+    elif downloader != "none":
+        raise AssertionError(f"Unknown fake downloader: {downloader}")
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "HOME": str(home),
+            "PATH": str(commands),
+            "FAKE_INSTALLER": str(fake_installer),
+            "FAKE_LOG": str(log),
+            "FAKE_PROOF_TEMPLATE": str(proof_template),
+            "FAKE_PYTHON_TEMPLATE": str(python_template),
+            "FAKE_UV_TEMPLATE": str(installed_template),
+            "PROOF_ASSISTANT_VENV": str(home / ".venvs/proof-assistant"),
+            "PROOF_ASSISTANT_CACHE_HOME": str(home / ".cache/repoprover-codex"),
+        }
+    )
+    if custom_install_dir is not None:
+        env["PROOF_ASSISTANT_UV_INSTALL_DIR"] = str(custom_install_dir)
+    result = subprocess.run(
+        [str(INSTALLER)], text=True, capture_output=True, check=False, env=env
+    )
+    return result, log, home, install_dir
+
+
 def test_installer_always_checks_compiler_before_tests():
     lines = [line.strip() for line in INSTALLER.read_text().splitlines()]
-    install = (
-        'uv pip install --python "${venv_path}/bin/python" -e "${project_root}[dev]"'
-    )
+    install = '"${uv_bin}" pip install --python "${venv_path}/bin/python" -e "${project_root}[dev]"'
     compiler = '"${venv_path}/bin/proof-assistant" compiler-check'
     cache_init = '"${venv_path}/bin/proof-assistant" cache init'
     tests = '"${venv_path}/bin/python" -m pytest -q "${project_root}/tests"'
@@ -90,9 +242,19 @@ def test_installer_keeps_existing_cache_path_and_supports_legacy_overrides():
     assert "PROOF_ASSISTANT_VENV" in text
     assert "PROOF_ASSISTANT_CACHE_HOME" in text
     assert "PROOF_ASSISTANT_PYTHON" in text
+    assert "PROOF_ASSISTANT_UV_INSTALL_DIR" in text
     assert "REPOPROVER_CODEX_VENV" in text
     assert "REPOPROVER_CODEX_CACHE_HOME" in text
     assert "REPOPROVER_CODEX_PYTHON" in text
+
+
+def test_uv_bootstrap_never_uses_privilege_or_system_package_managers():
+    text = INSTALLER.read_text(encoding="utf-8")
+    assert "UV_NO_MODIFY_PATH=1" in text
+    assert "https://astral.sh/uv/install.sh" in text
+    assert 'uv_bin="$(command -v uv)"' in text
+    for forbidden in ("sudo ", "brew ", "apt ", "apt-get ", "cargo install"):
+        assert forbidden not in text
 
 
 def test_installer_honors_legacy_environment_override(tmp_path):
@@ -111,3 +273,161 @@ def test_installer_honors_legacy_environment_override(tmp_path):
     assert result.returncode == 2
     assert "must not reside in Dropbox" in result.stderr
     assert not forbidden.exists()
+
+
+def test_installer_reuses_a_working_uv_without_downloading(tmp_path):
+    result, log, _home, _install_dir = _bootstrap_harness(
+        tmp_path, existing_uv="working", downloader="curl"
+    )
+    calls = log.read_text(encoding="utf-8")
+    assert result.returncode == 0, result.stderr
+    assert "Using uv:" in result.stdout
+    assert "existing:--version" in calls
+    assert "existing:pip install --python" in calls
+    assert "curl:" not in calls
+    assert "wget:" not in calls
+    assert "installed:" not in calls
+
+
+def test_installer_reuses_prior_local_bootstrap_even_when_not_on_shell_path(tmp_path):
+    result, log, _home, install_dir = _bootstrap_harness(
+        tmp_path, existing_uv="install_dir", downloader="none"
+    )
+    calls = log.read_text(encoding="utf-8")
+    assert result.returncode == 0, result.stderr
+    assert f"Using uv: {install_dir / 'uv'}" in result.stdout
+    assert "existing-local:--version" in calls
+    assert "existing-local:pip install --python" in calls
+    assert f"PATH={install_dir}:" in calls
+
+
+def test_broken_path_uv_does_not_shadow_a_working_local_bootstrap(tmp_path):
+    result, log, _home, install_dir = _bootstrap_harness(
+        tmp_path,
+        existing_uv="broken",
+        downloader="none",
+        preexisting_local_uv=True,
+    )
+    calls = log.read_text(encoding="utf-8")
+    assert result.returncode == 0, result.stderr
+    assert f"Using uv: {install_dir / 'uv'}" in result.stdout
+    assert "existing:--version" in calls
+    assert "existing-local:--version" in calls
+    assert "existing-local:pip install --python" in calls
+
+
+def test_missing_uv_bootstraps_with_curl_and_uses_exact_installed_binary(tmp_path):
+    result, log, home, install_dir = _bootstrap_harness(tmp_path, downloader="curl")
+    calls = log.read_text(encoding="utf-8")
+    assert result.returncode == 0, result.stderr
+    assert install_dir == home / ".local/bin"
+    assert (install_dir / "uv").is_file()
+    assert "curl:-LsSf https://astral.sh/uv/install.sh" in calls
+    assert "wget:" not in calls
+    assert f"installer:dir={install_dir}:no_modify=1" in calls
+    assert "installed:--version" in calls
+    assert "installed:pip install --python" in calls
+    assert f"PATH={install_dir}:" in calls
+    assert not (home / ".profile").exists()
+    assert not (home / ".bashrc").exists()
+
+
+def test_bootstrapped_uv_creates_python_environment_before_install_and_checks(
+    tmp_path,
+):
+    result, log, home, _install_dir = _bootstrap_harness(
+        tmp_path, downloader="curl", precreate_venv=False
+    )
+    calls = log.read_text(encoding="utf-8").splitlines()
+    assert result.returncode == 0, result.stderr
+    venv_call = next(index for index, line in enumerate(calls) if ":venv " in line)
+    pip_call = next(index for index, line in enumerate(calls) if ":pip install" in line)
+    compiler = next(
+        index
+        for index, line in enumerate(calls)
+        if line.startswith("proof:compiler-check|PATH=")
+    )
+    assert venv_call < pip_call < compiler
+    assert (home / ".venvs/proof-assistant/bin/python").is_file()
+
+
+def test_broken_uv_is_replaced_in_custom_install_dir(tmp_path):
+    install_dir = tmp_path / "private-bin"
+    result, log, _home, resolved = _bootstrap_harness(
+        tmp_path,
+        existing_uv="broken",
+        downloader="curl",
+        custom_install_dir=install_dir,
+    )
+    calls = log.read_text(encoding="utf-8")
+    assert result.returncode == 0, result.stderr
+    assert resolved == install_dir
+    assert "existing:--version" in calls
+    assert "existing:pip" not in calls
+    assert f"installer:dir={install_dir}:no_modify=1" in calls
+    assert "installed:pip install --python" in calls
+
+
+def test_wget_is_used_only_when_curl_is_unavailable(tmp_path):
+    result, log, _home, _install_dir = _bootstrap_harness(tmp_path, downloader="wget")
+    calls = log.read_text(encoding="utf-8")
+    assert result.returncode == 0, result.stderr
+    assert "curl:" not in calls
+    assert "wget:-qO- https://astral.sh/uv/install.sh" in calls
+
+
+def test_no_downloader_exits_two_without_creating_uv(tmp_path):
+    result, _log, _home, install_dir = _bootstrap_harness(tmp_path, downloader="none")
+    assert result.returncode == 2
+    assert "neither curl nor wget" in result.stderr
+    assert not (install_dir / "uv").exists()
+
+
+def test_bootstrap_must_produce_a_working_uv_before_environment_changes(tmp_path):
+    result, log, home, install_dir = _bootstrap_harness(
+        tmp_path, downloader="curl", installer_creates_uv=False
+    )
+    calls = log.read_text(encoding="utf-8")
+    assert result.returncode == 2
+    assert "did not produce a working uv" in result.stderr
+    assert "proof:" not in calls
+    assert "python:" not in calls
+    assert not (install_dir / "uv").exists()
+    assert (home / ".venvs/proof-assistant/bin/python").is_file()
+
+
+def test_bootstrap_rejects_an_installed_uv_that_fails_verification(tmp_path):
+    result, log, _home, install_dir = _bootstrap_harness(
+        tmp_path,
+        downloader="curl",
+        installed_uv_working=False,
+    )
+    calls = log.read_text(encoding="utf-8")
+    assert result.returncode == 2
+    assert "did not produce a working uv" in result.stderr
+    assert "installed:--version" in calls
+    assert "installed:pip" not in calls
+    assert (install_dir / "uv").is_file()
+
+
+def test_downloader_or_installer_failure_has_clear_error_and_exit_two(tmp_path):
+    result, log, _home, install_dir = _bootstrap_harness(
+        tmp_path, downloader="curl", downloader_succeeds=False
+    )
+    assert result.returncode == 2
+    assert "Failed to download or run Astral's uv installer with curl" in result.stderr
+    assert "curl:" in log.read_text(encoding="utf-8")
+    assert not (install_dir / "uv").exists()
+
+
+def test_uncreatable_uv_install_directory_exits_two_before_download(tmp_path):
+    install_dir = tmp_path / "blocked"
+    result, log, _home, _resolved = _bootstrap_harness(
+        tmp_path,
+        downloader="curl",
+        custom_install_dir=install_dir,
+        block_install_dir=True,
+    )
+    assert result.returncode == 2
+    assert "Cannot create the uv install directory" in result.stderr
+    assert "curl:" not in log.read_text(encoding="utf-8")

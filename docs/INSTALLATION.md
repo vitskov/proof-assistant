@@ -4,12 +4,20 @@
 
 Proof Assistant supports macOS and Linux local execution. Install:
 
-- Python 3.13;
-- [uv](https://docs.astral.sh/uv/);
 - Git;
 - Lean 4 and Lake compatible with the tested RepoProver/Mathlib checkout;
 - a native C compiler; and
 - Codex CLI, authenticated with `codex login`.
+
+The development installer uses an existing working
+[uv](https://docs.astral.sh/uv/) when available. If uv is missing or broken, it
+bootstraps uv with Astral's official standalone installer. That bootstrap needs
+either `curl` (preferred) or `wget`; no downloader is needed when uv already
+works.
+
+Python 3.13 is the default runtime. uv uses an existing compatible interpreter
+or provisions one when needed, so neither a preinstalled Python nor a
+system-package-manager Python is required by the development installer.
 
 Authentication stays inside Codex CLI. Do not copy anything from
 `~/.codex/auth.json` and do not manufacture an `OPENAI_API_KEY` from Codex
@@ -29,6 +37,22 @@ The supported installer uses Python 3.13 and `uv`, installs the TUI and normal
 dependencies, compiles **and executes** a native test program, initializes the
 managed cache, and runs the test suite. A compiler-name lookup alone never
 counts as a successful installation.
+
+If no working uv is available, the installer:
+
+1. downloads `https://astral.sh/uv/install.sh` with `curl`, falling back to
+   `wget` only when `curl` is unavailable;
+2. installs into `$HOME/.local/bin` by default;
+3. sets `UV_NO_MODIFY_PATH=1`, so Astral's installer cannot edit shell startup
+   files;
+4. prepends that directory only to the running installer process;
+5. verifies the installed executable with `uv --version`; and
+6. captures that exact executable path and uses it for every remaining uv
+   command.
+
+The script never uses `sudo` or invokes Homebrew, apt, another system package
+manager, or a Rust build. If neither `curl` nor `wget` is present, it stops with
+a clear error and leaves system configuration untouched.
 
 The defaults are:
 
@@ -73,8 +97,14 @@ Override defaults only with absolute, safe locations:
 export PROOF_ASSISTANT_VENV="$HOME/.venvs/proof-assistant"
 export PROOF_ASSISTANT_CACHE_HOME="$HOME/.cache/repoprover-codex"
 export PROOF_ASSISTANT_PYTHON=3.13
+export PROOF_ASSISTANT_UV_INSTALL_DIR="$HOME/.local/bin"
 scripts/install-dev.sh
 ```
+
+`PROOF_ASSISTANT_UV_INSTALL_DIR` controls only where a missing or broken uv is
+bootstrapped. It does not relocate the Python environment or the large managed
+Lean cache. A previously bootstrapped executable in that directory is reused
+even if the directory is not on the invoking shell's `PATH`.
 
 The 0.1 installer accepts the old `REPOPROVER_CODEX_VENV`,
 `REPOPROVER_CODEX_CACHE_HOME`, and `REPOPROVER_CODEX_PYTHON` variables as

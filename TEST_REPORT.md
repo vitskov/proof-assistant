@@ -10,9 +10,12 @@ multi-root manuscript acceptance, and cache and repository hygiene checks. The
 earlier provider-backed two-claim acceptance remains recorded separately below
 and was not rerun for this main-source/TUI development pass.
 
-- Complete automated suite: **201 passed**.
+- Complete automated suite: **214 passed**.
 - Supported installer: **passed**, including its mandatory compiler check and
-  complete suite.
+  complete suite in a disposable Python 3.13 environment.
+- uv bootstrap contract: **19 installer tests passed**, including offline
+  curl/wget, missing/broken executable, custom destination, and failure cases;
+  no test contacted the network.
 - Fresh wheel and Python 3.13 environment: **passed**.
 - Textual Pilot suite: **13 passed**.
 - Live catalog regression: the installed backend surfaced the existing
@@ -59,13 +62,17 @@ Command:
 /Users/vui1/.venvs/proof-assistant/bin/python -m pytest -q
 ```
 
-Result: `201 passed` (56.48 seconds in the final installer run).
+Result: `214 passed` (56.88 seconds in the isolated uv-only gate; 103.86
+seconds in the final installer run).
 
 The suite covers:
 
 - Codex app-server framing, provider failures, model/effort validation, and
   fail-closed disabling of MCP servers, apps, plugins, and skills;
 - native compiler detection and compile-and-execute behavior;
+- development-installer reuse of a working uv, user-local official Astral
+  bootstrap via curl/wget when uv is missing or broken, process-only PATH
+  changes, exact executable capture, and fail-closed offline bootstrap tests;
 - cache admission, leases, shared dependency depots, bounded coarse-index GC,
   interrupted reconciliation, and Dropbox rejection;
 - mandatory main-file inspection/selection, deterministic recursive LaTeX
@@ -104,10 +111,13 @@ PROOF_ASSISTANT_CACHE_HOME=/Users/vui1/.cache/repoprover-codex
 PROOF_ASSISTANT_PYTHON=3.13
 ```
 
-It used `uv`, installed the package and development dependencies, executed
-`proof-assistant compiler-check` before cache/test work, compiled and ran a C
-program with `/usr/bin/clang`, initialized the preserved cache, and ran all 201
-tests.
+It reused the verified uv at `/Users/vui1/.local/bin/uv`, installed the package
+and development dependencies into a disposable Python 3.13 environment outside
+Dropbox, executed `proof-assistant compiler-check` before cache/test work,
+compiled and ran a C program with `/usr/bin/clang`, initialized the preserved
+cache, and ran all 214 tests. The missing/broken-uv bootstrap paths were tested
+with fake uv/curl/wget executables and an offline fake Astral installer, so the
+test suite made no bootstrap network requests.
 
 An sdist and wheel were built outside Dropbox. The wheel was installed into a
 fresh Python 3.13.15 environment and validated for:
