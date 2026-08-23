@@ -78,9 +78,28 @@ in the [Usage guide](USAGE.md#results-and-evidence).
 Only after single-agent success, run exactly two concurrent Codex-backed
 agents. This is a local-mode package target; SLURM is not required on macOS.
 
+## Incremental feedback-loop acceptance
+
+Use the golden manuscript under `tests/fixtures/incremental_manuscript` and a
+fresh persistent project outside Dropbox. Acceptance requires:
+
+1. initialization indexes two claims and the explicit theorem-to-lemma edge;
+2. the first pass schedules the lemma before its dependent theorem;
+3. each proposal is merged only in its assigned claim module;
+4. independent `lake build` plus the Lean environment extractor produces two
+   certificates with structural type/value hashes;
+5. an unchanged second pass starts no Codex app-server and reports two reused
+   certificates; and
+6. `manuscript status` remains readable while the writer lock is active.
+
+For source-change tests, cover independent branches, proof-only edits in both
+modes, identical formal-type reconciliation, changed assumptions, structured
+clarification/supersession, and a certified counterexample fixture. Do not
+replace real Lean extraction with source-text dependency inference.
+
 ## Release checks
 
-The current release line is `0.4.x`. Increment patch versions conservatively;
+The current release line is `0.4.x` (currently 0.4.1). Increment patch versions conservatively;
 do not enter the `0.5.x` series without explicit user authorization.
 
 ```bash

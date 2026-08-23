@@ -1,0 +1,22 @@
+\documentclass{article}
+\usepackage{amsthm}
+\newtheorem{theorem}{Theorem}
+\newtheorem{lemma}{Lemma}
+
+\begin{document}
+
+\begin{lemma}\label{lem:zero-add}
+For every natural number $n$, one has $0+n=n$.
+\end{lemma}
+\begin{proof}
+This is the left-zero law for addition.
+\end{proof}
+
+\begin{theorem}\label{thm:add-zero}
+For every natural number $n$, one has $n+0=n$.
+\end{theorem}
+\begin{proof}
+Apply induction and compare with Lemma~\ref{lem:zero-add}.
+\end{proof}
+
+\end{document}

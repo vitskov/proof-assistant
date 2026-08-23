@@ -11,8 +11,9 @@ Before acting, read:
 1. the repository [README](../README.md);
 2. [Installation](INSTALLATION.md);
 3. [Usage](USAGE.md);
-4. [Cache and storage](CACHE_AND_STORAGE.md); and
-5. [Development and testing](DEVELOPMENT.md) for code changes.
+4. [Incremental verification](INCREMENTAL_VERIFICATION.md);
+5. [Cache and storage](CACHE_AND_STORAGE.md); and
+6. [Development and testing](DEVELOPMENT.md) for code changes.
 
 `CODEX_HANDOFF.md` is historical context. Current source, tests, and maintained
 documentation take precedence when they differ from that handoff.
@@ -76,13 +77,14 @@ user's explicit instruction.
 
 1. Validate the install with `doctor`, `models`, and `cache doctor`.
 2. Use an exact advertised model/effort pair.
-3. Require a real task file and a new or empty output folder.
+3. Require a real task file and a persistent project outside Dropbox.
 4. Keep the source manuscript read-only.
 5. Let cache admission create a transactional reservation before Lake work.
-6. Monitor `RUN_STATUS.json` and process state without mutating an active run.
+6. Monitor with `manuscript status` and process state without mutating an active run.
 7. Treat only independently built Lean evidence as verified.
 8. Never equate “not verified” with “false.”
-9. Preserve output evidence unless the user explicitly requests deletion.
+9. Preserve the project, its SQLite state, snapshots, Lean Git history, and run
+   evidence unless the user explicitly requests deletion.
 
 Do not run manual cache cleanup during an active job. Active reservations and
 leases are part of the disk-safety design.
@@ -96,12 +98,17 @@ leases are part of the disk-safety design.
 - `src/repoprover_codex/integration.py` — adapter for an existing RepoProver
   agent.
 - `src/repoprover_codex/manuscript.py` — manuscript snapshot, generated Lean
-  workspace, evidence, and result evaluation.
+  workspace, evidence, and legacy one-shot result evaluation.
+- `src/repoprover_codex/incremental/` — persistent snapshots, structural index,
+  graphs, SQLite state, agent tools, scheduler, certification, and reports.
+- `src/repoprover_codex/lean/DependencyExtractor.lean` — mechanical elaborated
+  declaration dependency/type/value/axiom extraction.
 - `src/repoprover_codex/cache.py` — storage policy, leases, reservations,
   dependency sharing, and bounded GC.
 - `src/repoprover_codex/cache_index.py` — transactional SQLite accounting.
 - `src/repoprover_codex/cli.py` — public command surface and run lifecycle.
-- `tests/` — unit, protocol, failure, cache, manuscript, and installer tests.
+- `tests/` — unit, golden manuscript, state, certification, protocol, failure,
+  cache, manuscript, CLI, and installer tests.
 
 ## Required validation for code changes
 

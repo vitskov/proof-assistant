@@ -963,6 +963,375 @@ def cmd_manuscript_run(args) -> int:
     return evaluation.exit_code
 
 
+def cmd_manuscript_init(args) -> int:
+    from .incremental.session import IncrementalSession
+
+    project = Path(args.project).expanduser().resolve()
+    try:
+        layout = _cache_layout(args)
+        ensure_project_outside_dropbox(project, layout)
+        session = IncrementalSession.initialize(
+            manuscript=args.manuscript,
+            task_file=args.task_file,
+            project=project,
+        )
+    except Exception as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 20
+    status = session.status()
+    print(f"project: {session.project}")
+    print(f"snapshot: {status['snapshot']}")
+    print(f"indexed claims: {sum(status['claim_states'].values())}")
+    print("status: initialized")
+    return 0
+
+
+def cmd_manuscript_verify(args) -> int:
+    from .incremental.orchestration import VerifyOptions, verify_project
+    from .incremental.session import IncrementalSession
+
+    session = IncrementalSession(Path(args.project))
+    try:
+        result = verify_project(
+            session,
+            manuscript=args.manuscript,
+            task_file=args.task_file,
+            options=VerifyOptions(
+                model=args.model,
+                effort=args.effort,
+                codex=args.codex,
+                cache_home=args.cache_home,
+                jobs=args.jobs,
+                batch_size=args.batch_size,
+                lean_pool_size=args.lean_pool_size,
+                lean_memory_limit_gb=args.lean_memory_limit_gb,
+                setup_timeout=args.setup_timeout,
+                request_timeout=args.request_timeout,
+                turn_timeout=args.turn_timeout,
+                gc_timeout=args.gc_timeout,
+            ),
+        )
+    except Exception as exc:
+        print("OUTCOME: setup_failure", file=sys.stderr)
+        print(f"ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 20
+    print(f"project: {result.project}")
+    print(f"run: {result.run_id}")
+    print(f"snapshot: {result.snapshot}")
+    print(f"certified this run: {len(result.certified)}")
+    print(f"certificates reused: {len(result.reused)}")
+    print(f"statements reconciled: {len(result.reconciled)}")
+    print(f"questions: {','.join(result.questions) if result.questions else 'none'}")
+    print(f"OUTCOME: {result.outcome}")
+    print(result.detail)
+    return result.exit_code
+
+
+def cmd_manuscript_status(args) -> int:
+    from .incremental.session import IncrementalSession
+
+    try:
+        status = IncrementalSession(Path(args.project)).status()
+    except Exception as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 20
+    if args.json:
+        print(json.dumps(status, indent=2, sort_keys=True, default=str))
+        return 0
+    print(f"project: {status['project']}")
+    print(f"mutation in progress: {'yes' if status['mutation_in_progress'] else 'no'}")
+    print(f"snapshot: {status['snapshot'] or 'none'}")
+    latest = status["latest_run"]
+    if latest:
+        print(f"latest run: {latest['run_id']} ({latest['outcome'] or latest['status']})")
+        print(f"detail: {latest['detail'] or 'none'}")
+    print(f"certificates: {status['certificates']}")
+    for state, count in sorted(status["claim_states"].items()):
+        print(f"{state}: {count}")
+    print(f"open questions: {len(status['open_questions'])}")
+    return 0
+
+
+def _incremental_objects_and_edges(session):
+    from .incremental.models import ManuscriptEdge, SourceObject
+    from .incremental.store import StateStore
+
+    with StateStore(session.database_path) as store:
+        snapshot = store.previous_snapshot()
+        if snapshot is None:
+            return (), ()
+        objects = tuple(
+            SourceObject(
+                claim_id=str(row["claim_id"]),
+                kind=str(row["kind"]),
+                source_file=str(row["source_file"]),
+                environment=str(row["environment"]),
+                label=row["label"],
+                ordinal=int(row["ordinal"]),
+                statement_start=int(row["statement_start"]),
+                statement_end=int(row["statement_end"]),
+                statement_byte_start=int(row["statement_byte_start"]),
+                statement_byte_end=int(row["statement_byte_end"]),
+                proof_start=row["proof_start"],
+                proof_end=row["proof_end"],
+                proof_byte_start=row["proof_byte_start"],
+                proof_byte_end=row["proof_byte_end"],
+                statement_hash=str(row["statement_hash"]),
+                proof_hash=str(row["proof_hash"]),
+                normalized_statement_hash=str(row["normalized_statement_hash"]),
+                statement_text=str(row["statement_text"]),
+                proof_text=str(row["proof_text"]),
+                references=tuple(json.loads(row["references_json"])),
+            )
+            for row in store.claim_versions(snapshot)
+        )
+        edges = tuple(
+            ManuscriptEdge(
+                str(row["src"]),
+                str(row["dst"]),
+                str(row["edge_kind"]),
+                str(row["provenance"]),
+                bool(row["approved"]),
+            )
+            for row in store.manuscript_edges()
+        )
+    return objects, edges
+
+
+def cmd_manuscript_graph(args) -> int:
+    from .incremental.graph import graph_to_dot, manuscript_graph_export
+    from .incremental.io import atomic_write_json, atomic_write_text
+    from .incremental.session import IncrementalSession
+
+    session = IncrementalSession(Path(args.project))
+    try:
+        session._load_config()
+        objects, edges = _incremental_objects_and_edges(session)
+        if args.format == "dot":
+            rendered = graph_to_dot(objects, edges)
+            if args.output:
+                atomic_write_text(Path(args.output).expanduser().resolve(), rendered)
+            else:
+                print(rendered, end="")
+        else:
+            payload = manuscript_graph_export(objects, edges)
+            if args.output:
+                atomic_write_json(Path(args.output).expanduser().resolve(), payload)
+            else:
+                print(json.dumps(payload, indent=2, sort_keys=True))
+    except Exception as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 20
+    return 0
+
+
+def cmd_manuscript_questions(args) -> int:
+    from .incremental.locking import project_lock
+    from .incremental.models import ClaimState
+    from .incremental.session import IncrementalSession
+    from .incremental.store import StateStore
+
+    session = IncrementalSession(Path(args.project))
+    try:
+        session._load_config()
+        with project_lock(session.project, exclusive=bool(args.resolve or args.dismiss)):
+            with StateStore(session.database_path) as store:
+                question_id = args.resolve or args.dismiss
+                if question_id:
+                    if not args.reason:
+                        raise ValueError("--reason is required when resolving or dismissing a question")
+                    row = store.connection.execute(
+                        "SELECT * FROM clarifications WHERE question_id = ?",
+                        (question_id,),
+                    ).fetchone()
+                    if row is None:
+                        raise ValueError(f"Unknown clarification: {question_id}")
+                    status = "RESOLVED" if args.resolve else "DISMISSED"
+                    if not store.resolve_question(
+                        question_id,
+                        run_id=None,
+                        resolution=args.reason,
+                        status=status,
+                    ):
+                        raise ValueError(f"Clarification is not open: {question_id}")
+                    store.connection.execute(
+                        "UPDATE claims SET status = ? WHERE claim_id = ?",
+                        (str(ClaimState.INVALIDATED), row["claim_id"]),
+                    )
+                    session._write_status_files(store=store)
+                    session._commit_host_changes(f"{status.title()} clarification {question_id}")
+                questions = [dict(row) for row in store.open_questions()]
+        if args.json:
+            print(json.dumps(questions, indent=2, sort_keys=True))
+        elif not questions:
+            print("No open clarification requests.")
+        else:
+            for row in questions:
+                print(f"{row['question_id']} {row['claim_id']} [{row['category']}]")
+                print(f"  {row['problem']}")
+    except Exception as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 20
+    return 0
+
+
+def cmd_manuscript_diff(args) -> int:
+    from .incremental.session import IncrementalSession
+    from .incremental.store import StateStore
+
+    session = IncrementalSession(Path(args.project))
+    try:
+        session._load_config()
+        with StateStore(session.database_path) as store:
+            latest = store.latest_run()
+            if latest is None:
+                print("No runs have been recorded.")
+                return 0
+            path = session.runs / f"{int(latest['run_id']):06d}" / "source-diff.patch"
+            print(path.read_text(encoding="utf-8") if path.is_file() else "", end="")
+    except Exception as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 20
+    return 0
+
+
+def cmd_manuscript_invalidate(args) -> int:
+    from .incremental.graph import affected_claims
+    from .incremental.locking import project_lock
+    from .incremental.models import ClaimState
+    from .incremental.session import IncrementalSession
+    from .incremental.store import StateStore
+
+    session = IncrementalSession(Path(args.project))
+    try:
+        session._load_config()
+        with project_lock(session.project, exclusive=True):
+            with StateStore(session.database_path) as store:
+                objects, edges = _incremental_objects_and_edges(session)
+                all_ids = {item.claim_id for item in objects}
+                unknown = sorted(set(args.claim) - all_ids)
+                if unknown:
+                    raise ValueError("Unknown claims: " + ", ".join(unknown))
+                selected = (
+                    affected_claims(args.claim, claim_ids=all_ids, edges=edges)
+                    if args.include_dependents
+                    else set(args.claim)
+                )
+                for claim_id in selected:
+                    store.connection.execute(
+                        "UPDATE claims SET status = ? WHERE claim_id = ?",
+                        (str(ClaimState.INVALIDATED), claim_id),
+                    )
+                session._write_status_files(store=store)
+                session._commit_host_changes("Manually invalidate verification certificates")
+        print("invalidated: " + ", ".join(sorted(selected)))
+    except Exception as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 20
+    return 0
+
+
+def cmd_manuscript_audit(args) -> int:
+    from .incremental.models import LeanDeclaration
+    from .incremental.reports import dependency_audit
+    from .incremental.session import IncrementalSession
+    from .incremental.store import StateStore
+
+    session = IncrementalSession(Path(args.project))
+    try:
+        session._load_config()
+        _objects, edges = _incremental_objects_and_edges(session)
+        with StateStore(session.database_path) as store:
+            declarations = tuple(
+                LeanDeclaration(
+                    name=str(row["name"]),
+                    kind=str(row["kind"]),
+                    type_hash=str(row["type_hash"]),
+                    value_hash=row["value_hash"],
+                    direct_dependencies=store.lean_dependencies(str(row["name"])),
+                    axioms=tuple(json.loads(row["axioms_json"])),
+                )
+                for row in store.connection.execute(
+                    "SELECT * FROM lean_declarations ORDER BY name"
+                )
+            )
+            payload = dependency_audit(store, edges=edges, declarations=declarations)
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    except Exception as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 20
+    return 0
+
+
+def cmd_manuscript_correspondence(args) -> int:
+    from .incremental.locking import project_lock
+    from .incremental.models import ClaimState
+    from .incremental.session import IncrementalSession
+    from .incremental.store import StateStore
+
+    session = IncrementalSession(Path(args.project))
+    try:
+        session._load_config()
+        mutating = bool(args.approve or args.reject)
+        with project_lock(session.project, exclusive=mutating):
+            with StateStore(session.database_path) as store:
+                claim_id = args.approve or args.reject
+                if claim_id:
+                    row = store.connection.execute(
+                        "SELECT * FROM correspondence WHERE claim_id = ?",
+                        (claim_id,),
+                    ).fetchone()
+                    if row is None:
+                        raise ValueError(f"No proposed correspondence for {claim_id}")
+                    if args.approve:
+                        store.connection.execute(
+                            """
+                            UPDATE correspondence SET approved = 1, status = 'approved_pending'
+                            WHERE claim_id = ?
+                            """,
+                            (claim_id,),
+                        )
+                        store.connection.execute(
+                            "UPDATE claims SET status = ? WHERE claim_id = ?",
+                            (str(ClaimState.STATEMENT_APPROVED), claim_id),
+                        )
+                        message = f"Approved correspondence for {claim_id}"
+                    else:
+                        if not args.reason:
+                            raise ValueError("--reason is required when rejecting a correspondence")
+                        store.connection.execute(
+                            """
+                            UPDATE correspondence SET approved = 0, status = 'rejected'
+                            WHERE claim_id = ?
+                            """,
+                            (claim_id,),
+                        )
+                        store.connection.execute(
+                            "UPDATE claims SET status = ? WHERE claim_id = ?",
+                            (str(ClaimState.FAILED_FORMALIZATION), claim_id),
+                        )
+                        message = f"Rejected correspondence for {claim_id}: {args.reason}"
+                    session._write_status_files(store=store)
+                    session._commit_host_changes(message)
+                    print(message)
+                rows = [dict(row) for row in store.correspondence_rows()]
+        if args.json:
+            print(json.dumps(rows, indent=2, sort_keys=True))
+        elif not claim_id:
+            if not rows:
+                print("No manuscript/Lean correspondences have been proposed.")
+            for row in rows:
+                approval = "approved" if row["approved"] else "review required"
+                print(
+                    f"{row['claim_id']} -> {row['lean_declaration']} "
+                    f"[{row['status']}; {approval}]"
+                )
+    except Exception as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 20
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="repoprover-codex")
     p.add_argument("--codex", default="codex", help="Codex executable")
@@ -1074,6 +1443,116 @@ def build_parser() -> argparse.ArgumentParser:
     rp.add_argument("--turn-timeout", type=float, default=1800.0)
     rp.add_argument("--gc-timeout", type=float, default=900.0)
     rp.set_defaults(func=cmd_repoprover_prove)
+
+    manuscript_group = sub.add_parser(
+        "manuscript",
+        help="Persistent incremental manuscript-verification projects",
+    )
+    manuscript_sub = manuscript_group.add_subparsers(
+        dest="manuscript_command", required=True
+    )
+
+    manuscript_init = manuscript_sub.add_parser(
+        "init", help="Create a persistent verification project and index its manuscript"
+    )
+    manuscript_init.add_argument("--manuscript", required=True)
+    manuscript_init.add_argument("--task-file", required=True)
+    manuscript_init.add_argument("--project", required=True)
+    manuscript_init.set_defaults(func=cmd_manuscript_init)
+
+    manuscript_verify = manuscript_sub.add_parser(
+        "verify", help="Snapshot, incrementally verify, and preserve certified results"
+    )
+    manuscript_verify.add_argument("--project", required=True)
+    manuscript_verify.add_argument(
+        "--manuscript",
+        default=None,
+        help="Authoritative source folder (defaults to the project configuration)",
+    )
+    manuscript_verify.add_argument(
+        "--task-file",
+        default=None,
+        help="Free-form or YAML task file (defaults to the project configuration)",
+    )
+    manuscript_verify.add_argument("--model", required=True)
+    manuscript_verify.add_argument("--effort", default="high")
+    manuscript_verify.add_argument(
+        "--jobs",
+        type=int,
+        default=1,
+        help="Independent Codex proof batches to run concurrently (1-2; default: 1)",
+    )
+    manuscript_verify.add_argument(
+        "--batch-size",
+        type=int,
+        default=8,
+        help="Maximum ready claims assigned to one proof batch (default: 8)",
+    )
+    manuscript_verify.add_argument("--lean-pool-size", type=int, default=1)
+    manuscript_verify.add_argument("--lean-memory-limit-gb", type=int, default=None)
+    manuscript_verify.add_argument("--setup-timeout", type=float, default=1800.0)
+    manuscript_verify.add_argument("--request-timeout", type=float, default=120.0)
+    manuscript_verify.add_argument("--turn-timeout", type=float, default=3600.0)
+    manuscript_verify.add_argument("--gc-timeout", type=float, default=900.0)
+    manuscript_verify.set_defaults(func=cmd_manuscript_verify)
+
+    manuscript_status = manuscript_sub.add_parser(
+        "status", help="Show the current snapshot, claim states, and blockers"
+    )
+    manuscript_status.add_argument("--project", required=True)
+    manuscript_status.add_argument("--json", action="store_true")
+    manuscript_status.set_defaults(func=cmd_manuscript_status)
+
+    manuscript_graph = manuscript_sub.add_parser(
+        "graph", help="Export the deterministic manuscript dependency graph"
+    )
+    manuscript_graph.add_argument("--project", required=True)
+    manuscript_graph.add_argument("--format", choices=("json", "dot"), default="json")
+    manuscript_graph.add_argument("--output", default=None)
+    manuscript_graph.set_defaults(func=cmd_manuscript_graph)
+
+    manuscript_questions = manuscript_sub.add_parser(
+        "questions", help="List, explicitly resolve, or dismiss clarification requests"
+    )
+    manuscript_questions.add_argument("--project", required=True)
+    question_action = manuscript_questions.add_mutually_exclusive_group()
+    question_action.add_argument("--resolve", metavar="QUESTION_ID")
+    question_action.add_argument("--dismiss", metavar="QUESTION_ID")
+    manuscript_questions.add_argument("--reason", default=None)
+    manuscript_questions.add_argument("--json", action="store_true")
+    manuscript_questions.set_defaults(func=cmd_manuscript_questions)
+
+    manuscript_diff = manuscript_sub.add_parser(
+        "diff", help="Show the latest deterministic manuscript snapshot diff"
+    )
+    manuscript_diff.add_argument("--project", required=True)
+    manuscript_diff.set_defaults(func=cmd_manuscript_diff)
+
+    manuscript_invalidate = manuscript_sub.add_parser(
+        "invalidate", help="Explicitly invalidate claims without deleting Lean proofs"
+    )
+    manuscript_invalidate.add_argument("--project", required=True)
+    manuscript_invalidate.add_argument("--claim", action="append", required=True)
+    manuscript_invalidate.add_argument("--include-dependents", action="store_true")
+    manuscript_invalidate.set_defaults(func=cmd_manuscript_invalidate)
+
+    manuscript_audit = manuscript_sub.add_parser(
+        "audit", help="Compare persisted manuscript and Lean proof dependencies"
+    )
+    manuscript_audit.add_argument("--project", required=True)
+    manuscript_audit.set_defaults(func=cmd_manuscript_audit)
+
+    manuscript_correspondence = manuscript_sub.add_parser(
+        "correspondence",
+        help="Review manuscript-to-Lean statement correspondence proposals",
+    )
+    manuscript_correspondence.add_argument("--project", required=True)
+    correspondence_action = manuscript_correspondence.add_mutually_exclusive_group()
+    correspondence_action.add_argument("--approve", metavar="CLAIM_ID")
+    correspondence_action.add_argument("--reject", metavar="CLAIM_ID")
+    manuscript_correspondence.add_argument("--reason", default=None)
+    manuscript_correspondence.add_argument("--json", action="store_true")
+    manuscript_correspondence.set_defaults(func=cmd_manuscript_correspondence)
 
     manuscript = sub.add_parser(
         "manuscript-run",

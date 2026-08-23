@@ -1,107 +1,107 @@
 # Troubleshooting and operations
 
-## A run appears quiet
+## A persistent verification appears quiet
 
-First inspect the durable status:
+Status is deliberately readable during an active writer:
 
 ```bash
-sed -n '1,120p' "$OUTPUT/RUN_STATUS.json"
+repoprover-codex manuscript status --project "$PROJECT"
 ```
 
-Then verify that the launcher or its Codex/Lean children still exist:
+`mutation in progress: yes` plus a `RUNNING` row means the project lock is
+owned. Inspect processes without modifying them:
 
 ```bash
 ps -axo pid,ppid,etime,state,%cpu,%mem,command | \
-  rg 'repoprover-codex manuscript-run|codex app-server|lake|lean'
+  rg 'repoprover-codex manuscript verify|codex app-server|lake|lean'
 ```
 
 Interpretation:
 
-- `dependency_setup` with a `lake`, `git`, or cache-download child is normal on
-  a cold cache;
-- `codex_turn` with an app-server child is an active model turn;
-- a Lean REPL or `lake build` child means formal checking is in progress; and
-- final event/tool-call artifacts may remain absent until the Codex turn ends.
+- `lake build` in the main project: independent setup/final certification;
+- `lake build` under `~/.cache/repoprover-codex/worktrees/`: isolated batch
+  bootstrap or agent checking;
+- `codex app-server`: an active semantic/proof-search turn; and
+- `DependencyExtractor.lean`: structural type/value/dependency extraction.
 
-Do not infer a hang from low CPU alone: a process waiting for model or tool I/O
-normally sleeps. Compare elapsed time with `--turn-timeout` and look for child
-process changes or new Git/Lean files.
+The persistent workflow stores batch event/tool artifacts after a Codex turn
+returns. An absent `events.json` is not by itself a hang. Compare elapsed time
+with `--turn-timeout`, and remember that the timeout applies per Codex batch.
 
-## Cache reconciliation is visible
+## The command exits 10
 
-`cache GC reconciling coarse cache index` is a bounded phase. The index has one
-row per build, dependency depot, or bulk cache—not one row per Mathlib archive.
-Changed units are measured once, and deletion reports progress every 30 seconds.
-The default total GC budget is 900 seconds.
-
-If the deadline is reached, the command fails explicitly. A partially deleted
-unit remains atomically isolated under `trash/` for the next recovery pass.
-
-## Disk pressure
+This is a planned clarification pause, not a crash.
 
 ```bash
-repoprover-codex cache status
-repoprover-codex cache gc --gc-timeout 900
+sed -n '1,260p' "$PROJECT/CLARIFICATION_REQUEST.md"
+repoprover-codex manuscript questions --project "$PROJECT" --json
 ```
 
-The default policy permits 16 GiB of managed cache while preserving at least 25
-GiB of filesystem free space. Active jobs hold reservations and leases; manual
-GC skips their cache entries.
+Edit the authoritative manuscript source, then rerun the same verify command.
+Do not edit `$PROJECT/manuscript`; it is replaced from the next immutable
+snapshot. Certified independent branches are preserved.
 
-Do not brute-force cache deletion while a job is active. If emergency manual
-cleanup is unavoidable, stop all jobs first and resolve the exact managed paths
-under `repoprover-codex cache path`. Manuscript output folders are separate from
-the shared cache.
+## The command exits 11 or 12
+
+Exit 11 is partial/inconclusive and never means false. Read the claim states and
+diagnostics in the report/run directory.
+
+Exit 12 requires a kernel-checked counterexample declaration. Review its Lean
+type and correspondence before treating it as a counterexample to the intended
+prose statement.
 
 ## A run was interrupted
 
-The output folder is intentionally preserved. Inspect `RUN_STATUS.json`,
-`artifacts/`, and the workspace Git history. The OS releases process-held cache
-leases automatically; the next package operation clears stale reservation rows
-and completes any quarantined cleanup.
+Do not delete the project. Operating-system leases are released automatically;
+the next invocation marks an abandoned `RUNNING` database row `INTERRUPTED`,
+records a new source snapshot, and resumes from persistent state.
 
-To rerun, select a new or empty output directory. Removing an old output does
-not remove the shared dependency depot.
+If an ephemeral Git worktree remains after a hard kill, inspect it under the
+managed cache’s `worktrees/incremental/` path. A later run uses a distinct run
+directory. Remove a preserved worktree only after confirming no process uses it
+and retaining any desired patch; ordinary completed batches remove theirs.
 
-## Setup or compiler failure
+## Setup, provider, or Lean infrastructure failure
+
+Exit codes distinguish these boundaries:
+
+- 20: project/cache/setup failure;
+- 21: Codex authentication, protocol, or provider failure; and
+- 22: Lean bootstrap, build, merge, or environment-extraction failure.
 
 Run:
 
 ```bash
 repoprover-codex compiler-check
 repoprover-codex cache doctor
-```
-
-The compiler check must compile and execute a program. Merely finding `clang`
-or another compiler on `PATH` is not sufficient. On supported older macOS
-systems, `/usr/bin/clang` may be selected when Lean's bundled compiler cannot
-run.
-
-## Codex connectivity or model failure
-
-```bash
 repoprover-codex doctor
 repoprover-codex models
 ```
 
-Use an exact model/effort pair printed by `models`. Authentication should come
-from `codex login`; the package does not require an API key and does not read
-Codex authentication files.
+The compiler check must compile and execute a program. Use an exact model and
+effort printed by `models`. Authentication comes from `codex login`; do not
+create or expose an API key for this package.
 
-The child app-server disables configured MCP servers, apps, plugins, bundled
-skills, and local skill instructions, then verifies the resulting inventory.
-Startup fails closed if an external capability remains available.
+## Cache reconciliation or disk pressure
 
-## Understand a terminal outcome
+```bash
+repoprover-codex cache status
+repoprover-codex cache gc --gc-timeout 900
+```
 
-Read these in order:
+`cache GC reconciling coarse cache index` is bounded. Thousands of Mathlib
+archives form one bulk candidate, not thousands of nested rescan candidates.
+Active jobs hold leases and reservations; manual GC skips them.
 
-1. `RUN_STATUS.json`
-2. `artifacts/result.json`
-3. `VERIFICATION_REPORT.md`
-4. `artifacts/verification-build.log`
-5. `artifacts/setup.log` for setup failures
+Never brute-force cache deletion while a job is active. If emergency cleanup
+is unavoidable, stop all jobs first and resolve exact targets under the path
+printed by `cache path`. Persistent verification projects are outside the cache
+and must not be deleted as cache cleanup.
 
-An unverified or incomplete result is not a claim of mathematical falsehood.
-See [Results and evidence](USAGE.md#results-and-evidence) for the success
-criteria.
+## Legacy one-shot runs
+
+For `manuscript-run`, inspect `RUN_STATUS.json`, then
+`artifacts/result.json`, `VERIFICATION_REPORT.md`,
+`artifacts/verification-build.log`, and `artifacts/setup.log`. A rerun requires
+a new/empty output directory. These constraints do not apply to persistent
+`manuscript verify`, which deliberately reuses its project.

@@ -1623,6 +1623,13 @@ class DependencyDepotClaim:
     ready: bool
     promoted: bool = False
 
+    def __enter__(self) -> Self:
+        """Make every acquired depot claim usable with deterministic cleanup."""
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        self.close()
+
     @property
     def packages_link(self) -> Path:
         return self.project / ".lake" / "packages"

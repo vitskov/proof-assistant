@@ -40,8 +40,11 @@ repoprover-codex/
 └── trash/
 ```
 
-`fixtures/` and `worktrees/` may contain user source or evidence. They are not
-managed cache entries and are never automatically deleted.
+`fixtures/` may contain maintained acceptance projects. `worktrees/` contains
+ephemeral incremental proof batches. A normally completed batch removes its
+worktree after preserving run artifacts and merging or rejecting its commits;
+a hard-killed process can leave a recoverable worktree for inspection. Neither
+directory is treated as an ordinary GC eviction unit.
 
 ## Dependency sharing and build isolation
 
@@ -67,6 +70,11 @@ read-only.
 Later projects copy the locked manifest and link only `.lake/packages` to that
 depot. Each project retains a distinct `.lake/build`, so manuscript modules and
 concurrent root builds cannot overwrite one another.
+
+Persistent verification projects live at the caller's `--project` path and are
+not cache entries. Their Lean source, Git history, source-snapshot repository,
+SQLite state, reports, and certificates are never removed by cache GC. Only
+their reproducible `.lake` root build is managed through the cache symlink.
 
 ## Admission and reservations
 

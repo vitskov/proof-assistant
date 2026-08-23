@@ -6,15 +6,19 @@ This index separates ordinary use from implementation and maintenance details.
 
 1. [Installation](INSTALLATION.md) — prerequisites, local installation,
    validation, and upgrades.
-2. [Usage guide](USAGE.md) — prepare a task, run a manuscript, monitor it, and
-   interpret the evidence.
-3. [Troubleshooting and operations](TROUBLESHOOTING.md) — quiet runs, stopped
+2. [Usage guide](USAGE.md) — initialize a persistent project, verify, pause,
+   edit, resume, and interpret the evidence.
+3. [Task files](TASK_FILES.md) — free-form requests, YAML targets, modes, and
+   correspondence-review policy.
+4. [Troubleshooting and operations](TROUBLESHOOTING.md) — quiet runs, stopped
    runs, output recovery, disk pressure, and common failure modes.
 
 ## Reference
 
 - [Command reference](COMMAND_REFERENCE.md) — command purposes and important
   options.
+- [Incremental verification model](INCREMENTAL_VERIFICATION.md) — snapshots,
+  graphs, invalidation, scheduling, questions, and certificates.
 - [Cache and storage](CACHE_AND_STORAGE.md) — sharing, reservations, bounded
   garbage collection, and recovery.
 - [Architecture and security](ARCHITECTURE.md) — Codex/RepoProver boundary,

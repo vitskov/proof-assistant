@@ -1,0 +1,10 @@
+schema: 1
+mode: theorem
+targets:
+  - thm:add-zero
+policy:
+  pause_on_ambiguity: true
+  preserve_certified: true
+  counterexample_search: true
+  require_statement_correspondence_review: false
+instructions: Verify the selected theorem and its manuscript dependencies.

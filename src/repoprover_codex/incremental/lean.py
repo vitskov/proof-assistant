@@ -1,0 +1,204 @@
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+from collections.abc import Mapping, Sequence
+from importlib.resources import files
+from pathlib import Path
+from typing import Any
+
+from .io import atomic_write_bytes, atomic_write_json, canonical_hash, sha256_path
+from .models import LeanDeclaration
+
+OUTPUT_PREFIX = "REPOPROVER_DEPENDENCIES_JSON:"
+
+
+class LeanExtractionError(RuntimeError):
+    pass
+
+
+def install_dependency_extractor(project: Path) -> Path:
+    destination = project / "RepoProverSupport" / "DependencyExtractor.lean"
+    resource = files("repoprover_codex.lean").joinpath("DependencyExtractor.lean")
+    atomic_write_bytes(destination, resource.read_bytes())
+    return destination
+
+
+def _declaration_from_payload(payload: dict[str, Any]) -> LeanDeclaration:
+    required = {
+        "name",
+        "kind",
+        "type_expr",
+        "value_expr",
+        "direct_dependencies",
+        "axioms",
+    }
+    missing = required - set(payload)
+    if missing:
+        raise LeanExtractionError(
+            "Lean extractor omitted: " + ", ".join(sorted(missing))
+        )
+    dependencies = payload["direct_dependencies"]
+    axioms = payload["axioms"]
+    if not isinstance(dependencies, list) or not all(
+        isinstance(item, str) for item in dependencies
+    ):
+        raise LeanExtractionError("Lean extractor returned invalid dependencies")
+    if not isinstance(axioms, list) or not all(
+        isinstance(item, str) for item in axioms
+    ):
+        raise LeanExtractionError("Lean extractor returned invalid axioms")
+    value_expr = payload["value_expr"]
+    return LeanDeclaration(
+        name=str(payload["name"]),
+        kind=str(payload["kind"]),
+        type_hash=canonical_hash(payload["type_expr"]),
+        value_hash=None if value_expr is None else canonical_hash(value_expr),
+        direct_dependencies=tuple(sorted(set(dependencies))),
+        axioms=tuple(sorted(set(axioms))),
+    )
+
+
+def run_dependency_extractor(
+    project: Path,
+    *,
+    env: Mapping[str, str] | None = None,
+    timeout: float = 600.0,
+) -> tuple[str, tuple[LeanDeclaration, ...], subprocess.CompletedProcess[str]]:
+    helper = install_dependency_extractor(project)
+    result = subprocess.run(
+        ["lake", "env", "lean", str(helper.relative_to(project))],
+        cwd=project,
+        env=dict(env or os.environ),
+        text=True,
+        capture_output=True,
+        timeout=timeout,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        raise LeanExtractionError(
+            f"Lean dependency extractor failed ({result.returncode}): {detail}"
+        )
+    lines = [line for line in result.stdout.splitlines() if OUTPUT_PREFIX in line]
+    if len(lines) != 1:
+        raise LeanExtractionError(
+            "Lean dependency extractor returned no unique JSON payload"
+        )
+    try:
+        payload = json.loads(lines[0].split(OUTPUT_PREFIX, 1)[1])
+    except json.JSONDecodeError as exc:
+        raise LeanExtractionError(f"Lean dependency JSON is malformed: {exc}") from exc
+    if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+        raise LeanExtractionError("Lean dependency extractor schema mismatch")
+    raw_declarations = payload.get("declarations")
+    if not isinstance(raw_declarations, list):
+        raise LeanExtractionError(
+            "Lean dependency extractor returned invalid declarations"
+        )
+    declarations = tuple(
+        sorted(
+            (
+                _declaration_from_payload(item)
+                for item in raw_declarations
+                if isinstance(item, dict)
+            ),
+            key=lambda item: item.name,
+        )
+    )
+    if len(declarations) != len(raw_declarations):
+        raise LeanExtractionError(
+            "Lean dependency extractor returned a non-object declaration"
+        )
+    lean_version = str(payload.get("lean_version") or "unknown")
+    export = {
+        "schema_version": 1,
+        "lean_version": lean_version,
+        "declarations": [item.export() for item in declarations],
+    }
+    export["sha256"] = canonical_hash(export)
+    atomic_write_json(project / ".repoprover" / "exports" / "lean-graph.json", export)
+    return lean_version, declarations, result
+
+
+def mathlib_revision(project: Path) -> str | None:
+    manifest = project / "lake-manifest.json"
+    if not manifest.is_file():
+        return None
+    try:
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    packages = payload.get("packages", []) if isinstance(payload, dict) else []
+    for package in packages:
+        if isinstance(package, dict) and package.get("name") == "mathlib":
+            revision = package.get("rev") or package.get("version")
+            return str(revision) if revision else None
+    return None
+
+
+def environment_fingerprint(project: Path) -> tuple[str, dict[str, Any]]:
+    inputs: dict[str, Any] = {}
+    for name in (
+        "lean-toolchain",
+        "lakefile.lean",
+        "lakefile.toml",
+        "lake-manifest.json",
+    ):
+        path = project / name
+        if path.is_file():
+            inputs[name] = sha256_path(path)
+    inputs["formalization_sources"] = [
+        {
+            "path": path.relative_to(project).as_posix(),
+            "sha256": sha256_path(path),
+        }
+        for path in sorted((project / "Formalization").rglob("*.lean"))
+    ]
+    return canonical_hash(inputs), inputs
+
+
+def reject_forbidden_axioms(
+    declaration: LeanDeclaration,
+    *,
+    baseline_project_axioms: set[str],
+) -> tuple[str, ...]:
+    forbidden = {
+        name
+        for name in declaration.axioms
+        if name == "sorryAx"
+        or name.endswith(".sorryAx")
+        or (
+            name.startswith("ManuscriptVerification.")
+            and name not in baseline_project_axioms
+        )
+    }
+    return tuple(sorted(forbidden))
+
+
+def correspondence_discrepancies(
+    manuscript_edges: Sequence[tuple[str, str]],
+    declarations: Sequence[LeanDeclaration],
+    correspondence: dict[str, str],
+) -> list[dict[str, str]]:
+    reverse = {declaration: claim for claim, declaration in correspondence.items()}
+    explicit = set(manuscript_edges)
+    declaration_map = {item.name: item for item in declarations}
+    discrepancies: list[dict[str, str]] = []
+    for claim, declaration_name in sorted(correspondence.items()):
+        declaration = declaration_map.get(declaration_name)
+        if declaration is None:
+            continue
+        for dependency in declaration.direct_dependencies:
+            dependency_claim = reverse.get(dependency)
+            if dependency_claim and (claim, dependency_claim) not in explicit:
+                discrepancies.append(
+                    {
+                        "claim": claim,
+                        "lean_declaration": declaration_name,
+                        "missing_manuscript_dependency": dependency_claim,
+                        "lean_dependency": dependency,
+                    }
+                )
+    return discrepancies

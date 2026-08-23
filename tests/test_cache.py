@@ -363,17 +363,18 @@ def test_dependency_depot_is_shared_but_root_builds_are_isolated(tmp_path):
     first_claim.close()
 
     second_build = cache.attach_project_cache(second, layout)
-    second_claim = cache.claim_dependency_depot(
+    with cache.claim_dependency_depot(
         second, layout, env={"LEAN_CC": "/usr/bin/clang"}
-    )
-    assert second_claim.ready
-    assert second_claim.target == depot
-    assert (first / ".lake" / "packages").resolve() == depot / "packages"
-    assert (second / ".lake" / "packages").resolve() == depot / "packages"
-    assert first_build != second_build
-    assert first_build.parent == second_build.parent == layout.lake_builds
-    assert not (artifact.stat().st_mode & 0o222)
-    assert (second / "lake-manifest.json").is_file()
+    ) as second_claim:
+        assert second_claim.ready
+        assert second_claim.target == depot
+        assert (first / ".lake" / "packages").resolve() == depot / "packages"
+        assert (second / ".lake" / "packages").resolve() == depot / "packages"
+        assert first_build != second_build
+        assert first_build.parent == second_build.parent == layout.lake_builds
+        assert not (artifact.stat().st_mode & 0o222)
+        assert (second / "lake-manifest.json").is_file()
+    assert second_claim.lease.handle.closed
 
     third = _lean_project(home / "third")
     cache.attach_project_cache(third, layout)
@@ -386,7 +387,6 @@ def test_dependency_depot_is_shared_but_root_builds_are_isolated(tmp_path):
     assert concurrent_claim.ready
     assert concurrent_claim.target == depot
     concurrent_claim.close()
-    second_claim.close()
 
 
 def test_attach_repairs_a_managed_symlink_after_gc(tmp_path):

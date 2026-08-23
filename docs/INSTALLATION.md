@@ -100,6 +100,21 @@ Expected results:
 If any check fails, stop before starting a manuscript and consult
 [Troubleshooting](TROUBLESHOOTING.md).
 
+The recommended workflow after validation is a persistent project:
+
+```bash
+repoprover-codex manuscript init \
+  --manuscript /absolute/path/to/manuscript \
+  --task-file /absolute/path/to/task.md \
+  --project "$HOME/repoprover-projects/paper"
+repoprover-codex manuscript verify \
+  --project "$HOME/repoprover-projects/paper" \
+  --model MODEL
+```
+
+See the [Usage guide](USAGE.md). `manuscript-run` is retained only as the
+non-resumable one-shot compatibility path.
+
 ## Configure disk limits
 
 Defaults are a 16 GiB managed-cache admission limit and a 25 GiB filesystem
