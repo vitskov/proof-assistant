@@ -130,6 +130,18 @@ Python 3.13.15 environment outside Dropbox. In that environment:
 The disposable environment and local package build artifacts were removed
 afterward.
 
+## Repository publication audit
+
+The current tracked tree and the complete local Git patch history were scanned
+without printing candidate values for private-key headers and common GitHub,
+OpenAI, AWS, and Slack token formats; no matches were found. A separate
+`detect-secrets` 1.5.0 scan of all repository files reported zero findings.
+
+No credential file, private key, Python environment, Lean cache, Python cache,
+package build directory, or temporary test file is tracked or left in the
+working tree. `.gitignore` explicitly excludes those categories. The only Git
+remote is the user-owned `git@github.com:vitskov/repoprover-codex.git` origin.
+
 ## Codex and RepoProver status
 
 With `OPENAI_API_KEY` removed, `doctor` initialized Codex app-server and listed
