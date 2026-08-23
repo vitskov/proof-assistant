@@ -190,22 +190,31 @@ class WelcomeScreen(NoticeScreen):
 
 
 class NewProjectScreen(NoticeScreen):
-    """Collect source, destination, and a project-owned task."""
+    """First wizard step: collect source, destination, and project task."""
 
     BINDINGS = [("escape", "back", "Back")]
 
-    def __init__(self) -> None:
+    def __init__(self, draft: NewProjectDraft | None = None) -> None:
         super().__init__()
-        self._custom_task = False
+        self.draft = draft
+        self._custom_task = draft is not None and draft.task_text is not None
 
     def compose(self) -> ComposeResult:
         yield Header()
         with VerticalScroll(id="page"):
             yield Static("New verification project", classes="title")
             yield Label("Project name")
-            yield Input(placeholder="my-paper", id="project-name")
+            yield Input(
+                value=self.draft.name if self.draft is not None else "",
+                placeholder="my-paper",
+                id="project-name",
+            )
             yield Label("Existing manuscript source folder")
-            yield Input(placeholder="/absolute/path/to/manuscript", id="source-path")
+            yield Input(
+                value=(str(self.draft.source_path) if self.draft is not None else ""),
+                placeholder="/absolute/path/to/manuscript",
+                id="source-path",
+            )
             yield Static(
                 "The source may be in Dropbox. Files are copied into a managed, "
                 "Git-versioned "
@@ -214,7 +223,13 @@ class NewProjectScreen(NoticeScreen):
             )
             yield Label("Managed project folder (optional)")
             yield Input(
-                placeholder="$HOME/proof-assistant/<project-name>", id="project-path"
+                value=(
+                    str(self.draft.project_path)
+                    if self.draft is not None and self.draft.project_path is not None
+                    else ""
+                ),
+                placeholder="$HOME/proof-assistant/<project-name>",
+                id="project-path",
             )
             yield Static(
                 "Managed projects, Python environments, and Lean caches must not "
@@ -226,16 +241,26 @@ class NewProjectScreen(NoticeScreen):
                 yield Button("Use default task", id="default-task", variant="primary")
                 yield Button("Customize task", id="custom-task")
             yield TextArea(
-                self.proof_app.service.default_task_text(),
+                (
+                    self.draft.task_text
+                    if self.draft is not None and self.draft.task_text is not None
+                    else self.proof_app.service.default_task_text()
+                ),
                 id="task-editor",
                 language="markdown",
                 show_line_numbers=True,
-                disabled=True,
+                disabled=not self._custom_task,
             )
             with Horizontal(classes="toolbar"):
-                yield Button("Create and verify", id="create", variant="success")
+                yield Button(
+                    "Continue: inspect source", id="continue", variant="success"
+                )
                 yield Button("Cancel", id="cancel")
-            yield Static("", id="status-line", classes="muted")
+            yield Static(
+                "No project will be created until you review and confirm all settings.",
+                id="status-line",
+                classes="muted",
+            )
         yield Footer()
 
     def action_back(self) -> None:
@@ -248,6 +273,7 @@ class NewProjectScreen(NoticeScreen):
         elif button_id == "default-task":
             self._custom_task = False
             editor = self.query_one("#task-editor", TextArea)
+            editor.text = self.proof_app.service.default_task_text()
             editor.disabled = True
             self.show_notice("The maintained default verification task will be used.")
         elif button_id == "custom-task":
@@ -256,10 +282,10 @@ class NewProjectScreen(NoticeScreen):
             editor.disabled = False
             editor.focus()
             self.show_notice("Edit the project-owned task below.")
-        elif button_id == "create":
-            self._create()
+        elif button_id == "continue":
+            self._continue()
 
-    def _create(self) -> None:
+    def _continue(self) -> None:
         name = self.query_one("#project-name", Input).value.strip()
         source_text = self.query_one("#source-path", Input).value.strip()
         project_text = self.query_one("#project-path", Input).value.strip()
@@ -293,10 +319,17 @@ class MainFileSelectionScreen(NoticeScreen):
 
     BINDINGS = [("escape", "back", "Back")]
 
-    def __init__(self, draft: NewProjectDraft, inspection: SourceInspection) -> None:
+    def __init__(
+        self,
+        draft: NewProjectDraft,
+        inspection: SourceInspection,
+        *,
+        selected_main: str | None = None,
+    ) -> None:
         super().__init__()
         self.draft = draft
         self.inspection = inspection
+        self.selected_main = selected_main
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -322,25 +355,27 @@ class MainFileSelectionScreen(NoticeScreen):
                 buttons.append(
                     RadioButton(
                         f"{candidate.relative_path}{suffix}",
-                        value=False,
+                        value=candidate.relative_path == self.selected_main,
                         id=f"main-option-{index}",
                     )
                 )
             yield RadioSet(*buttons, id="main-file-options")
             with Horizontal(classes="toolbar"):
-                yield Button(
-                    "Use selected main file", id="select-main", variant="success"
-                )
+                yield Button("Continue to review", id="select-main", variant="success")
                 yield Button("Back", id="back")
             yield Static(
-                "No file is selected yet. The suggestion is only a hint.",
+                (
+                    f"Selected main file: {self.selected_main}"
+                    if self.selected_main is not None
+                    else "No file is selected yet. The suggestion is only a hint."
+                ),
                 id="status-line",
                 classes="muted",
             )
         yield Footer()
 
     def action_back(self) -> None:
-        self.proof_app.show_new_project()
+        self.proof_app.show_new_project(self.draft)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "back":
@@ -355,7 +390,104 @@ class MainFileSelectionScreen(NoticeScreen):
             )
             return
         main_file = self.inspection.candidates[index].relative_path
-        self.proof_app.create_project(self.draft.request(main_file))
+        self.proof_app.review_new_project(
+            self.draft,
+            self.inspection,
+            main_file,
+            auto_selected=False,
+        )
+
+
+class ProjectReviewScreen(NoticeScreen):
+    """Final wizard step before the first persistent project mutation."""
+
+    BINDINGS = [("escape", "back", "Back")]
+
+    def __init__(
+        self,
+        draft: NewProjectDraft,
+        inspection: SourceInspection,
+        main_file: str,
+        *,
+        auto_selected: bool,
+    ) -> None:
+        super().__init__()
+        self.draft = draft
+        self.inspection = inspection
+        self.main_file = main_file
+        self.auto_selected = auto_selected
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        with VerticalScroll(id="page"):
+            yield Static("Review new verification project", classes="title")
+            if self.inspection.source_in_dropbox:
+                yield Static(
+                    "Dropbox source detected. This is supported: files will be copied "
+                    "into managed project storage before verification.",
+                    classes="warning",
+                    id="dropbox-warning",
+                )
+            yield Static(self._detail(), id="project-review", markup=False)
+            with Horizontal(classes="toolbar"):
+                yield Button(
+                    "Confirm, create, and verify",
+                    id="confirm-create",
+                    variant="success",
+                )
+                yield Button("Back", id="review-back")
+                yield Button("Cancel", id="cancel")
+            yield Static(
+                "This confirmation creates the managed project and starts its first "
+                "verification iteration.",
+                id="status-line",
+                classes="muted",
+            )
+        yield Footer()
+
+    def _detail(self) -> str:
+        project_path = (
+            str(self.draft.project_path)
+            if self.draft.project_path is not None
+            else "automatic default under $HOME/proof-assistant"
+        )
+        selection = (
+            "automatically selected (only LaTeX source found)"
+            if self.auto_selected
+            else "selected by user"
+        )
+        task_mode = (
+            "custom project task"
+            if self.draft.task_text is not None
+            else ("maintained default task")
+        )
+        return (
+            f"Project name: {self.draft.name}\n"
+            f"Authoritative source: {self.draft.source_path}\n"
+            f"Managed project: {project_path}\n"
+            f"Main LaTeX file: {self.main_file}\n"
+            f"Main-file selection: {selection}\n"
+            f"LaTeX files discovered: {len(self.inspection.candidates)}\n"
+            f"Verification task: {task_mode}"
+        )
+
+    def action_back(self) -> None:
+        if self.inspection.selection_required:
+            self.proof_app.show_main_file_selection(
+                self.draft,
+                self.inspection,
+                selected_main=self.main_file,
+            )
+        else:
+            self.proof_app.show_new_project(self.draft)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "confirm-create":
+            self.proof_app.create_project(self.draft.request(self.main_file))
+        elif event.button.id == "review-back":
+            self.action_back()
+        elif event.button.id == "cancel":
+            self.proof_app.show_welcome()
 
 
 class DashboardScreen(NoticeScreen):

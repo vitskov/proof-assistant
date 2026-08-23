@@ -10,11 +10,11 @@ multi-root manuscript acceptance, and cache and repository hygiene checks. The
 earlier provider-backed two-claim acceptance remains recorded separately below
 and was not rerun for this main-source/TUI development pass.
 
-- Complete automated suite: **186 passed**.
+- Complete automated suite: **187 passed**.
 - Supported installer: **passed**, including its mandatory compiler check and
   complete suite.
 - Fresh wheel and Python 3.13 environment: **passed**.
-- Textual Pilot suite: **9 passed**.
+- Textual Pilot suite: **10 passed**.
 - Installed multi-root sample: **1 selected claim indexed**, alternate root
   excluded.
 - Earlier real small manuscript baseline: **2/2 claims certified**.
@@ -56,7 +56,7 @@ Command:
 /Users/vui1/.venvs/proof-assistant/bin/python -m pytest -q
 ```
 
-Result: `186 passed` (47.50 seconds in the final installer run).
+Result: `187 passed` (50.53 seconds in the final installer run).
 
 The suite covers:
 
@@ -77,9 +77,10 @@ The suite covers:
   busy, clarification, and changed-source states;
 - exact clarification file/span/excerpt/blocked-claim presentation, strict
   optional Codex narration, deterministic fallback, and provenance storage;
-- Textual one-file/multi-file root selection, new/resume, task editing,
-  copyable detailed progress, cooperative cancellation reports, exact source
-  display, change confirmation, findings, and recovery screens;
+- Textual one-file/multi-file root selection, pre-creation review, stateful
+  wizard back-navigation, new/resume, task editing, copyable detailed progress,
+  cooperative cancellation reports, exact source display, change confirmation,
+  findings, and recovery screens;
 - cancellation boundary cleanup, durable certificate preservation, retryable
   in-flight claims, and legacy orphaned-`PROVING` recovery; and
 - the architecture rule that backend code cannot import Textual or Rich.
@@ -99,7 +100,7 @@ PROOF_ASSISTANT_PYTHON=3.13
 
 It used `uv`, installed the package and development dependencies, executed
 `proof-assistant compiler-check` before cache/test work, compiled and ran a C
-program with `/usr/bin/clang`, initialized the preserved cache, and ran all 186
+program with `/usr/bin/clang`, initialized the preserved cache, and ran all 187
 tests.
 
 An sdist and wheel were built outside Dropbox. The wheel was installed into a
@@ -142,7 +143,7 @@ the evidence was recorded.
 ## Earlier real verification acceptance
 
 The following provider-backed evidence was produced before this main-source/TUI
-pass and remains useful regression context. It was not rerun in the final 186-test
+pass and remains useful regression context. It was not rerun in the final 187-test
 gate.
 
 A fresh managed project outside Dropbox was initialized from the two-claim

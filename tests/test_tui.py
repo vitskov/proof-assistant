@@ -18,6 +18,7 @@ from proof_assistant.tui.screens import (
     MainFileSelectionScreen,
     NewProjectScreen,
     ProgressScreen,
+    ProjectReviewScreen,
     RecoveryScreen,
     WelcomeScreen,
 )
@@ -292,7 +293,13 @@ async def test_new_project_custom_task_starts_first_verification() -> None:
         app.screen.query_one(
             "#task-editor", TextArea
         ).text = "Verify the main spectral theorem."
-        await pilot.click("#create")
+        await pilot.click("#continue")
+        await wait_for(pilot, lambda: isinstance(app.screen, ProjectReviewScreen))
+        assert service.created == []
+        review = str(app.screen.query_one("#project-review", Static).renderable)
+        assert "Main LaTeX file: main.tex" in review
+        assert "automatically selected" in review
+        await pilot.click("#confirm-create")
 
         await wait_for(pilot, lambda: isinstance(app.screen, FindingsScreen))
         await settle_screen(pilot)
@@ -326,7 +333,13 @@ async def test_default_task_is_backend_owned() -> None:
         assert app.screen.query_one("#task-editor", TextArea).text == (
             service.default_task_text()
         )
-        await pilot.click("#create")
+        await pilot.click("#continue")
+        await wait_for(pilot, lambda: isinstance(app.screen, ProjectReviewScreen))
+        assert service.created == []
+        assert "automatically selected" in str(
+            app.screen.query_one("#project-review", Static).renderable
+        )
+        await pilot.click("#confirm-create")
         await wait_for(
             pilot,
             lambda: progress_sources_contain(app, "Main file: main.tex"),
@@ -365,7 +378,7 @@ async def test_multiple_latex_files_require_deliberate_main_selection() -> None:
         await wait_for(pilot, lambda: isinstance(app.screen, NewProjectScreen))
         app.screen.query_one("#project-name", Input).value = "multi-root"
         app.screen.query_one("#source-path", Input).value = "/source"
-        await pilot.click("#create")
+        await pilot.click("#continue")
         await wait_for(pilot, lambda: isinstance(app.screen, MainFileSelectionScreen))
 
         # A suggestion is visible but is intentionally not an implicit choice.
@@ -378,9 +391,71 @@ async def test_multiple_latex_files_require_deliberate_main_selection() -> None:
 
         await pilot.click("#main-option-2")
         await pilot.click("#select-main")
+        await wait_for(pilot, lambda: isinstance(app.screen, ProjectReviewScreen))
+        assert service.created == []
+        review = str(app.screen.query_one("#project-review", Static).renderable)
+        assert "Main LaTeX file: slides.tex" in review
+        assert "selected by user" in review
+        await pilot.click("#confirm-create")
         await wait_for(pilot, lambda: isinstance(app.screen, FindingsScreen))
         await settle_screen(pilot)
         assert service.created[0].main_file == "slides.tex"
+
+
+@async_test
+async def test_new_project_wizard_back_preserves_draft_and_selection() -> None:
+    service = FakeWorkflowService()
+    service.inspection = SourceInspection(
+        source_path=Path("/source"),
+        candidates=(
+            LatexSourceCandidate("paper.tex", True),
+            LatexSourceCandidate("supplement.tex", True),
+        ),
+        suggested_main_file="paper.tex",
+        source_in_dropbox=False,
+    )
+    app = ProofAssistantApp(service)
+
+    async with app.run_test(size=(120, 50)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        await pilot.click("#new-project")
+        await wait_for(pilot, lambda: isinstance(app.screen, NewProjectScreen))
+        app.screen.query_one("#project-name", Input).value = "preserved-paper"
+        app.screen.query_one("#source-path", Input).value = "/source"
+        app.screen.query_one("#project-path", Input).value = "/projects/preserved"
+        await pilot.click("#custom-task")
+        app.screen.query_one("#task-editor", TextArea).text = "Verify the key result."
+
+        await pilot.click("#continue")
+        await wait_for(pilot, lambda: isinstance(app.screen, MainFileSelectionScreen))
+        await pilot.click("#back")
+        await wait_for(pilot, lambda: isinstance(app.screen, NewProjectScreen))
+        assert app.screen.query_one("#project-name", Input).value == "preserved-paper"
+        assert app.screen.query_one("#source-path", Input).value == "/source"
+        assert app.screen.query_one("#project-path", Input).value == (
+            "/projects/preserved"
+        )
+        task_editor = app.screen.query_one("#task-editor", TextArea)
+        assert not task_editor.disabled
+        assert task_editor.text == "Verify the key result."
+
+        await pilot.click("#continue")
+        await wait_for(pilot, lambda: isinstance(app.screen, MainFileSelectionScreen))
+        await pilot.click("#main-option-1")
+        await pilot.click("#select-main")
+        await wait_for(pilot, lambda: isinstance(app.screen, ProjectReviewScreen))
+        assert service.created == []
+        await pilot.click("#review-back")
+        await wait_for(pilot, lambda: isinstance(app.screen, MainFileSelectionScreen))
+        assert app.screen.query_one("#main-option-1").value
+        await pilot.click("#back")
+        await wait_for(pilot, lambda: isinstance(app.screen, NewProjectScreen))
+        assert app.screen.query_one("#project-name", Input).value == "preserved-paper"
+        assert app.screen.query_one("#task-editor", TextArea).text == (
+            "Verify the key result."
+        )
+        assert service.created == []
+        await settle_screen(pilot)
 
 
 @async_test

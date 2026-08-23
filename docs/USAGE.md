@@ -32,10 +32,13 @@ it, and asks you to review changes before verification.
 
 ### 2. Select the main LaTeX file
 
-Proof Assistant inspects the selected folder before it creates any project:
+After entering the source folder and other setup fields, choose **Continue:
+inspect source**. Proof Assistant inspects the selected folder before it creates
+any project:
 
-- if the folder contains exactly one `.tex` or `.ltx` file, the TUI announces
-  that file as the main file and continues without asking a redundant question;
+- if the folder contains exactly one `.tex` or `.ltx` file, the review screen
+  announces that file as the automatically selected main file without asking a
+  redundant question;
 - if it contains several LaTeX files, the TUI lists every candidate and requires
   an explicit selection; and
 - if it contains none, project creation stops with a validation error.
@@ -84,9 +87,11 @@ There is no external task file to select, keep synchronized, or edit.
 ### 5. Create and verify
 
 Review the entered source, selected main file, destination, task choice, and
-Dropbox notices, then choose **Create and verify**. The backend creates a stable
-initial import and resolves the main file's input closure before starting the
-first verification pass.
+Dropbox notices. No managed project has been created at this point. Choose
+**Confirm, create, and verify** to create a stable initial import, resolve the
+main file's input closure, and start the first verification pass. Going back
+preserves the setup form and custom task; for multi-root manuscripts it also
+preserves the selected main file.
 
 ## Verification progress
 

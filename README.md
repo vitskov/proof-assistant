@@ -47,10 +47,13 @@ defaults to:
 $HOME/proof-assistant/<project-name>
 ```
 
-Select an existing folder containing the LaTeX source. Proof Assistant then
-establishes one explicit manuscript root. With one LaTeX file it announces that
-file and continues; with several, it lists them and requires you to select the
-main file. That main file may recursively `\input` or `\include` other files.
+Select an existing folder containing the LaTeX source, then choose **Continue:
+inspect source**. Proof Assistant establishes one explicit manuscript root
+before it creates anything. With one LaTeX file it shows that file as the
+automatically selected main file; with several, it lists them and requires you
+to select one. A final review screen shows the choice and requires confirmation
+before project creation. That main file may recursively `\input` or `\include`
+other files.
 Only this resolved source closure is interpreted as the manuscript, so an
 alternate paper or orphaned draft in the same folder is not silently verified.
 

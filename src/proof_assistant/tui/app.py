@@ -22,6 +22,7 @@ from proof_assistant.tui.screens import (
     NewProjectDraft,
     NewProjectScreen,
     ProgressScreen,
+    ProjectReviewScreen,
     RecoveryScreen,
     WelcomeScreen,
 )
@@ -87,6 +88,7 @@ class ProofAssistantApp(App[None]):
     .project-row Static { width: 1fr; }
     .project-row Button { width: auto; }
     #main-file-options { height: auto; border: round $panel; padding: 1; }
+    #project-review { height: auto; border: round $accent; padding: 1; }
     #progress-sources { height: 7; border: round $accent; }
     #progress-stages { height: 16; border: round $panel; }
     #progress-log { height: 1fr; min-height: 6; border: round $panel; }
@@ -120,8 +122,40 @@ class ProofAssistantApp(App[None]):
     def show_welcome(self) -> None:
         self.switch_screen(WelcomeScreen())
 
-    def show_new_project(self) -> None:
-        self.switch_screen(NewProjectScreen())
+    def show_new_project(self, draft: NewProjectDraft | None = None) -> None:
+        self.switch_screen(NewProjectScreen(draft))
+
+    def show_main_file_selection(
+        self,
+        draft: NewProjectDraft,
+        inspection: SourceInspection,
+        *,
+        selected_main: str | None = None,
+    ) -> None:
+        self.switch_screen(
+            MainFileSelectionScreen(
+                draft,
+                inspection,
+                selected_main=selected_main,
+            )
+        )
+
+    def review_new_project(
+        self,
+        draft: NewProjectDraft,
+        inspection: SourceInspection,
+        main_file: str,
+        *,
+        auto_selected: bool,
+    ) -> None:
+        self.switch_screen(
+            ProjectReviewScreen(
+                draft,
+                inspection,
+                main_file,
+                auto_selected=auto_selected,
+            )
+        )
 
     def open_location(self, path: Path) -> None:
         try:
@@ -166,11 +200,14 @@ class ProofAssistantApp(App[None]):
             )
             return
         if len(inspection.candidates) == 1:
-            # A dedicated choice screen would be redundant. The creation and
-            # verification progress screens explicitly display this inferred root.
-            self.create_project(draft.request(inspection.candidates[0].relative_path))
+            self.review_new_project(
+                draft,
+                inspection,
+                inspection.candidates[0].relative_path,
+                auto_selected=True,
+            )
             return
-        self.switch_screen(MainFileSelectionScreen(draft, inspection))
+        self.show_main_file_selection(draft, inspection)
 
     def create_project(self, request: NewProjectRequest) -> None:
         """Create and then immediately begin the first verification pass."""
