@@ -4,7 +4,9 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 from collections.abc import Iterable
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from ..manuscript import (
@@ -14,7 +16,7 @@ from ..manuscript import (
     ManuscriptInputError,
     _validate_source_symlinks,
 )
-from .io import sha256_bytes, sha256_path
+from .io import canonical_hash, sha256_bytes, sha256_path
 from .models import Snapshot, SourceFile
 
 EXTRA_IGNORED_DIRECTORIES = frozenset(
@@ -27,6 +29,23 @@ EXTRA_IGNORED_DIRECTORIES = frozenset(
         "target",
     }
 )
+
+
+@dataclass(frozen=True)
+class SourceInventoryEntry:
+    path: str
+    sha256: str
+    size: int
+    symlink_target: str | None = None
+
+
+@dataclass(frozen=True)
+class SourceInventory:
+    entries: tuple[SourceInventoryEntry, ...]
+    sha256: str
+
+    def by_path(self) -> dict[str, SourceInventoryEntry]:
+        return {entry.path: entry for entry in self.entries}
 
 
 def _ignored(path: Path) -> bool:
@@ -72,7 +91,111 @@ def _copy_snapshot_inputs(source: Path, destination: Path) -> None:
                 shutil.copy2(source_path, target, follow_symlinks=False)
 
 
+def scan_source_inventory(source: Path) -> SourceInventory:
+    """Hash one complete filtered source tree without modifying it."""
+    source = source.expanduser().resolve()
+    if not source.is_dir():
+        raise ManuscriptInputError(f"Manuscript directory does not exist: {source}")
+    _validate_source_symlinks(source)
+    entries: list[SourceInventoryEntry] = []
+    for root, directory_names, file_names in os.walk(source, followlinks=False):
+        root_path = Path(root)
+        symlink_directories = [
+            name for name in directory_names if (root_path / name).is_symlink()
+        ]
+        directory_names[:] = sorted(
+            name
+            for name in directory_names
+            if name not in symlink_directories and not _ignored(root_path / name)
+        )
+        for name in sorted((*symlink_directories, *file_names)):
+            path = root_path / name
+            if _ignored(path):
+                continue
+            relative = path.relative_to(source).as_posix()
+            if path.is_symlink():
+                target = os.readlink(path)
+                data = target.encode("utf-8")
+                entries.append(
+                    SourceInventoryEntry(
+                        relative,
+                        sha256_bytes(data),
+                        len(data),
+                        target,
+                    )
+                )
+            elif path.is_file():
+                entries.append(
+                    SourceInventoryEntry(
+                        relative,
+                        sha256_path(path),
+                        path.stat().st_size,
+                    )
+                )
+    ordered = tuple(sorted(entries, key=lambda entry: entry.path))
+    return SourceInventory(
+        ordered,
+        canonical_hash([asdict(entry) for entry in ordered]),
+    )
+
+
+def stage_stable_source(
+    source: Path,
+    parent: Path,
+    *,
+    expected_inventory_sha256: str | None = None,
+    attempts: int = 5,
+    quiet_seconds: float = 0.05,
+) -> tuple[Path, SourceInventory]:
+    """Create a staged copy only after complete before/copy/after scans agree.
+
+    File-system notifications are deliberately irrelevant. This handles editors and
+    synchronization clients that replace several files over a short interval.
+    """
+    source = source.expanduser().resolve()
+    parent.mkdir(parents=True, exist_ok=True)
+    last_pair: tuple[str, str, str] | None = None
+    for _attempt in range(max(1, attempts)):
+        before = scan_source_inventory(source)
+        staging = Path(tempfile.mkdtemp(prefix="source-stable-", dir=parent))
+        keep_staging = False
+        try:
+            _copy_snapshot_inputs(source, staging)
+            staged = scan_source_inventory(staging)
+            if quiet_seconds > 0:
+                time.sleep(quiet_seconds)
+            after = scan_source_inventory(source)
+            last_pair = (before.sha256, staged.sha256, after.sha256)
+            if before.sha256 != staged.sha256 or staged.sha256 != after.sha256:
+                continue
+            if (
+                expected_inventory_sha256 is not None
+                and after.sha256 != expected_inventory_sha256
+            ):
+                raise StaleSourceError(
+                    "The manuscript changed after the reviewed change plan was created"
+                )
+            keep_staging = True
+            return staging, after
+        finally:
+            if staging.exists() and not keep_staging:
+                shutil.rmtree(staging, ignore_errors=True)
+        time.sleep(quiet_seconds)
+    detail = " -> ".join(last_pair or ("unknown",))
+    raise UnstableSourceError(
+        f"The manuscript did not reach a stable multi-file state ({detail})"
+    )
+
+
 class SnapshotError(RuntimeError):
+    pass
+
+
+class StaleSourceError(SnapshotError):
+    pass
+
+
+class UnstableSourceError(SnapshotError):
     pass
 
 
@@ -101,10 +224,10 @@ class SnapshotRepository:
         environment["GIT_INDEX_FILE"] = str(self.index)
         environment.update(
             {
-                "GIT_AUTHOR_NAME": "RepoProver Codex",
-                "GIT_AUTHOR_EMAIL": "repoprover-codex@localhost",
-                "GIT_COMMITTER_NAME": "RepoProver Codex",
-                "GIT_COMMITTER_EMAIL": "repoprover-codex@localhost",
+                "GIT_AUTHOR_NAME": "Proof Assistant",
+                "GIT_AUTHOR_EMAIL": "proof-assistant@localhost",
+                "GIT_COMMITTER_NAME": "Proof Assistant",
+                "GIT_COMMITTER_EMAIL": "proof-assistant@localhost",
             }
         )
         result = subprocess.run(
@@ -149,15 +272,24 @@ class SnapshotRepository:
         result = self._git(["rev-parse", "--verify", "refs/heads/main"], check=False)
         return result.stdout.strip() if result.returncode == 0 else None
 
-    def create(self, source: Path, *, run_id: int) -> Snapshot:
+    def create(
+        self,
+        source: Path,
+        *,
+        run_id: int,
+        expected_inventory_sha256: str | None = None,
+    ) -> Snapshot:
         source = source.expanduser().resolve()
         if not source.is_dir():
             raise ManuscriptInputError(f"Manuscript directory does not exist: {source}")
         _validate_source_symlinks(source)
         self.initialize()
-        staging = Path(tempfile.mkdtemp(prefix="source-", dir=self.root))
+        staging, _inventory = stage_stable_source(
+            source,
+            self.root,
+            expected_inventory_sha256=expected_inventory_sha256,
+        )
         try:
-            _copy_snapshot_inputs(source, staging)
             self.index.unlink(missing_ok=True)
             self._git(["read-tree", "--empty"])
             self._git(["add", "-A", "--", "."], work_tree=staging)

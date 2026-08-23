@@ -1,4 +1,4 @@
-from repoprover_codex.integration import run_repoprover_agent
+from proof_assistant.integration import run_repoprover_agent
 
 
 def test_integration_surface_imports():

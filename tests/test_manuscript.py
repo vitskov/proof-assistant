@@ -6,9 +6,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from repoprover_codex.cache import dependency_cache_key
-from repoprover_codex.cli import build_parser
-from repoprover_codex.manuscript import (
+from proof_assistant.cache import dependency_cache_key
+from proof_assistant.cli import build_parser
+from proof_assistant.manuscript import (
     CommandRecord,
     ManuscriptInputError,
     evaluate_manuscript_run,
@@ -211,24 +211,34 @@ def test_failed_independent_build_is_tool_failure(tmp_path):
     assert result.exit_code == 5
 
 
-def test_cli_exposes_file_based_manuscript_interface():
-    args = build_parser().parse_args(
+def test_cli_exposes_project_owned_manuscript_interface():
+    init = build_parser().parse_args(
         [
-            "manuscript-run",
+            "manuscript",
+            "init",
             "--manuscript",
             "/input/book",
-            "--task-file",
-            "/input/task.md",
-            "--output",
-            "/output/run",
+            "--project",
+            "/output/project",
+        ]
+    )
+    assert init.manuscript == "/input/book"
+    assert init.project == "/output/project"
+    assert not hasattr(init, "task_file")
+
+    verify = build_parser().parse_args(
+        [
+            "manuscript",
+            "verify",
+            "--project",
+            "/output/project",
             "--model",
             "gpt-test",
         ]
     )
-    assert args.manuscript == "/input/book"
-    assert args.task_file == "/input/task.md"
-    assert args.output == "/output/run"
-    assert args.turn_timeout == 3600.0
+    assert verify.project == "/output/project"
+    assert not hasattr(verify, "task_file")
+    assert verify.turn_timeout == 3600.0
 
 
 def test_cli_exposes_cache_limits_status_gc_and_prepare():

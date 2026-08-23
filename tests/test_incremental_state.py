@@ -6,11 +6,11 @@ from pathlib import Path
 
 import pytest
 
-from repoprover_codex.incremental.agent import IncrementalAgentContext
-from repoprover_codex.incremental.locking import project_lock
-from repoprover_codex.incremental.models import ClaimState
-from repoprover_codex.incremental.session import IncrementalSession, utc_now
-from repoprover_codex.incremental.store import StateStore
+from proof_assistant.incremental.agent import IncrementalAgentContext
+from proof_assistant.incremental.locking import project_lock
+from proof_assistant.incremental.models import ClaimState
+from proof_assistant.incremental.session import IncrementalSession, utc_now
+from proof_assistant.incremental.store import StateStore
 
 FIXTURE = Path(__file__).parent / "fixtures" / "incremental_manuscript"
 
@@ -333,7 +333,7 @@ def test_preserve_certified_false_forces_selected_claim_reproof(tmp_path):
             action="test_certificate",
             reason="Set up policy regression",
         )
-    task = source / "VERIFY.yaml"
+    task = session.project / "VERIFY.yaml"
     task.write_text(
         task.read_text(encoding="utf-8").replace(
             "preserve_certified: true", "preserve_certified: false"

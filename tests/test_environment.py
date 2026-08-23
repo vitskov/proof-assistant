@@ -2,7 +2,7 @@ import sys
 
 import pytest
 
-from repoprover_codex import environment
+from proof_assistant import environment
 
 
 def test_configure_portable_locale_on_macos(monkeypatch):
@@ -44,4 +44,3 @@ def test_explicit_broken_lean_cc_fails_closed(monkeypatch):
 def test_macos_disables_repoprover_address_space_limit(monkeypatch):
     monkeypatch.setattr(sys, "platform", "darwin")
     assert environment.default_lean_memory_limit_gb() == 0
-

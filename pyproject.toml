@@ -3,9 +3,9 @@ requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "repoprover-codex"
-version = "0.4.1"
-description = "Codex app-server backend for facebookresearch/RepoProver"
+name = "proof-assistant"
+version = "0.1.0"
+description = "Incremental formal verification and clarification for LaTeX manuscripts"
 readme = "README.md"
 requires-python = ">=3.13"
 license = "MIT"
@@ -15,20 +15,27 @@ dependencies = [
     "networkx>=3.4,<4",
     "pylatexenc>=2.10,<3",
     "PyYAML>=6,<7",
+    "rich>=13,<15",
+    "textual>=1,<2",
 ]
 
 [project.optional-dependencies]
 repoprover = ["repoprover>=0.1.0"]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "ruff>=0.12"]
 
 [project.scripts]
-repoprover-codex = "repoprover_codex.cli:main"
+proof-assistant = "proof_assistant.cli:main"
+repoprover-codex = "proof_assistant.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-"repoprover_codex.lean" = ["*.lean"]
+"proof_assistant.lean" = ["*.lean"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+ignore = ["E501"]

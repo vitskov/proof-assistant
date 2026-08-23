@@ -1,6 +1,6 @@
 import pytest
 
-from repoprover_codex.tools import dynamic_tool_result, openai_tools_to_codex
+from proof_assistant.tools import dynamic_tool_result, openai_tools_to_codex
 
 
 def test_translate_openai_function_tool():

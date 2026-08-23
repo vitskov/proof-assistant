@@ -1,11 +1,10 @@
 import pytest
 
-from repoprover_codex.models import (
+from proof_assistant.models import (
     model_id,
     supported_efforts,
     validate_model_effort,
 )
-
 
 CATALOG = [
     {

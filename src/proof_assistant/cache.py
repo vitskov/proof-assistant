@@ -15,7 +15,7 @@ import uuid
 from collections.abc import Callable, Iterator, Mapping, MutableMapping, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import IO, Self
 
@@ -27,9 +27,12 @@ from .environment import (
     select_native_compiler,
 )
 
-CACHE_HOME_ENV = "REPOPROVER_CODEX_CACHE_HOME"
-CACHE_MAX_GB_ENV = "REPOPROVER_CODEX_CACHE_MAX_GB"
-MIN_FREE_GB_ENV = "REPOPROVER_CODEX_MIN_FREE_GB"
+CACHE_HOME_ENV = "PROOF_ASSISTANT_CACHE_HOME"
+CACHE_MAX_GB_ENV = "PROOF_ASSISTANT_CACHE_MAX_GB"
+MIN_FREE_GB_ENV = "PROOF_ASSISTANT_MIN_FREE_GB"
+LEGACY_CACHE_HOME_ENV = "REPOPROVER_CODEX_CACHE_HOME"
+LEGACY_CACHE_MAX_GB_ENV = "REPOPROVER_CODEX_CACHE_MAX_GB"
+LEGACY_MIN_FREE_GB_ENV = "REPOPROVER_CODEX_MIN_FREE_GB"
 DEFAULT_CACHE_MAX_GB = 16.0
 DEFAULT_MIN_FREE_GB = 25.0
 COLD_DEPOT_RESERVE_GB = 10.0
@@ -231,7 +234,11 @@ class CacheLayout:
         filesystem_type: str | None = None,
     ) -> CacheLayout:
         home = Path(user_home).expanduser() if user_home else Path.home()
-        configured = cache_home or os.environ.get(CACHE_HOME_ENV)
+        configured = (
+            cache_home
+            or os.environ.get(CACHE_HOME_ENV)
+            or os.environ.get(LEGACY_CACHE_HOME_ENV)
+        )
         requested = (
             Path(configured).expanduser()
             if configured
@@ -376,9 +383,9 @@ def cache_policy(
     max_value: str | float | None = max_gb
     free_value: str | float | None = min_free_gb
     if max_value is None:
-        max_value = source.get(CACHE_MAX_GB_ENV)
+        max_value = source.get(CACHE_MAX_GB_ENV) or source.get(LEGACY_CACHE_MAX_GB_ENV)
     if free_value is None:
-        free_value = source.get(MIN_FREE_GB_ENV)
+        free_value = source.get(MIN_FREE_GB_ENV) or source.get(LEGACY_MIN_FREE_GB_ENV)
     return CachePolicy(
         max_bytes=(
             _positive_gb(max_value, CACHE_MAX_GB_ENV)
@@ -591,7 +598,7 @@ def ensure_project_cache_managed(
     if not _is_within(resolved, layout.root):
         raise CacheLocationError(
             f"Lean cache is outside the managed cache root: {lake}. Run "
-            f"`repoprover-codex cache attach --project {root}` first."
+            f"`proof-assistant cache attach --project {root}` first."
         )
     return resolved
 
@@ -1690,7 +1697,7 @@ class DependencyDepotClaim:
                 {
                     "schema_version": _DEPOT_SCHEMA,
                     "key": self.key,
-                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "created_at": datetime.now(UTC).isoformat(),
                     "platform": platform.system(),
                     "architecture": platform.machine(),
                     "manifest_sha256": hashlib.sha256(

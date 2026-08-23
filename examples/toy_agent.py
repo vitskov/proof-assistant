@@ -1,5 +1,6 @@
 """Tiny RepoProver-like object for adapter experiments without importing RepoProver."""
 
+
 class ToyAgent:
     agent_type = "toy"
     repo_root = None
@@ -11,18 +12,20 @@ class ToyAgent:
         return kwargs["prompt"]
 
     def get_tools(self):
-        return [{
-            "type": "function",
-            "function": {
-                "name": "echo",
-                "description": "Echo text",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"text": {"type": "string"}},
-                    "required": ["text"],
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "echo",
+                    "description": "Echo text",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"text": {"type": "string"}},
+                        "required": ["text"],
+                    },
                 },
-            },
-        }]
+            }
+        ]
 
     def handle_tool_call(self, name, arguments):
         if name != "echo":

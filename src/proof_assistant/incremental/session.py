@@ -9,7 +9,7 @@ import tempfile
 from collections.abc import Sequence
 from contextlib import nullcontext
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -34,7 +34,7 @@ from .locking import ProjectLockedError, project_lock
 from .models import ClaimState, ManuscriptEdge, Snapshot, SourceObject, TaskSpec
 from .snapshot import SnapshotRepository, sync_project_manuscript
 from .store import StateStore
-from .task import parse_task_file
+from .task import parse_task_file, parse_task_text, task_document
 
 PROJECT_CONFIG_VERSION = 1
 PROJECT_GITIGNORE = """\
@@ -85,7 +85,7 @@ class PreparedPass:
 
 
 def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _is_within(path: Path, parent: Path) -> bool:
@@ -121,8 +121,12 @@ class IncrementalSession:
         cls,
         *,
         manuscript: str | Path,
-        task_file: str | Path,
+        task_file: str | Path | None = None,
+        task_text: str | None = None,
         project: str | Path,
+        project_name: str | None = None,
+        project_id: str | None = None,
+        source_in_dropbox: bool = False,
     ) -> IncrementalSession:
         source = Path(manuscript).expanduser().resolve()
         destination = Path(project).expanduser().resolve()
@@ -138,7 +142,16 @@ class IncrementalSession:
                     f"Project directory must be new or empty: {destination}"
                 )
             destination.rmdir()
-        task_path, task_text, task_sha256, task = parse_task_file(task_file)
+        if task_file is not None and task_text is not None:
+            raise ManuscriptInputError("Specify task_file or task_text, not both")
+        if task_file is not None:
+            _source_task_path, initial_task_text, task_sha256, task = parse_task_file(
+                task_file
+            )
+        else:
+            initial_task_text = task_document(task_text)
+            task_sha256, task = parse_task_text(initial_task_text)
+        configured_task_path = "VERIFY.yaml"
         destination.parent.mkdir(parents=True, exist_ok=True)
         staging = Path(
             tempfile.mkdtemp(
@@ -148,18 +161,25 @@ class IncrementalSession:
         session = cls(staging)
         try:
             session._write_scaffold()
+            atomic_write_text(staging / "VERIFY.yaml", initial_task_text)
             config = {
                 "schema_version": PROJECT_CONFIG_VERSION,
                 "created_at": utc_now(),
                 "manuscript": str(source),
-                "task_file": str(task_path),
+                "task_file": configured_task_path,
+                "name": project_name or destination.name,
+                "project_id": project_id
+                or hashlib.sha256(str(destination).encode("utf-8")).hexdigest()[:16],
+                "source_in_dropbox": source_in_dropbox,
                 "package_version": __version__,
             }
             atomic_write_json(session.config_path, config)
-            atomic_write_text(staging / "RepoProverInput" / "TASK.md", task_text)
+            atomic_write_text(
+                staging / "RepoProverInput" / "TASK.md", initial_task_text
+            )
             with StateStore(session.database_path) as store:
                 store.set_metadata("manuscript", str(source))
-                store.set_metadata("task_file", str(task_path))
+                store.set_metadata("task_file", configured_task_path)
                 store.set_metadata("task_sha256", task_sha256)
                 store.set_metadata(
                     "task_spec", json.dumps(task.to_dict(), sort_keys=True)
@@ -254,8 +274,8 @@ class IncrementalSession:
         )
         if result.returncode != 0:
             raise IncrementalProjectError((result.stderr or result.stdout).strip())
-        self._git(["config", "user.name", "RepoProver Codex"])
-        self._git(["config", "user.email", "repoprover-codex@localhost"])
+        self._git(["config", "user.name", "Proof Assistant"])
+        self._git(["config", "user.email", "proof-assistant@localhost"])
         self._git(["add", "--all"])
         self._git(
             ["commit", "-q", "-m", "Initialize incremental manuscript verification"]
@@ -291,6 +311,14 @@ class IncrementalSession:
             raise IncrementalProjectError("Unsupported incremental project schema")
         return config
 
+    def _task_path_from_config(self, config: dict[str, Any]) -> Path:
+        value = Path(str(config["task_file"])).expanduser()
+        return (
+            (self.project / value).resolve()
+            if not value.is_absolute()
+            else value.resolve()
+        )
+
     def _ensure_claim_modules(self, objects: Sequence[SourceObject]) -> None:
         claim_directory = self.project / "Formalization" / "Claims"
         claim_directory.mkdir(parents=True, exist_ok=True)
@@ -318,11 +346,12 @@ class IncrementalSession:
         manuscript: str | Path | None = None,
         task_file: str | Path | None = None,
         environment_hash: str | None = None,
+        expected_inventory_sha256: str | None = None,
         _already_locked: bool = False,
     ) -> PreparedPass:
         config = self._load_config()
         source = Path(manuscript or config["manuscript"]).expanduser().resolve()
-        task_path_value = task_file or config["task_file"]
+        task_path_value = task_file or self._task_path_from_config(config)
         task_path, task_text, task_sha256, task = parse_task_file(task_path_value)
         if not source.is_dir():
             raise ManuscriptInputError(f"Manuscript directory does not exist: {source}")
@@ -344,7 +373,11 @@ class IncrementalSession:
                     environment_hash=environment_hash,
                 )
                 try:
-                    snapshot = self.snapshots.create(source, run_id=run_id)
+                    snapshot = self.snapshots.create(
+                        source,
+                        run_id=run_id,
+                        expected_inventory_sha256=expected_inventory_sha256,
+                    )
                     store.record_snapshot(
                         snapshot,
                         source_root=source,
@@ -513,7 +546,13 @@ class IncrementalSession:
                         },
                     )
                     store.set_metadata("manuscript", str(source))
-                    store.set_metadata("task_file", str(task_path))
+                    stored_task_path = (
+                        "VERIFY.yaml"
+                        if task_path.resolve()
+                        == (self.project / "VERIFY.yaml").resolve()
+                        else str(task_path)
+                    )
+                    store.set_metadata("task_file", stored_task_path)
                     store.set_metadata("task_sha256", task_sha256)
                     store.set_metadata(
                         "task_spec", json.dumps(task.to_dict(), sort_keys=True)
@@ -521,7 +560,7 @@ class IncrementalSession:
                     config.update(
                         {
                             "manuscript": str(source),
-                            "task_file": str(task_path),
+                            "task_file": stored_task_path,
                             "package_version": __version__,
                         }
                     )

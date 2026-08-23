@@ -1,107 +1,124 @@
-# Troubleshooting and operations
+# Troubleshooting and recovery
 
-## A persistent verification appears quiet
+## The TUI closed or a run was interrupted
 
-Status is deliberately readable during an active writer:
+Relaunch and choose **Resume project**:
 
 ```bash
-repoprover-codex manuscript status --project "$PROJECT"
+proof-assistant
 ```
 
-`mutation in progress: yes` plus a `RUNNING` row means the project lock is
-owned. Inspect processes without modifying them:
+Do not delete the project. The next backend mutation marks an abandoned
+`RUNNING` record `INTERRUPTED` and routes to recovery. Source snapshots,
+certificates, open questions, Lean code, and reports remain durable.
+
+## A project appears quiet
+
+The TUI progress screen is phase-oriented. Advanced status remains readable
+during an active writer:
+
+```bash
+proof-assistant manuscript status --project "$PROJECT"
+```
+
+`mutation in progress: yes` with a `RUNNING` row means another process owns the
+project lock. A second TUI should enter read-only progress instead of mutating
+the project.
+
+For diagnosis only:
 
 ```bash
 ps -axo pid,ppid,etime,state,%cpu,%mem,command | \
-  rg 'repoprover-codex manuscript verify|codex app-server|lake|lean'
+  rg 'proof-assistant manuscript verify|codex app-server|lake|lean'
 ```
 
-Interpretation:
+- a main-project `lake build` is setup or independent certification;
+- a managed-cache worktree build is an isolated proof batch;
+- `codex app-server` is an active semantic/proof turn; and
+- `DependencyExtractor.lean` is structural declaration extraction.
 
-- `lake build` in the main project: independent setup/final certification;
-- `lake build` under `~/.cache/repoprover-codex/worktrees/`: isolated batch
-  bootstrap or agent checking;
-- `codex app-server`: an active semantic/proof-search turn; and
-- `DependencyExtractor.lean`: structural type/value/dependency extraction.
+Compare elapsed time with `--turn-timeout`; that timeout applies to each Codex
+batch, not the complete manuscript.
 
-The persistent workflow stores batch event/tool artifacts after a Codex turn
-returns. An absent `events.json` is not by itself a hang. Compare elapsed time
-with `--turn-timeout`, and remember that the timeout applies per Codex batch.
+## Clarification returns after resume
 
-## The command exits 10
+That is expected when the external manuscript has not changed. Proof Assistant
+does not regenerate the question or start a redundant run; it returns to the
+persisted clarification screen.
 
-This is a planned clarification pause, not a crash.
+Edit the exact external file shown. Do not edit `$PROJECT/manuscript` or the
+generated clarification report. After the source stabilizes, review the full
+multi-file change/impact plan and explicitly start the next iteration.
+
+Advanced inspection:
 
 ```bash
-sed -n '1,260p' "$PROJECT/CLARIFICATION_REQUEST.md"
-repoprover-codex manuscript questions --project "$PROJECT" --json
+proof-assistant manuscript questions --project "$PROJECT" --json
 ```
 
-Edit the authoritative manuscript source, then rerun the same verify command.
-Do not edit `$PROJECT/manuscript`; it is replaced from the next immutable
-snapshot. Certified independent branches are preserved.
+## Dropbox source warning
 
-## The command exits 11 or 12
+An external source in Dropbox is allowed. The warning explains that an editor
+and Dropbox may expose intermediate saves. Proof Assistant waits for matching
+complete inventories, verifies a staged copy, and confirms the plan again before
+import. If files keep changing, choose **Keep waiting for more edits** rather
+than forcing a partial iteration.
 
-Exit 11 is partial/inconclusive and never means false. Read the claim states and
-diagnostics in the report/run directory.
+A managed project, Python environment, or cache in Dropbox is an error. Move or
+recreate it under the defaults in [Installation](INSTALLATION.md).
 
-Exit 12 requires a kernel-checked counterexample declaration. Review its Lean
-type and correspondence before treating it as a counterexample to the intended
-prose statement.
-
-## A run was interrupted
-
-Do not delete the project. Operating-system leases are released automatically;
-the next invocation marks an abandoned `RUNNING` database row `INTERRUPTED`,
-records a new source snapshot, and resumes from persistent state.
-
-If an ephemeral Git worktree remains after a hard kill, inspect it under the
-managed cache’s `worktrees/incremental/` path. A later run uses a distinct run
-directory. Remove a preserved worktree only after confirming no process uses it
-and retaining any desired patch; ordinary completed batches remove theirs.
-
-## Setup, provider, or Lean infrastructure failure
-
-Exit codes distinguish these boundaries:
-
-- 20: project/cache/setup failure;
-- 21: Codex authentication, protocol, or provider failure; and
-- 22: Lean bootstrap, build, merge, or environment-extraction failure.
+## Provider or Lean failure
 
 Run:
 
 ```bash
-repoprover-codex compiler-check
-repoprover-codex cache doctor
-repoprover-codex doctor
-repoprover-codex models
+proof-assistant compiler-check
+proof-assistant cache doctor
+proof-assistant doctor
+proof-assistant models
 ```
 
-The compiler check must compile and execute a program. Use an exact model and
-effort printed by `models`. Authentication comes from `codex login`; do not
-create or expose an API key for this package.
+The compiler check must compile and execute a program. Select an exact
+model/effort advertised by `models`. Authentication comes from `codex login`;
+do not expose an API key or token to Proof Assistant.
 
-## Cache reconciliation or disk pressure
+Persistent verification exit codes preserve failure boundaries:
+
+- 20: project/cache/setup failure;
+- 21: Codex authentication, protocol, or provider failure; and
+- 22: Lean bootstrap, build, merge, or extraction failure.
+
+Exit 11 is partial/inconclusive and never means false. Exit 12 is reserved for a
+kernel-checked counterexample outcome.
+
+## Disk pressure or cache reconciliation
 
 ```bash
-repoprover-codex cache status
-repoprover-codex cache gc --gc-timeout 900
+proof-assistant cache status
+proof-assistant cache gc --gc-timeout 900
 ```
 
-`cache GC reconciling coarse cache index` is bounded. Thousands of Mathlib
-archives form one bulk candidate, not thousands of nested rescan candidates.
-Active jobs hold leases and reservations; manual GC skips them.
+The cache remains at `$HOME/.cache/repoprover-codex` after the rename so
+existing Mathlib data is reused. Do not create a new “proof-assistant” cache to
+solve pressure; that duplicates the largest data.
 
-Never brute-force cache deletion while a job is active. If emergency cleanup
-is unavoidable, stop all jobs first and resolve exact targets under the path
-printed by `cache path`. Persistent verification projects are outside the cache
-and must not be deleted as cache cleanup.
+GC treats thousands of Mathlib archives as one coarse candidate and never
+rescans the full tree inside its eviction loop. Active entries are protected by
+leases and reservations. Do not brute-force delete caches while any job is
+active. Persistent verification projects are outside the cache and are not GC
+candidates.
 
-## Legacy one-shot runs
+## The external source moved
 
-For `manuscript-run`, inspect `RUN_STATUS.json`, then
-`artifacts/result.json`, `VERIFICATION_REPORT.md`,
-`artifacts/verification-build.log`, and `artifacts/setup.log`. A rerun requires
-a new/empty output directory. These constraints do not apply to persistent
-`manuscript verify`, which deliberately reuses its project.
+The resolved source location is part of persistent project identity. Restore it
+at that location or create a new project selecting the new source folder. Do
+not hand-edit SQLite or copy files over `$PROJECT/manuscript`. The old managed
+project and its evidence remain intact.
+
+## The task needs to change
+
+The TUI task editor creates the project-owned task during setup. For an existing
+project, do not introduce a separate user-supplied task file or edit task state
+while verification owns the project lock. Any future task edit must update the
+managed `$PROJECT/VERIFY.yaml` through a workflow-aware interface so task impact
+is reviewed before the next iteration.

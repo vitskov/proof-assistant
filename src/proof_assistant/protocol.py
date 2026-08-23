@@ -122,9 +122,9 @@ def isolated_skill_config_args(
             "initialize",
             {
                 "clientInfo": {
-                    "name": "repoprover-codex-skill-probe",
-                    "title": "RepoProver Codex skill isolation probe",
-                    "version": "0.4.1",
+                    "name": "proof-assistant-skill-probe",
+                    "title": "Proof Assistant skill isolation probe",
+                    "version": "0.1.0",
                 },
                 "capabilities": {"experimentalApi": True},
             },
@@ -232,7 +232,7 @@ class AppServerClient:
             ) from exc
         self._reader = threading.Thread(
             target=self._reader_loop,
-            name="repoprover-codex-app-server-reader",
+            name="proof-assistant-app-server-reader",
             daemon=True,
         )
         self._reader.start()
@@ -345,7 +345,7 @@ class AppServerClient:
                 pending.event.set()
             self._notifications.put(
                 {
-                    "method": "_repoprover_codex/server_exited",
+                    "method": "_proof_assistant/server_exited",
                     "params": {"returncode": proc.poll()},
                 }
             )

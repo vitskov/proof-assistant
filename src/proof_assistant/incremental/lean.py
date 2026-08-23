@@ -20,7 +20,7 @@ class LeanExtractionError(RuntimeError):
 
 def install_dependency_extractor(project: Path) -> Path:
     destination = project / "RepoProverSupport" / "DependencyExtractor.lean"
-    resource = files("repoprover_codex.lean").joinpath("DependencyExtractor.lean")
+    resource = files("proof_assistant.lean").joinpath("DependencyExtractor.lean")
     atomic_write_bytes(destination, resource.read_bytes())
     return destination
 

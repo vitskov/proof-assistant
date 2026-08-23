@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from repoprover_codex.cli import build_parser
-from repoprover_codex.incremental.orchestration import (
+from proof_assistant.cli import build_parser
+from proof_assistant.incremental.orchestration import (
     BatchResult,
     VerifyOptions,
     _create_worktree,
@@ -14,7 +14,7 @@ from repoprover_codex.incremental.orchestration import (
     _partition,
     _remove_worktree,
 )
-from repoprover_codex.incremental.session import IncrementalSession, claim_module_path
+from proof_assistant.incremental.session import IncrementalSession, claim_module_path
 
 FIXTURE = Path(__file__).parent / "fixtures" / "incremental_manuscript"
 
@@ -28,8 +28,6 @@ FIXTURE = Path(__file__).parent / "fixtures" / "incremental_manuscript"
                 "init",
                 "--manuscript",
                 "m",
-                "--task-file",
-                "t",
                 "--project",
                 "p",
             ],
@@ -59,21 +57,34 @@ def test_cli_exposes_incremental_command_family(command, function_name):
     assert args.func.__name__ == function_name
 
 
-def test_old_one_shot_command_remains_available():
-    args = build_parser().parse_args(
-        [
-            "manuscript-run",
-            "--manuscript",
-            "m",
-            "--task-file",
-            "t",
-            "--output",
-            "o",
-            "--model",
-            "gpt-5.6-sol",
-        ]
-    )
-    assert args.func.__name__ == "cmd_manuscript_run"
+def test_public_project_commands_do_not_accept_external_task_files():
+    parser = build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            [
+                "manuscript",
+                "init",
+                "--manuscript",
+                "m",
+                "--project",
+                "p",
+                "--task-file",
+                "external.yaml",
+            ]
+        )
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            [
+                "manuscript",
+                "verify",
+                "--project",
+                "p",
+                "--model",
+                "gpt-5.6-sol",
+                "--task-file",
+                "external.yaml",
+            ]
+        )
 
 
 def test_parallelism_is_bounded_and_batches_are_deterministic():

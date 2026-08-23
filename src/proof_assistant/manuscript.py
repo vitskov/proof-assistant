@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -191,7 +191,7 @@ class ManuscriptEvaluation:
 
 
 def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def sha256_file(path: Path) -> str:
@@ -517,10 +517,10 @@ def prepare_manuscript_workspace(
         )
 
         _git_output(workspace, ["init", "-q", "-b", "main"])
-        _git_output(workspace, ["config", "user.name", "RepoProver Codex"])
+        _git_output(workspace, ["config", "user.name", "Proof Assistant"])
         _git_output(
             workspace,
-            ["config", "user.email", "repoprover-codex@localhost"],
+            ["config", "user.email", "proof-assistant@localhost"],
         )
         _git_output(workspace, ["add", "--all"])
         _git_output(

@@ -528,7 +528,7 @@ class IncrementalToolsMixin:
 
 
 INCREMENTAL_SYSTEM_PROMPT = """\
-You are the proof-search worker inside RepoProver-Codex's deterministic
+You are the proof-search worker inside Proof Assistant's deterministic
 incremental manuscript verifier. Lean is the proof authority. The host, not
 you, owns claim identity, source snapshots, graph propagation, certificates,
 and invalidation.

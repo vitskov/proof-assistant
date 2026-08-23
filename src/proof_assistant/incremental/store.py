@@ -210,6 +210,15 @@ class StateStore:
     def close(self) -> None:
         self.connection.close()
 
+    def backup_to(self, path: Path) -> None:
+        """Create a transactionally consistent SQLite copy for read-only planning."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        destination = sqlite3.connect(path)
+        try:
+            self.connection.backup(destination)
+        finally:
+            destination.close()
+
     def __enter__(self) -> StateStore:
         return self
 
@@ -393,6 +402,19 @@ class StateStore:
 
     def previous_snapshot(self) -> str | None:
         return self.get_metadata("current_snapshot")
+
+    def snapshot_row(self, snapshot: str) -> sqlite3.Row | None:
+        return self.connection.execute(
+            "SELECT * FROM snapshots WHERE snapshot_commit = ?", (snapshot,)
+        ).fetchone()
+
+    def source_file_rows(self, snapshot: str) -> list[sqlite3.Row]:
+        return list(
+            self.connection.execute(
+                "SELECT * FROM source_files WHERE snapshot_commit = ? ORDER BY path",
+                (snapshot,),
+            )
+        )
 
     def current_claim_rows(self, *, include_retired: bool = False) -> list[sqlite3.Row]:
         suffix = "" if include_retired else " WHERE retired = 0"
@@ -834,6 +856,27 @@ class StateStore:
         return list(
             self.connection.execute(
                 "SELECT * FROM clarifications WHERE status = 'OPEN' ORDER BY question_id"
+            )
+        )
+
+    def question_row(self, question_id: str) -> sqlite3.Row | None:
+        return self.connection.execute(
+            "SELECT * FROM clarifications WHERE question_id = ?", (question_id,)
+        ).fetchone()
+
+    def run_claim_rows(self, run_id: int) -> list[sqlite3.Row]:
+        return list(
+            self.connection.execute(
+                "SELECT * FROM run_claims WHERE run_id = ? ORDER BY claim_id, action",
+                (run_id,),
+            )
+        )
+
+    def diagnostics_for_run(self, run_id: int) -> list[sqlite3.Row]:
+        return list(
+            self.connection.execute(
+                "SELECT * FROM diagnostics WHERE run_id = ? ORDER BY diagnostic_id",
+                (run_id,),
             )
         )
 

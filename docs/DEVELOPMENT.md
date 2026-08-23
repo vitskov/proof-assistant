@@ -2,113 +2,129 @@
 
 ## Non-negotiable local rules
 
-- Use Python 3.13 and uv.
-- Keep Python environments and Lean caches outside Dropbox.
-- Every installer run must compile and execute a native test program.
-- Never push to or open a pull request against `facebookresearch/repoprover`.
+- Use Python 3.13 and `uv` whenever feasible.
+- Keep Python environments and Lean/Lake/Mathlib caches outside Dropbox.
+- Keep managed Proof Assistant projects outside Dropbox.
+- Every installer must compile and execute a native test program.
+- Never push to, open a pull request against, or create an issue in
+  `facebookresearch/repoprover`.
+
+The external manuscript source may be in Dropbox; it is imported through the
+stable-source contract. Do not weaken this distinction into a blanket source
+rejection.
 
 ## Fast test cycle
 
 ```bash
-cd "$HOME/src/repoprover-codex"
-uv pip install --python "$HOME/.venvs/repoprover-codex/bin/python" -e '.[dev]'
-repoprover-codex compiler-check
-"$HOME/.venvs/repoprover-codex/bin/python" -m pytest -q
+cd "$HOME/src/proof-assistant"
+uv pip install --python "$HOME/.venvs/proof-assistant/bin/python" -e '.[dev]'
+proof-assistant compiler-check
+"$HOME/.venvs/proof-assistant/bin/python" -m pytest -q
 ```
+
+## Architectural rules
+
+The TUI, workflow, workspace/presentation, and incremental verification layers
+have strict boundaries described in [Architecture](ARCHITECTURE.md).
+
+- `proof_assistant.tui` may render typed view models and send commands; it must
+  not implement project or verification authority.
+- UI-neutral services must not import Textual or Rich widgets.
+- Stable source observation must yield a content-bound inventory/change plan;
+  filesystem events alone cannot authorize import.
+- Confirmation must reject a stale source inventory or project generation.
+- Resume behavior comes from persisted state, not a remembered screen.
+- Codex clarification presentation cannot alter deterministic question facts.
+
+Favor contract tests at each boundary and integration tests that use fakes only
+at the next external boundary.
 
 ## Local integration checks
 
 ```bash
-repoprover-codex cache doctor
-repoprover-codex cache status
-repoprover-codex doctor
-repoprover-codex models
-repoprover-codex smoke --model MODEL --effort EFFORT
+proof-assistant cache doctor
+proof-assistant cache status
+proof-assistant doctor
+proof-assistant models
+proof-assistant smoke --model MODEL --effort EFFORT
 ```
 
-Run smoke once with `OPENAI_API_KEY` removed to prove that Codex's existing
-login is sufficient.
+Run smoke once with `OPENAI_API_KEY` removed to demonstrate that the existing
+Codex login is sufficient.
 
-## Real cache-sharing acceptance
+## TUI and workflow acceptance
 
-Create two small Lean projects with identical `lean-toolchain` and lakefile
-dependency configuration but different absolute paths. Each should contain a
-trivial theorem such as `2 + 2 = 4` proved by `norm_num`.
+Test the Textual app with its pilot/headless driver. Cover:
 
-```bash
-repoprover-codex cache prepare --project /path/to/project-a
-repoprover-codex cache prepare --project /path/to/project-b
-```
+1. new-project and resume selection;
+2. default and customized project-owned task;
+3. external Dropbox-source warning without rejecting the source;
+4. rejection of Dropbox managed project destinations;
+5. clarification rendering with the actual multi-file source path and
+   highlighted lines;
+6. stable multi-file change detection and complete impact preview;
+7. explicit confirmation, plus rejection/recomputation of stale plans;
+8. no-change resume returning to the existing clarification screen;
+9. interrupted/failure recovery and read-only active-project status; and
+10. findings categories and evidence paths.
 
-Acceptance criteria:
+Backend source tests must cover rapid editor-style replace sequences,
+simultaneous changes to several `\input` files, adds/deletes/renames, and staged
+copy mutation. Do not make wall-clock sleeps the correctness mechanism.
 
-1. Both commands finish with `lake build: OK`.
-2. Project B prints `dependency depot reused: yes`.
-3. Both `.lake/packages` links resolve to the same depot.
-4. Their top-level `.lake` links resolve to different project-build paths.
-5. The second project adds only its small root build, not another Mathlib tree.
-6. `cache status` remains below both disk limits.
-7. A generated manuscript workspace with the same dependency revisions prints
-   the same dependency key despite its different package name and source roots.
-
-## Cache-GC regression checks
-
-`tests/test_cache.py` includes the former pathological shape directly: 10,000
-Mathlib download files plus a capacity violation. The test asserts one coarse
-candidate, one recursive measurement, and an empty recreated download root.
-Additional cases cover:
-
-- two simultaneous reservations that would exceed the configured maximum;
-- stale reservation recovery through a released OS lease;
-- active entries that must not be evicted;
-- interrupted quarantine recovery;
-- index schema migration and dirty-entry crash state; and
-- expired accounting and deletion deadlines.
-
-These are operation-count assertions, not timing-only benchmarks, so a fast
-machine cannot hide a reintroduction of the nested-rescan algorithm.
-
-## Real RepoProver/Codex checks
-
-Use a model/effort pair printed by `models`, then run one deliberately trivial
-RepoProver proof and one file-based manuscript task. Successful manuscript exit
-requires the separate final Lean build and all evidence conditions documented
-in the [Usage guide](USAGE.md#results-and-evidence).
-
-Only after single-agent success, run exactly two concurrent Codex-backed
-agents. This is a local-mode package target; SLURM is not required on macOS.
-
-## Incremental feedback-loop acceptance
+## Incremental verification acceptance
 
 Use the golden manuscript under `tests/fixtures/incremental_manuscript` and a
-fresh persistent project outside Dropbox. Acceptance requires:
+fresh project outside Dropbox. Acceptance requires:
 
-1. initialization indexes two claims and the explicit theorem-to-lemma edge;
-2. the first pass schedules the lemma before its dependent theorem;
-3. each proposal is merged only in its assigned claim module;
-4. independent `lake build` plus the Lean environment extractor produces two
-   certificates with structural type/value hashes;
-5. an unchanged second pass starts no Codex app-server and reports two reused
-   certificates; and
-6. `manuscript status` remains readable while the writer lock is active.
+1. the initial stable import indexes expected claims and edges;
+2. dependencies are proved before descendants;
+3. workers may change only assigned claim modules;
+4. independent `lake build` and environment extraction issue certificates;
+5. an unchanged pass starts no Codex app-server and reuses certificates;
+6. one changed lemma invalidates its complete reverse-dependent closure but no
+   unrelated branch; and
+7. project status remains readable during a writer lock.
 
-For source-change tests, cover independent branches, proof-only edits in both
+Source tests should distinguish proof-only edits in theorem/argument-audit
 modes, identical formal-type reconciliation, changed assumptions, structured
-clarification/supersession, and a certified counterexample fixture. Do not
-replace real Lean extraction with source-text dependency inference.
+clarification/supersession, suspected-false state, and certified
+counterexamples. Never replace real Lean extraction with source-text inference.
+
+## Cache regression checks
+
+The former pathological case—thousands of Mathlib download files under disk
+pressure—must remain one coarse GC candidate and one recursive measurement.
+Keep operation-count tests for reservations, active leases, quarantine recovery,
+deadline enforcement, and index migration.
+
+Two projects with compatible Lake dependency configuration must reuse one
+dependency depot while retaining independent small root builds:
+
+```bash
+proof-assistant cache prepare --project /path/to/project-a
+proof-assistant cache prepare --project /path/to/project-b
+```
+
+The cache path remains `$HOME/.cache/repoprover-codex`; changing it as part of
+branding is a regression because it duplicates Mathlib data.
 
 ## Release checks
 
-The current release line is `0.4.x` (currently 0.4.1). Increment patch versions conservatively;
-do not enter the `0.5.x` series without explicit user authorization.
+The product version line starts at 0.1.0. Increment it deliberately and keep the
+distribution/import/repository names `proof-assistant` / `proof_assistant` /
+`vitskov/proof-assistant` aligned.
 
 ```bash
 git diff --check
-"$HOME/.venvs/repoprover-codex/bin/python" -m pytest -q
-uv build --python "$HOME/.venvs/repoprover-codex/bin/python"
+"$HOME/.venvs/proof-assistant/bin/python" -m pytest -q
+uv build --python "$HOME/.venvs/proof-assistant/bin/python"
 ```
 
-Install the wheel into a fresh external Python 3.13 environment, run
-`compiler-check`, `cache doctor`, and the tests, then audit the repository for
-credentials, environments, caches, build artifacts, and temporary files before
-pushing only to the user-owned repository.
+Run `scripts/install-dev.sh`; install the wheel in a fresh external Python 3.13
+environment; run compiler, package-resource, CLI/TUI smoke, cache doctor, and a
+small real Lean acceptance. Audit secrets, credentials, environments, caches,
+artifacts, and temporary files before any authorized publication.
+
+Do not publish or create a release without explicit user authorization. Any
+authorized push is to the user-owned Proof Assistant repository only.

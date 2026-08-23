@@ -3,19 +3,19 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from repoprover_codex.incremental.certification import (
+from proof_assistant.incremental.certification import (
     certify_current_correspondence,
     revalidate_unchanged_certificates,
 )
-from repoprover_codex.incremental.diagnostics import classify_failure
-from repoprover_codex.incremental.lean import correspondence_discrepancies
-from repoprover_codex.incremental.models import (
+from proof_assistant.incremental.diagnostics import classify_failure
+from proof_assistant.incremental.lean import correspondence_discrepancies
+from proof_assistant.incremental.models import (
     ClaimState,
     LeanDeclaration,
     ManuscriptEdge,
     SourceObject,
 )
-from repoprover_codex.incremental.store import StateStore
+from proof_assistant.incremental.store import StateStore
 
 
 def source_object(claim_id: str, statement_hash: str = "statement") -> SourceObject:

@@ -1,4 +1,4 @@
-from repoprover_codex.backend import CodexBackend, CodexConfig
+from proof_assistant.backend import CodexBackend, CodexConfig
 
 
 class FakeClient:

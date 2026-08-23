@@ -1,200 +1,182 @@
-# Test report — version 0.4.1
+# Test report — Proof Assistant 0.1.0
 
-Test date: 2026-08-23 (America/New_York)
+Tested on 2026-08-23 in `America/New_York`.
 
 ## Result
 
-Version 0.4.1 implements the persistent manuscript feedback loop: immutable Git
-source snapshots, a structural LaTeX object index, manuscript and elaborated
-Lean dependency graphs, statement-level certificates, graph-sliced
-invalidation, formal-type reconciliation, clarification pause/resume,
-dependency audits, and bounded parallel proof worktrees.
+Proof Assistant 0.1.0 passed the complete automated suite, a clean wheel
+installation, mandatory native compiler execution, a real two-claim
+Codex-to-Lean verification, an unchanged certificate-reuse pass, and cache and
+repository hygiene checks.
 
-The complete automated suite and a real Codex/RepoProver/Lean end-to-end project
-passed. An unchanged second pass reused both certificates without starting a
-Codex app-server. The legacy one-shot command and the previously accepted
-bounded cache implementation remain covered.
-
-No upstream RepoProver file was changed. Nothing was pushed to
-`facebookresearch/repoprover`, and no upstream pull request or issue was
-created.
+- Complete automated suite: **155 passed**.
+- Supported installer: **passed**, including its mandatory compiler check and
+  complete suite.
+- Fresh wheel and Python 3.13 environment: **passed**.
+- Textual Pilot suite from the installed wheel: **5 passed**.
+- Real small manuscript: **2/2 claims certified**.
+- Unchanged second pass: **2 certificates reused, 0 proof turns required**.
+- Shared Mathlib depot: **reused**; no new `~/.cache/proof-assistant` tree.
+- RepoProver checkout: **clean and unchanged**.
+- Upstream RepoProver PR: **NOT CREATED**.
 
 ## Tested environment
 
-- macOS 12.7.6 (21H1320), x86_64
-- Python 3.13.15
-- uv 0.9.26
-- Codex CLI 0.149.0
-- Git 2.37.1
-- Lean 4.28.0, commit
-  `7e01a1bf5c70fc6167d49c345d3bf80596e9a79b`
-- Lake 5.0.0-src+7e01a1b
-- Mathlib commit `8f9d9cff6bd728b17a24e163c9402775d9e6a365`
-- RepoProver commit `386adba3df572cb71df534add2c764e071898a2e`
-- RepoProver worktree: clean
-- native compiler selected for Lean: `/usr/bin/clang`
+| Component | Tested value |
+|---|---|
+| OS | macOS 12.7.6 (21H1320), x86_64 |
+| Python | CPython 3.13.15 |
+| uv | 0.9.26 (`ee4f00362`, 2026-01-15) |
+| Codex CLI | 0.149.0 |
+| Git | 2.37.1 (Apple Git-137.1) |
+| Lean | 4.28.0, commit `7e01a1bf5c70fc6167d49c345d3bf80596e9a79b` |
+| Lake | 5.0.0-src+7e01a1b |
+| Mathlib | v4.28.0, commit `8f9d9cff6bd728b17a24e163c9402775d9e6a365` |
+| RepoProver | commit `386adba3df572cb71df534add2c764e071898a2e` |
+| native compiler | `/usr/bin/clang`, Apple clang 14.0.0 |
+| Textual / Rich | 1.0.0 / 14.3.4 |
+| source | `/Users/vui1/src/proof-assistant` |
+| Python environment | `/Users/vui1/.venvs/proof-assistant` |
+| managed cache | `/Users/vui1/.cache/repoprover-codex` |
+| installed command | `/Users/vui1/.local/bin/proof-assistant` |
 
-Active development locations:
+The source checkout, environment, managed projects, and cache all resolved
+outside Dropbox. The historical cache name is intentionally preserved to avoid
+duplicating the multi-gigabyte Mathlib depot.
 
-- source: `/Users/vui1/src/repoprover-codex`
-- environment: `/Users/vui1/.venvs/repoprover-codex`
-- cache: `/Users/vui1/.cache/repoprover-codex`
-- installed command: `/Users/vui1/.local/bin/repoprover-codex`
+## Automated contract suite
 
-All locations are outside Dropbox.
+Command:
 
-## Automated suite
+```bash
+/Users/vui1/.venvs/proof-assistant/bin/python -m pytest -q
+```
 
-`python -m pytest -q` completed with **130 passed**. The supported installer
-then ran the same **130-test** suite again after its editable install. Coverage
-includes:
+Result: `155 passed` (34.97 seconds in the final installer run).
 
-- content-addressed, filtered bare-Git snapshots and exact source diffs;
-- pylatexenc structural environments, labels, proof association, references,
-  character/byte spans, normalized hashes, duplicate-label rejection, and
-  persistent IDs for unlabeled claims;
-- free-form and schema-1 YAML tasks, target validation, theorem/argument modes,
-  host-enforced pause/reproof/counterexample policies, and correspondence
-  review;
-- deterministic graph serialization, cycles, dependency closure, reverse
-  invalidation, minimal ready frontiers, and blocked descendants;
-- SQLite transactions, interrupted-run recovery, unique open questions,
-  question supersession, and status reads during a writer lock;
-- required clarification diagnostics, separation of `SUSPECT_FALSE` from a
-  certified counterexample, and rejection of semantic dependency cycles or
-  out-of-batch state mutations;
-- certification dependency order, structural type/value hashes, source/type
-  reconciliation, environment revalidation, and manuscript/Lean discrepancy
-  detection;
-- rejection of `sorryAx`, direct axiom mappings, newly introduced project
-  axioms, missing declaration values, failed builds, and host-controlled batch
-  paths;
-- deterministic batching, concurrency limit validation, and ordered Git merge;
-- all earlier cache location, compiler execution, coarse GC, capacity,
-  dependency sharing, app-server protocol, provider failure, model validation,
-  RepoProver tool, one-shot manuscript, and MCP/skill isolation cases.
+The suite covers:
 
-## Real Lean dependency-extractor gate
+- Codex app-server framing, provider failures, model/effort validation, and
+  fail-closed disabling of MCP servers, apps, plugins, and skills;
+- native compiler detection and compile-and-execute behavior;
+- cache admission, leases, shared dependency depots, bounded coarse-index GC,
+  interrupted reconciliation, and Dropbox rejection;
+- deterministic LaTeX indexing, multi-input source spans, dependency graphs,
+  snapshots, SQLite state, correspondence, and kernel-backed certificates;
+- project-owned default/custom `VERIFY.yaml` and migration of older external
+  task configurations;
+- stable before/copy/after source inventories, add/modify/delete/rename plans,
+  task changes, transitive impact closure, and stale confirmation rejection;
+- deterministic resume routing for complete, interrupted, failed, externally
+  busy, clarification, and changed-source states;
+- exact clarification file/span/excerpt/blocked-claim presentation, strict
+  optional Codex narration, deterministic fallback, and provenance storage;
+- Textual new/resume, task editing, progress, safe cancellation, exact source
+  display, change confirmation, findings, and recovery screens; and
+- the architecture rule that backend code cannot import Textual or Rich.
 
-A generated Lean project with declarations `D`, `A`, `B`, and `T` was built
-against Lean 4.28/Mathlib. The helper inspected Lean’s `Environment`, not source
-text. It reported the expected project proof chain (`B` references `A`; `T`
-references `B`), distinct structural proof/value hashes, common theorem type
-hashes where appropriate, and empty axiom sets.
+Ruff (`E`, `F`, `I`, `UP`), Ruff formatting, `compileall`, and
+`git diff --check` also passed.
 
-The helper imports the project aggregate module, traverses elaborated type and
-value expressions, removes non-semantic metadata, collects `Expr.const`
-references, calls Lean’s axiom collector, emits canonical JSON, and is packaged
-in the wheel.
+## Packaging and installer gates
 
-## Real incremental Codex/RepoProver acceptance
+`scripts/install-dev.sh` was run with:
 
-Project:
-`/Users/vui1/repoprover-test-runs/feedback-loop-small-20260823`
+```text
+PROOF_ASSISTANT_VENV=/Users/vui1/.venvs/proof-assistant
+PROOF_ASSISTANT_CACHE_HOME=/Users/vui1/.cache/repoprover-codex
+PROOF_ASSISTANT_PYTHON=3.13
+```
 
-The golden manuscript contains `lem:zero-add` and dependent `thm:add-zero`.
-Initialization indexed both and recovered the explicit graph edge
-`thm:add-zero -> lem:zero-add`.
+It used `uv`, installed the package and development dependencies, executed
+`proof-assistant compiler-check` before cache/test work, compiled and ran a C
+program with `/usr/bin/clang`, initialized the preserved cache, and ran all 155
+tests.
 
-The first attempted verification exposed a dependency-lease lifecycle bug
-before any Codex turn. The run was transactionally recorded as setup failure.
-The depot claim type is now itself a context manager with deterministic cleanup,
-both main and parallel worker paths use that interface, and a lifecycle
-regression test verifies that its OS lease is closed.
+An sdist and wheel were built outside Dropbox. The wheel was installed into a
+fresh Python 3.13.15 environment and validated for:
 
-The successful first pass (run 3):
+- version `0.1.0` and distribution/import identity;
+- primary `proof-assistant` and deprecated 0.1 `repoprover-codex` entrypoints;
+- packaged `proof_assistant.lean/DependencyExtractor.lean` resource;
+- pinned supported Textual 1.x resolution (`1.0.0` in the test);
+- all five Textual Pilot tests from the installed wheel;
+- native compiler compile/run; and
+- cache doctor against the existing shared cache.
 
-- started `2026-08-23T04:42:02.920983+00:00`;
-- completed `2026-08-23T04:53:55.186559+00:00`;
-- scheduled the lemma before the theorem;
-- used one isolated Codex process per frontier batch;
-- visibly started each child with apps/plugins/MCP servers and local/bundled
-  skills disabled;
-- merged only the assigned claim modules;
-- independently rebuilt after each merge;
-- extracted and certified both elaborated declarations; and
-- exited 0 with outcome `verified` and a clean project worktree.
+The fresh-wheel gate initially exposed that `textual>=1,<10` allowed an
+incompatible Textual 8 release. The supported range was corrected to
+`textual>=1,<2`, guarded by a distribution-contract test, and the entire wheel
+gate was rerun successfully.
 
-Certificates:
+## Real verification acceptance
 
-| Claim | Lean declaration | Type hash | Value hash |
-|---|---|---|---|
-| `lem:zero-add` | `ManuscriptVerification.lem_zero_add` | `2d63366dac90651290b5ffd18f571a00d1f0403a2d7ea101181531551443de08` | `379def315b9c563f13e20e6655b3fb619595863abb5558e0d4b4c04be1196dc9` |
-| `thm:add-zero` | `ManuscriptVerification.thm_add_zero` | `ec69184a0e9b97a5a83884c03c3f67d91ca885000a4f6fecc841df224e307483` | `e7b9599485332c8309dc4db50e64190febdebebbf628ab1906ba97f6a3450715` |
+A fresh managed project outside Dropbox was initialized from the two-claim
+incremental manuscript fixture without an external task argument.
 
-The Lean graph records the theorem’s direct dependency on
-`ManuscriptVerification.lem_zero_add`.
+| Evidence | Value |
+|---|---|
+| indexed claims | 2 |
+| manuscript snapshot | `2c55a7285f4ae09bafa2ec019511feec13f403d1` |
+| project task SHA-256 | `5675e9a3186aebcc0e5526b84202f1cf5e843da98fc8c780658612fd3a05fea0` |
+| dependency key | `e50bd489673215a5b89a0dc2` |
+| shared dependency depot | reused: yes |
+| native compiler | `/usr/bin/clang` |
+| `lake build` | OK |
+| first verify outcome | `verified` |
+| first verify certificates | 2 certified, 0 reused |
+| unchanged verify outcome | `verified` |
+| unchanged verify certificates | 0 new, 2 reused |
+| clarification requests | none |
 
-The byte-identical second pass (run 4):
+During the real proof pass the observed Codex child command contained
+`--disable apps`, `--disable plugins`, disabled entries for every discovered
+local MCP server, `skills.include_instructions=false`, disabled bundled skills,
+and disabled entries for every discovered local skill. Lean independently built
+the resulting declarations before certification.
 
-- started `2026-08-23T04:55:00.269415+00:00`;
-- completed `2026-08-23T04:56:12.774636+00:00`;
-- kept the same source snapshot commit;
-- independently rebuilt and re-extracted the environment;
-- started no Codex app-server;
-- reused 2 certificates, reconciled 0 statements, and created 0 certificates;
-  and
-- exited 0 with outcome `verified`.
+The acceptance project, its 24 MiB isolated build, temporary wheel environments,
+and package-build directories were moved to Trash after the results were
+recorded. The shared dependency depot was retained.
 
-After the final 0.4.1 reinstall and hardening changes, a third byte-identical
-pass (run 5) again exited 0, rebuilt and re-extracted Lean, reused both
-certificates, and created no Codex batch directory. Its canonical manifest
-contains non-null 64-character manuscript, Lean, and combined graph hashes.
-The persistent project ended clean at
-`90d745a1daecd1362b05b6586c43b4a44b0f62d0`.
+## Cache and storage
 
-## Cache/storage state
+Final cache status:
 
-The acceptance reused dependency key `e50bd489673215a5b89a0dc2` and shared
-depot
-`/Users/vui1/.cache/repoprover-codex/lake/dependencies/deps-e50bd489673215a5b89a0dc2`.
-No Mathlib dependency tree was duplicated per proof batch.
+```text
+root: /Users/vui1/.cache/repoprover-codex
+managed: 7.61 GiB
+limit: 16.00 GiB
+filesystem free: 119.50 GiB
+minimum free: 25.00 GiB
+dependency depots: 7.06 GiB
+isolated project builds: 0.16 GiB
+Mathlib downloads: 0.39 GiB
+active reservations: 0.00 GiB
+```
 
-At the end of the live passes:
+The final GC reconciliation performed zero recursive measurements, confirming
+that normal operation uses the bounded coarse accounting index. Only the active
+`/Users/vui1/.venvs/proof-assistant` environment and the explicitly protected
+`/Users/vui1/myenv` remain; obsolete and temporary environments were moved to
+Trash. The stale Dropbox checkout was also moved to Trash.
 
-- managed cache: 7.57 GiB;
-- dependency depots: 7.06 GiB;
-- isolated project builds: 0.11 GiB;
-- Mathlib downloads: 0.39 GiB;
-- active reservations: 0 GiB; and
-- filesystem free after the final pass: 114.82 GiB.
+## Repository hygiene
 
-The cache-GC design accepted in 0.4.0 remains unchanged: coarse SQLite units,
-transactional capacity reservations, OS leases, atomic quarantine, one shared
-deadline, and no recursive rescan inside the eviction loop. The 10,000-file
-operation-count regression remains in the suite.
+Before publication:
 
-## Installer, packaging, and repository hygiene
+- tracked private-filename scan: clean;
+- credential/token/private-key content-pattern scan: clean;
+- ignored build/environment/cache rules: verified;
+- generated repository-local caches and package artifacts: removed after final
+  tests;
+- Markdown local-link audit: 17 files, 0 broken links;
+- `git diff --check`: passed;
+- local branch: `main`;
+- package commit author/committer name: `vladimir.itskov`;
+- RepoProver worktree at the exact commit above: clean; and
+- no command was issued to push to or create a pull request for
+  `facebookresearch/repoprover`.
 
-`scripts/install-dev.sh` passed under Python 3.13 using uv. It installed 0.4.1
-into `/Users/vui1/.venvs/repoprover-codex`, compiled and executed its required C
-probe with `/usr/bin/clang`, initialized the central cache, and passed all 130
-tests. The installed command resolves through `/Users/vui1/.local/bin` to that
-environment.
-
-`uv build` produced the 0.4.1 sdist and wheel in a temporary directory under the
-managed cache. After package metadata was tightened to require Python 3.13, a
-final `uv build --wheel` repeated the wheel gate. A fresh Python 3.13
-environment installed only that final wheel and its declared dependencies,
-confirmed `Requires-Python: >=3.13`, imported version 0.4.1, found the packaged
-`DependencyExtractor.lean`, rendered CLI help, and passed the compiler
-compile/run probe. The temporary build environments were then moved to Trash.
-
-The Markdown link check covered 15 front-facing/report/help files with zero
-broken local links. Python compileall and Ruff correctness/import checks passed
-for the incremental subsystem. `detect-secrets` reported zero findings;
-credential/private-key filename checks reported none; `.gitignore` excludes
-environments, caches, build output, secrets, editor metadata, and temporary
-files. `git diff --check` passed, and ignored test/build residue was removed
-from the source worktree.
-
-The user-owned origin is `git@github.com:vitskov/repoprover-codex.git`. This
-report does not authorize publication; no changes from this pass have been
-pushed at the time of writing. Upstream RepoProver integration remains
-untouched.
-
-## Platform boundary
-
-Linux remains a supported target in the portable implementation, but no Linux
-machine was available for this acceptance. Project/cache locking requires
-POSIX `flock`, matching the documented macOS/Linux support boundary.
+Publication verification is recorded in the release handoff after the final
+commit and remote repository rename.

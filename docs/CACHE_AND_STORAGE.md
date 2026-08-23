@@ -9,7 +9,9 @@ The cache manager is designed around three invariants:
 3. GC work is proportional to cache contents, never the product of entry count
    and total cache size.
 
-The default root is `$HOME/.cache/repoprover-codex`. It must resolve inside the
+The default root deliberately remains `$HOME/.cache/repoprover-codex` after the
+Proof Assistant rename. Reusing it avoids a second multi-gigabyte Mathlib
+depot. It must resolve inside the
 user home, on a local filesystem, and outside every detected Dropbox root.
 
 The limits are conservative admission controls, not an operating-system quota.
@@ -140,7 +142,7 @@ never return to a live project path.
 Run GC manually with a custom deadline:
 
 ```bash
-repoprover-codex cache gc --gc-timeout 900
+proof-assistant cache gc --gc-timeout 900
 ```
 
 The command reports its number of recursive measurements. On an unchanged
@@ -176,23 +178,23 @@ downloading or compiling.
 Configure persistent limits:
 
 ```bash
-repoprover-codex cache init --max-gb 16 --min-free-gb 25
+proof-assistant cache init --max-gb 16 --min-free-gb 25
 ```
 
 Temporary environment overrides are also supported:
 
 ```bash
-export REPOPROVER_CODEX_CACHE_MAX_GB=16
-export REPOPROVER_CODEX_MIN_FREE_GB=25
+export PROOF_ASSISTANT_CACHE_MAX_GB=16
+export PROOF_ASSISTANT_MIN_FREE_GB=25
 ```
 
 ## Operations and recovery
 
 ```bash
-repoprover-codex cache status
-repoprover-codex cache doctor
-repoprover-codex cache gc --gc-timeout 900
-repoprover-codex cache prepare --project /absolute/path/to/project
+proof-assistant cache status
+proof-assistant cache doctor
+proof-assistant cache gc --gc-timeout 900
+proof-assistant cache prepare --project /absolute/path/to/project
 ```
 
 `cache status` reports allocated managed bytes from the reconciled coarse index,

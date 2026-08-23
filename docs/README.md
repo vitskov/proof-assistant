@@ -1,4 +1,4 @@
-# Documentation
+# Proof Assistant documentation
 
 This index separates ordinary use from implementation and maintenance details.
 
@@ -6,17 +6,17 @@ This index separates ordinary use from implementation and maintenance details.
 
 1. [Installation](INSTALLATION.md) — prerequisites, local installation,
    validation, and upgrades.
-2. [Usage guide](USAGE.md) — initialize a persistent project, verify, pause,
-   edit, resume, and interpret the evidence.
-3. [Task files](TASK_FILES.md) — free-form requests, YAML targets, modes, and
-   correspondence-review policy.
+2. [Usage guide](USAGE.md) — use the TUI to start, verify, clarify, edit, and
+   resume a persistent project.
+3. [Project task and scope](TASK_FILES.md) — the default task, the built-in task
+   editor, targets, modes, and policies.
 4. [Troubleshooting and operations](TROUBLESHOOTING.md) — quiet runs, stopped
    runs, output recovery, disk pressure, and common failure modes.
 
 ## Reference
 
-- [Command reference](COMMAND_REFERENCE.md) — command purposes and important
-  options.
+- [Command reference](COMMAND_REFERENCE.md) — TUI launch and advanced
+  non-interactive operations.
 - [Incremental verification model](INCREMENTAL_VERIFICATION.md) — snapshots,
   graphs, invalidation, scheduling, questions, and certificates.
 - [Cache and storage](CACHE_AND_STORAGE.md) — sharing, reservations, bounded
@@ -32,8 +32,8 @@ This index separates ordinary use from implementation and maintenance details.
   tests, integration checks, and release checks.
 - [Working as an AI agent](AI_AGENTS.md) — mandatory safety constraints,
   repository map, task workflow, and handoff requirements for coding agents.
-- [Historical handoff](../CODEX_HANDOFF.md) — retained development history;
-  not the current operating guide.
+- [Maintainer handoff](../CODEX_HANDOFF.md) — compact invariants and validation
+  checklist; maintained topic guides remain authoritative.
 
 The former `MANUSCRIPT_RUNS.md` and `INTERNAL_TESTING.md` paths remain as short
 redirect pages so older links continue to work.

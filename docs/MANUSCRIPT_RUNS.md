@@ -1,4 +1,5 @@
 # Running manuscript verification
 
 This path is retained for older links. The maintained guide is now
-[Usage](USAGE.md).
+[Proof Assistant usage](USAGE.md). The primary interface is
+`proof-assistant`; users no longer maintain an external task file.

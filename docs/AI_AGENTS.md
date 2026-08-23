@@ -1,144 +1,124 @@
-# Working on RepoProver Codex as an AI agent
+# Working on Proof Assistant as an AI agent
 
-This page is operational context for coding agents. It does not grant authority
-to read credentials, delete unrelated data, contact upstream maintainers, or
-publish changes without the user's instruction.
+This is operational context, not authority to read credentials, delete unrelated
+data, contact upstream maintainers, or publish changes.
 
 ## Read first
 
-Before acting, read:
+Read the repository [README](../README.md), [Architecture](ARCHITECTURE.md),
+[Incremental verification](INCREMENTAL_VERIFICATION.md), [Cache and
+storage](CACHE_AND_STORAGE.md), and [Development](DEVELOPMENT.md). The current
+source, tests, and maintained docs supersede historical handoff notes.
 
-1. the repository [README](../README.md);
-2. [Installation](INSTALLATION.md);
-3. [Usage](USAGE.md);
-4. [Incremental verification](INCREMENTAL_VERIFICATION.md);
-5. [Cache and storage](CACHE_AND_STORAGE.md); and
-6. [Development and testing](DEVELOPMENT.md) for code changes.
+## Environment rules
 
-`CODEX_HANDOFF.md` is historical context. Current source, tests, and maintained
-documentation take precedence when they differ from that handoff.
+- Use Python 3.13 and `uv` whenever feasible.
+- Development source: `$HOME/src/proof-assistant`.
+- Python environment: `$HOME/.venvs/proof-assistant`.
+- Managed projects: `$HOME/proof-assistant/<project-name>` by default.
+- Cache: exactly `$HOME/.cache/repoprover-codex` unless explicitly configured.
+- Never put Python environments, managed projects, or Lean/Lake/Mathlib caches
+  in Dropbox.
+- An external manuscript source may be in Dropbox; warn and use stable staged
+  import rather than rejecting it.
+- Every installer must compile and execute a native program.
 
-## Non-negotiable environment rules
+Keeping the old cache name is intentional and prevents a duplicate
+multi-gigabyte Mathlib depot. Never rename or migrate it merely for branding.
 
-- Use Python 3.13.
-- Use `uv` whenever feasible for environments, installation, dependencies, and
-  builds.
-- Never place a Python environment in Dropbox.
-- Never place a Lean, Lake, Mathlib, or package cache in Dropbox.
-- Keep the development source at a local path such as
-  `$HOME/src/repoprover-codex`.
-- Keep the Python environment at a local path such as
-  `$HOME/.venvs/repoprover-codex`.
-- Keep managed cache data at a local path such as
-  `$HOME/.cache/repoprover-codex`.
-- Every installation script must compile and execute a native test program; a
-  compiler lookup alone is not acceptable.
+## Product and repository identity
 
-Resolve and verify actual paths before deleting anything. Never recursively
-delete a home directory, workspace root, Dropbox root, or unresolved variable.
+- product/distribution: `Proof Assistant` / `proof-assistant`;
+- import package: `proof_assistant`;
+- primary executable: `proof-assistant`;
+- deprecated 0.1 command alias: `repoprover-codex`;
+- user-owned repository: `vitskov/proof-assistant`; and
+- version line: 0.1, starting at 0.1.0.
 
-## Authentication and provider boundary
+RepoProver is an integration dependency. Never push to, open a pull request
+against, or create an issue in `facebookresearch/repoprover`. Do not publish
+Proof Assistant or create a release without explicit authorization.
 
-- Authentication stays inside the installed Codex CLI.
-- Do not read or print `~/.codex/auth.json` or token contents.
-- Do not extract an OAuth token or convert it into `OPENAI_API_KEY`.
-- Do not require a billable API key when the existing Codex login works.
-- Do not describe the system as offline: manuscript context and tool results
-  needed for the run are processed through the authenticated Codex service.
-- Use persistent `codex app-server` and client-defined dynamic tools; do not
-  replace the normal backend with `codex exec`.
-- Validate exact model and effort choices against `model/list`.
+## Interface/backend contracts
 
-RepoProver runs must start the Codex child without existing local MCP servers,
-apps, plugins, or skills. The implementation disables them in child-only
-configuration and verifies the effective inventory. Preserve this fail-closed
-behavior.
+Preserve the component silos:
 
-## Repository and upstream boundary
+- `proof_assistant.tui` renders and handles input only;
+- `proof_assistant.workflow.contracts` defines immutable boundary values and
+  `workflow.service.ProofAssistantWorkflow` owns UI-neutral flow/resume
+  decisions;
+- `proof_assistant.workspace` owns catalog, paths, tasks, source observation,
+  staged import, and change plans;
+- `proof_assistant.presentation` owns source excerpts and presentation view
+  models; and
+- `proof_assistant.incremental` owns verification state and certificates.
 
-The user-owned repository is `vitskov/repoprover-codex`. The RepoProver checkout
-is an integration dependency and must remain untouched unless the user
-explicitly requests otherwise.
+No Textual import may cross into backend/workflow code. Do not let TUI widgets,
+filesystem notifications, unchecked paths, or model prose become state
+authority. Plans must bind the complete source inventory and project generation;
+confirmation fails closed when either changed.
 
-Never push to, open a pull request against, or create an issue in
-`facebookresearch/repoprover`. Do not prepare an upstream pull request as a
-side effect of local testing.
+The project owns `VERIFY.yaml`. The TUI creates the default task or edits it
+internally. Do not reintroduce a user-facing external task-file workflow.
 
-Do not push this repository or create releases without explicit authorization.
-Before any authorized publication, fetch the user-owned origin, inspect remote
-history, run the full suite, inspect Git status, audit secrets and artifacts,
-and verify the pushed branch and SHA.
+## Provider and proof authority
 
-Keep development releases in the `0.4.x` series and advance patch versions
-conservatively. Do not change the minor version to `0.5` or later without the
-user's explicit instruction.
+- Authentication remains inside Codex CLI. Never read/print `auth.json` or
+  extract tokens into an API key.
+- Validate model/effort against `model/list`.
+- Verification children must start without existing MCP servers, apps, plugins,
+  bundled skills, or local skills, and startup must fail closed if any remain.
+- RepoProver/host tools remain the mutation control plane.
+- Only an independently built Lean declaration can create a certificate.
+- Unsuccessful proof search is not evidence of falsity.
+- Clarification presentation may improve wording but cannot change the selected
+  source path/span, quotation, diagnostics, claim, or affected proof graph.
 
-## Safe manuscript workflow
+## Safe workflow
 
-1. Validate the install with `doctor`, `models`, and `cache doctor`.
-2. Use an exact advertised model/effort pair.
-3. Require a real task file and a persistent project outside Dropbox.
-4. Keep the source manuscript read-only.
-5. Let cache admission create a transactional reservation before Lake work.
-6. Monitor with `manuscript status` and process state without mutating an active run.
-7. Treat only independently built Lean evidence as verified.
-8. Never equate “not verified” with “false.”
-9. Preserve the project, its SQLite state, snapshots, Lean Git history, and run
-   evidence unless the user explicitly requests deletion.
+1. Resolve and validate paths without printing secrets.
+2. Observe the full filtered external source until inventories stabilize.
+3. Stage, re-hash, and bind the copy into a `ChangeImpactPlan`.
+4. Require explicit user confirmation; revalidate immediately before import.
+5. Let the incremental engine snapshot/index/invalidate/verify/certify.
+6. Preserve SQLite, Git snapshots, questions, reports, and Lean history across
+   interruptions.
+7. Derive resume screens from persisted state; do not repeat unchanged
+   clarification questions or start an unrequested iteration.
 
-Do not run manual cache cleanup during an active job. Active reservations and
-leases are part of the disk-safety design.
+Never brute-force cache cleanup while jobs are active. Resolve exact targets and
+respect reservations/leases.
 
 ## Code map
 
-- `src/repoprover_codex/protocol.py` — bidirectional app-server JSONL client.
-- `src/repoprover_codex/backend.py` — initialization, isolation checks, threads,
-  turns, events, and dynamic-tool callbacks.
-- `src/repoprover_codex/tools.py` — RepoProver tool-schema translation.
-- `src/repoprover_codex/integration.py` — adapter for an existing RepoProver
-  agent.
-- `src/repoprover_codex/manuscript.py` — manuscript snapshot, generated Lean
-  workspace, evidence, and legacy one-shot result evaluation.
-- `src/repoprover_codex/incremental/` — persistent snapshots, structural index,
-  graphs, SQLite state, agent tools, scheduler, certification, and reports.
-- `src/repoprover_codex/lean/DependencyExtractor.lean` — mechanical elaborated
-  declaration dependency/type/value/axiom extraction.
-- `src/repoprover_codex/cache.py` — storage policy, leases, reservations,
-  dependency sharing, and bounded GC.
-- `src/repoprover_codex/cache_index.py` — transactional SQLite accounting.
-- `src/repoprover_codex/cli.py` — public command surface and run lifecycle.
-- `tests/` — unit, golden manuscript, state, certification, protocol, failure,
-  cache, manuscript, CLI, and installer tests.
+- `src/proof_assistant/tui/` — Textual screens and widgets.
+- `src/proof_assistant/workflow/` — UI-neutral state machine and contracts.
+- `src/proof_assistant/workspace/` — source/project/task management.
+- `src/proof_assistant/presentation/` — findings/clarification view models.
+- `src/proof_assistant/incremental/` — snapshots, graphs, state, scheduling,
+  certification, and reports.
+- `src/proof_assistant/backend.py` — Codex app-server isolation and turns.
+- `src/proof_assistant/cache.py` and `cache_index.py` — bounded shared storage.
+- `src/proof_assistant/cli.py` — `proof-assistant` command surface.
+- `tests/` — contract, unit, pilot TUI, integration, and regression tests.
 
-## Required validation for code changes
+Some directories may be consolidated during implementation, but the dependency
+direction and contracts must remain explicit and testable.
 
-Use the external Python 3.13 environment and uv:
+## Validation and handoff
 
 ```bash
-cd "$HOME/src/repoprover-codex"
-uv pip install --python "$HOME/.venvs/repoprover-codex/bin/python" -e '.[dev]'
-repoprover-codex compiler-check
-"$HOME/.venvs/repoprover-codex/bin/python" -m pytest -q
+cd "$HOME/src/proof-assistant"
+uv pip install --python "$HOME/.venvs/proof-assistant/bin/python" -e '.[dev]'
+proof-assistant compiler-check
+"$HOME/.venvs/proof-assistant/bin/python" -m pytest -q
 git diff --check
 ```
 
-For installation, cache, or packaging changes, also run
-`scripts/install-dev.sh`, a fresh-wheel test in a disposable external Python
-3.13 environment, `cache doctor`, and an appropriately small real Lean
-acceptance. Remove the disposable environment and build artifacts afterward.
+For packaging/install changes, also run the supported installer and a fresh
+Python 3.13 wheel check outside Dropbox. For workflow/TUI changes, run headless
+screen tests plus a small real manuscript loop.
 
-Do not weaken operation-count, deadline, concurrency, crash-recovery, child
-isolation, compiler-execution, Dropbox-path, or evidence-classification tests
-to make a change pass.
-
-## Handoff checklist
-
-Report:
-
-- what changed and why;
-- tests and real checks actually run;
-- installed version, interpreter, source, cache, and compiler locations;
-- active run state and any preserved partial output;
-- Git status and whether changes were committed or pushed;
-- exact RepoProver SHA tested; and
-- explicitly that no upstream RepoProver PR was created.
+Report actual tests, versions, paths, active state, Git status, and whether
+anything was committed/pushed. Explicitly state that no upstream RepoProver PR
+was created.

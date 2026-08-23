@@ -2,9 +2,11 @@
 set -euo pipefail
 
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-venv_path="${REPOPROVER_CODEX_VENV:-${HOME}/.venvs/repoprover-codex}"
-cache_home="${REPOPROVER_CODEX_CACHE_HOME:-${HOME}/.cache/repoprover-codex}"
-python_spec="${REPOPROVER_CODEX_PYTHON:-3.13}"
+venv_path="${PROOF_ASSISTANT_VENV:-${REPOPROVER_CODEX_VENV:-${HOME}/.venvs/proof-assistant}}"
+# Keep the established cache path. Changing it would duplicate the large
+# shared Mathlib/dependency depot on existing installations.
+cache_home="${PROOF_ASSISTANT_CACHE_HOME:-${REPOPROVER_CODEX_CACHE_HOME:-${HOME}/.cache/repoprover-codex}}"
+python_spec="${PROOF_ASSISTANT_PYTHON:-${REPOPROVER_CODEX_PYTHON:-3.13}}"
 
 case "${venv_path}" in
   *[Dd][Rr][Oo][Pp][Bb][Oo][Xx]*)
@@ -43,8 +45,8 @@ uv pip install --python "${venv_path}/bin/python" -e "${project_root}[dev]"
 # Installation is not considered successful merely because a compiler exists.
 # This command compiles and executes a C program, and detects incompatible Lean
 # bundled compilers before Lake starts expensive dependency work.
-"${venv_path}/bin/repoprover-codex" compiler-check
-"${venv_path}/bin/repoprover-codex" cache init
+"${venv_path}/bin/proof-assistant" compiler-check
+"${venv_path}/bin/proof-assistant" cache init
 "${venv_path}/bin/python" -m pytest -q "${project_root}/tests"
 
 echo "Development environment ready: ${venv_path}"

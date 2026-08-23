@@ -10,6 +10,7 @@ from collections.abc import Callable
 from dataclasses import asdict
 from pathlib import Path
 
+from . import __version__
 from .backend import CodexBackend, CodexConfig
 from .cache import (
     COLD_DEPOT_RESERVE_GB,
@@ -186,7 +187,7 @@ def cmd_smoke(args) -> int:
                 "You are testing a tool bridge. You must call the echo tool "
                 "exactly once, then state briefly that the bridge succeeded."
             ),
-            user_prompt='Call echo with text "repoprover-codex-smoke".',
+            user_prompt='Call echo with text "proof-assistant-smoke".',
             tools=[tool],
             tool_handler=handler,
         )
@@ -264,13 +265,13 @@ def cmd_cache_doctor(args) -> int:
         missing = [path for path in layout.directories if not path.is_dir()]
         if missing:
             raise CacheLocationError(
-                "Cache is not initialized; run `repoprover-codex cache init`"
+                "Cache is not initialized; run `proof-assistant cache init`"
             )
         config = layout.load_config()
         if config is None:
             raise CacheLocationError(
                 "Cache compiler configuration is missing; run "
-                "`repoprover-codex cache init`"
+                "`proof-assistant cache init`"
             )
         runtime = layout.runtime_environment(lean_cc=config.lean_cc)
         check = select_native_compiler(runtime)
@@ -541,7 +542,7 @@ def cmd_repoprover_prove(args) -> int:
         print("OUTCOME: tool_failure", file=sys.stderr)
         print(
             "ERROR: dependency depot is not prepared; run "
-            f"`repoprover-codex cache prepare --project {project}` first",
+            f"`proof-assistant cache prepare --project {project}` first",
             file=sys.stderr,
         )
         return 5
@@ -972,7 +973,6 @@ def cmd_manuscript_init(args) -> int:
         ensure_project_outside_dropbox(project, layout)
         session = IncrementalSession.initialize(
             manuscript=args.manuscript,
-            task_file=args.task_file,
             project=project,
         )
     except Exception as exc:
@@ -994,8 +994,6 @@ def cmd_manuscript_verify(args) -> int:
     try:
         result = verify_project(
             session,
-            manuscript=args.manuscript,
-            task_file=args.task_file,
             options=VerifyOptions(
                 model=args.model,
                 effort=args.effort,
@@ -1043,7 +1041,9 @@ def cmd_manuscript_status(args) -> int:
     print(f"snapshot: {status['snapshot'] or 'none'}")
     latest = status["latest_run"]
     if latest:
-        print(f"latest run: {latest['run_id']} ({latest['outcome'] or latest['status']})")
+        print(
+            f"latest run: {latest['run_id']} ({latest['outcome'] or latest['status']})"
+        )
         print(f"detail: {latest['detail'] or 'none'}")
     print(f"certificates: {status['certificates']}")
     for state, count in sorted(status["claim_states"].items()):
@@ -1134,12 +1134,16 @@ def cmd_manuscript_questions(args) -> int:
     session = IncrementalSession(Path(args.project))
     try:
         session._load_config()
-        with project_lock(session.project, exclusive=bool(args.resolve or args.dismiss)):
+        with project_lock(
+            session.project, exclusive=bool(args.resolve or args.dismiss)
+        ):
             with StateStore(session.database_path) as store:
                 question_id = args.resolve or args.dismiss
                 if question_id:
                     if not args.reason:
-                        raise ValueError("--reason is required when resolving or dismissing a question")
+                        raise ValueError(
+                            "--reason is required when resolving or dismissing a question"
+                        )
                     row = store.connection.execute(
                         "SELECT * FROM clarifications WHERE question_id = ?",
                         (question_id,),
@@ -1159,7 +1163,9 @@ def cmd_manuscript_questions(args) -> int:
                         (str(ClaimState.INVALIDATED), row["claim_id"]),
                     )
                     session._write_status_files(store=store)
-                    session._commit_host_changes(f"{status.title()} clarification {question_id}")
+                    session._commit_host_changes(
+                        f"{status.title()} clarification {question_id}"
+                    )
                 questions = [dict(row) for row in store.open_questions()]
         if args.json:
             print(json.dumps(questions, indent=2, sort_keys=True))
@@ -1223,7 +1229,9 @@ def cmd_manuscript_invalidate(args) -> int:
                         (str(ClaimState.INVALIDATED), claim_id),
                     )
                 session._write_status_files(store=store)
-                session._commit_host_changes("Manually invalidate verification certificates")
+                session._commit_host_changes(
+                    "Manually invalidate verification certificates"
+                )
         print("invalidated: " + ", ".join(sorted(selected)))
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
@@ -1298,7 +1306,9 @@ def cmd_manuscript_correspondence(args) -> int:
                         message = f"Approved correspondence for {claim_id}"
                     else:
                         if not args.reason:
-                            raise ValueError("--reason is required when rejecting a correspondence")
+                            raise ValueError(
+                                "--reason is required when rejecting a correspondence"
+                            )
                         store.connection.execute(
                             """
                             UPDATE correspondence SET approved = 0, status = 'rejected'
@@ -1310,7 +1320,9 @@ def cmd_manuscript_correspondence(args) -> int:
                             "UPDATE claims SET status = ? WHERE claim_id = ?",
                             (str(ClaimState.FAILED_FORMALIZATION), claim_id),
                         )
-                        message = f"Rejected correspondence for {claim_id}: {args.reason}"
+                        message = (
+                            f"Rejected correspondence for {claim_id}: {args.reason}"
+                        )
                     session._write_status_files(store=store)
                     session._commit_host_changes(message)
                     print(message)
@@ -1332,8 +1344,25 @@ def cmd_manuscript_correspondence(args) -> int:
     return 0
 
 
+def cmd_tui(args) -> int:
+    """Launch the replaceable Textual interface over the workflow contract."""
+    from .tui import run_tui
+    from .workflow.service import ProofAssistantWorkflow
+
+    service = ProofAssistantWorkflow(
+        cache_home=args.cache_home,
+        codex=args.codex,
+    )
+    return int(run_tui(service))
+
+
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="repoprover-codex")
+    p = argparse.ArgumentParser(prog="proof-assistant")
+    p.add_argument(
+        "--version",
+        action="version",
+        version=f"Proof Assistant {__version__}",
+    )
     p.add_argument("--codex", default="codex", help="Codex executable")
     p.add_argument(
         "--cache-home",
@@ -1343,7 +1372,10 @@ def build_parser() -> argparse.ArgumentParser:
             "inside the user home, local, and outside Dropbox)"
         ),
     )
-    sub = p.add_subparsers(dest="command", required=True)
+    sub = p.add_subparsers(dest="command", required=False)
+
+    tui = sub.add_parser("tui", help="Launch the interactive Proof Assistant")
+    tui.set_defaults(func=cmd_tui)
 
     d = sub.add_parser("doctor", help="Check Codex app-server connectivity")
     d.set_defaults(func=cmd_doctor)
@@ -1456,7 +1488,6 @@ def build_parser() -> argparse.ArgumentParser:
         "init", help="Create a persistent verification project and index its manuscript"
     )
     manuscript_init.add_argument("--manuscript", required=True)
-    manuscript_init.add_argument("--task-file", required=True)
     manuscript_init.add_argument("--project", required=True)
     manuscript_init.set_defaults(func=cmd_manuscript_init)
 
@@ -1464,16 +1495,6 @@ def build_parser() -> argparse.ArgumentParser:
         "verify", help="Snapshot, incrementally verify, and preserve certified results"
     )
     manuscript_verify.add_argument("--project", required=True)
-    manuscript_verify.add_argument(
-        "--manuscript",
-        default=None,
-        help="Authoritative source folder (defaults to the project configuration)",
-    )
-    manuscript_verify.add_argument(
-        "--task-file",
-        default=None,
-        help="Free-form or YAML task file (defaults to the project configuration)",
-    )
     manuscript_verify.add_argument("--model", required=True)
     manuscript_verify.add_argument("--effort", default="high")
     manuscript_verify.add_argument(
@@ -1554,54 +1575,13 @@ def build_parser() -> argparse.ArgumentParser:
     manuscript_correspondence.add_argument("--json", action="store_true")
     manuscript_correspondence.set_defaults(func=cmd_manuscript_correspondence)
 
-    manuscript = sub.add_parser(
-        "manuscript-run",
-        help="Verify a file-specified task against a LaTeX manuscript snapshot",
-    )
-    manuscript.add_argument(
-        "--manuscript",
-        required=True,
-        help="Folder containing the LaTeX manuscript source",
-    )
-    manuscript.add_argument(
-        "--task-file",
-        required=True,
-        help="UTF-8 file containing the authoritative free-form task",
-    )
-    manuscript.add_argument(
-        "--output",
-        required=True,
-        help="New or empty output folder (the Lean workspace must be outside Dropbox)",
-    )
-    manuscript.add_argument("--model", required=True)
-    manuscript.add_argument("--effort", default="high")
-    manuscript.add_argument("--lean-pool-size", type=int, default=1)
-    manuscript.add_argument(
-        "--lean-memory-limit-gb",
-        type=int,
-        default=None,
-        help="Per-REPL address-space limit (default: 0 on macOS, 24 on Linux)",
-    )
-    manuscript.add_argument(
-        "--lean-cc",
-        default=None,
-        help="Native compiler for Lake (auto-detected when omitted)",
-    )
-    manuscript.add_argument(
-        "--setup-timeout",
-        type=float,
-        default=1800.0,
-        help="Timeout per dependency/bootstrap/final-build command",
-    )
-    manuscript.add_argument("--request-timeout", type=float, default=120.0)
-    manuscript.add_argument("--turn-timeout", type=float, default=3600.0)
-    manuscript.add_argument("--gc-timeout", type=float, default=900.0)
-    manuscript.set_defaults(func=cmd_manuscript_run)
     return p
 
 
-def main() -> int:
-    args = build_parser().parse_args()
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    if args.command is None:
+        args.func = cmd_tui
     try:
         return int(args.func(args))
     finally:

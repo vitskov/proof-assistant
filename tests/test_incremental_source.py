@@ -2,24 +2,24 @@ from __future__ import annotations
 
 import pytest
 
-from repoprover_codex.incremental.graph import (
+from proof_assistant.incremental.graph import (
     affected_claims,
     build_graph,
     canonical_cycles,
     dependency_closure,
     ready_frontier,
 )
-from repoprover_codex.incremental.latex import (
+from proof_assistant.incremental.latex import (
     LatexIndexError,
     explicit_reference_graph,
     index_manuscript,
     normalize_latex_statement,
 )
-from repoprover_codex.incremental.models import ClaimState, ManuscriptEdge
-from repoprover_codex.incremental.snapshot import SnapshotRepository
-from repoprover_codex.incremental.store import StateStore
-from repoprover_codex.incremental.task import parse_task_file
-from repoprover_codex.manuscript import ManuscriptInputError
+from proof_assistant.incremental.models import ClaimState, ManuscriptEdge
+from proof_assistant.incremental.snapshot import SnapshotRepository
+from proof_assistant.incremental.store import StateStore
+from proof_assistant.incremental.task import parse_task_file
+from proof_assistant.manuscript import ManuscriptInputError
 
 
 def test_normalization_removes_comments_labels_and_layout():

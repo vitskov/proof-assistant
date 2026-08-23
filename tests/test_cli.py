@@ -1,11 +1,36 @@
 from types import SimpleNamespace
 
-from repoprover_codex.backend import CodexToolCall
-from repoprover_codex.cli import (
+import pytest
+
+from proof_assistant.backend import CodexToolCall
+from proof_assistant.cli import (
     _run_status_is_terminal,
     _target_declaration,
     _verify_repoprover_proof,
 )
+
+
+def test_bare_parser_defaults_to_tui_at_main_dispatch_boundary():
+    from proof_assistant.cli import build_parser
+
+    args = build_parser().parse_args([])
+    assert args.command is None
+
+
+def test_explicit_tui_command_is_available():
+    from proof_assistant.cli import build_parser
+
+    args = build_parser().parse_args(["tui"])
+    assert args.func.__name__ == "cmd_tui"
+
+
+def test_version_is_product_version(capsys):
+    from proof_assistant.cli import build_parser
+
+    with pytest.raises(SystemExit) as exc_info:
+        build_parser().parse_args(["--version"])
+    assert exc_info.value.code == 0
+    assert capsys.readouterr().out == "Proof Assistant 0.1.0\n"
 
 
 class FakeAgent:

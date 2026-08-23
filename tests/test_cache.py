@@ -8,14 +8,14 @@ from pathlib import Path
 
 import pytest
 
-from repoprover_codex import cache, environment
-from repoprover_codex.cache import (
+from proof_assistant import cache, environment
+from proof_assistant.cache import (
     CacheLayout,
     CacheLocationError,
     CachePolicy,
 )
-from repoprover_codex.cache_index import CacheIndex
-from repoprover_codex.environment import CompilerCheck
+from proof_assistant.cache_index import CacheIndex
+from proof_assistant.environment import CompilerCheck
 
 
 def layout_for(home: Path, requested: Path | None = None) -> CacheLayout:
@@ -57,6 +57,46 @@ def test_explicit_cache_root_takes_precedence_over_environment(monkeypatch, tmp_
 
     assert from_environment.root == configured
     assert from_argument.root == explicit
+
+
+def test_renamed_package_reuses_legacy_cache_environment_and_location(
+    monkeypatch, tmp_path
+):
+    legacy = tmp_path / ".cache" / "legacy-shared"
+    monkeypatch.delenv(cache.CACHE_HOME_ENV, raising=False)
+    monkeypatch.setenv(cache.LEGACY_CACHE_HOME_ENV, str(legacy))
+
+    layout = CacheLayout.discover(
+        user_home=tmp_path,
+        dropbox_roots=[],
+        filesystem_type="apfs",
+    )
+
+    assert layout.root == legacy
+    assert (
+        CacheLayout.discover(
+            user_home=tmp_path,
+            dropbox_roots=[],
+            filesystem_type="apfs",
+        ).root
+        != tmp_path / ".cache" / "proof-assistant"
+    )
+
+
+def test_primary_proof_assistant_cache_environment_wins_legacy(monkeypatch, tmp_path):
+    primary = tmp_path / ".cache" / "primary"
+    legacy = tmp_path / ".cache" / "legacy"
+    monkeypatch.setenv(cache.CACHE_HOME_ENV, str(primary))
+    monkeypatch.setenv(cache.LEGACY_CACHE_HOME_ENV, str(legacy))
+
+    assert (
+        CacheLayout.discover(
+            user_home=tmp_path,
+            dropbox_roots=[],
+            filesystem_type="apfs",
+        ).root
+        == primary
+    )
 
 
 def test_cache_root_outside_user_home_is_rejected(tmp_path):

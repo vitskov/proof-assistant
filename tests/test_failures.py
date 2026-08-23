@@ -2,9 +2,8 @@ import queue
 
 import pytest
 
-from repoprover_codex.backend import CodexBackend, CodexConfig
-from repoprover_codex.protocol import CodexProtocolError, CodexServerExited
-
+from proof_assistant.backend import CodexBackend, CodexConfig
+from proof_assistant.protocol import CodexProtocolError, CodexServerExited
 
 TOOL = {
     "type": "function",
@@ -78,9 +77,7 @@ class ScenarioClient:
             return {"data": self.external_servers, "nextCursor": None}
         if method == "skills/list":
             return {
-                "data": [
-                    {"cwd": "/tmp", "skills": self.local_skills, "errors": []}
-                ]
+                "data": [{"cwd": "/tmp", "skills": self.local_skills, "errors": []}]
             }
         if method == "thread/start":
             return {"thread": {"id": "thread-1"}}
@@ -171,7 +168,7 @@ def test_abnormal_turn_status_is_provider_failure(status):
 
 def test_app_server_crash_during_turn_is_immediate():
     event = {
-        "method": "_repoprover_codex/server_exited",
+        "method": "_proof_assistant/server_exited",
         "params": {"returncode": 9},
     }
     with pytest.raises(CodexServerExited, match="exited during turn"):
@@ -194,9 +191,7 @@ def test_dynamic_tool_exception_is_returned_and_recorded():
 
 @pytest.mark.parametrize("arguments", ["not-json", [], 42])
 def test_malformed_dynamic_tool_arguments_fail_closed(arguments):
-    client = ScenarioClient(
-        tool_params={"tool": "lean_check", "arguments": arguments}
-    )
+    client = ScenarioClient(tool_params={"tool": "lean_check", "arguments": arguments})
     result = run_scenario(client)
     assert client.tool_result["success"] is False
     assert result.tool_calls[0].success is False

@@ -13,7 +13,8 @@ project/
 │   ├── All.lean
 │   └── Claims/                    # stable per-claim modules
 ├── manuscript/                    # exact current read-only snapshot
-├── RepoProverInput/TASK.md
+├── VERIFY.yaml                    # project-owned validated task
+├── RepoProverInput/TASK.md        # generated worker view of that task
 ├── VERIFICATION_STATUS.md
 ├── CLARIFICATION_REQUEST.md
 ├── VERIFICATION_REPORT.md
@@ -24,9 +25,16 @@ project/
     └── runs/000001/               # diff, diagnostics, model/build evidence
 ```
 
-The author edits the original manuscript folder, never the project copy. Every
-pass snapshots filtered source into a private bare Git repository and then
-atomically updates `project/manuscript/` from that exact commit.
+The author edits the original manuscript folder, never the project copy. The
+source may be in Dropbox, but the managed project may not. A stable-source
+observer inventories the entire filtered source tree twice, stages and
+re-hashes its copy, and asks for explicit change-plan confirmation. The backend
+then snapshots it into a private bare Git repository and atomically updates
+`project/manuscript/` from that exact commit.
+
+Filesystem notifications are only wake-up signals; they are not evidence that
+a multi-file save has finished. The confirmed source inventory is the strict
+input contract between observation and snapshot preparation.
 
 ## Two dependency graphs
 
@@ -82,10 +90,17 @@ performed first. Questions are structured records; at most one can be open for
 a claim. Dependents become `BLOCKED_DEPENDENCY`, while independent certificates
 remain usable.
 
-Edit the authoritative manuscript and rerun `manuscript verify`. A changed
-question source object deterministically supersedes the old question. The new
-snapshot, graph slice, and formal type decide what is reused. Questions never
-disappear merely because a later agent is silent.
+Edit the authoritative manuscript. The workflow service creates a complete
+`ChangeImpactPlan` and the TUI shows the file changes, changed claims, and
+dependent closure. Only explicit confirmation permits the next iteration. A
+changed question source object deterministically supersedes the old question.
+The new snapshot, graph slice, and formal type decide what is reused. Questions
+never disappear merely because a later agent is silent.
+
+The source file, excerpt span, question category, diagnostics, and blocked
+claims come from persisted deterministic data. A separately isolated Codex
+presentation pass may improve wording, but its output is schema-validated and
+cannot change those facts.
 
 ## Claim states and authority
 
@@ -107,4 +122,5 @@ during a writer through SQLite WAL and atomic files. Database state changes use
 full-synchronous transactions; exports use temporary files plus atomic rename.
 The next invocation marks an abandoned `RUNNING` row `INTERRUPTED`. Git source
 commits, Lean source, certificates, questions, and diagnostics remain available
-without a model thread or resume token.
+without a model thread or resume token. TUI navigation is not persisted as
+verification truth; resume routing is derived from these authoritative records.

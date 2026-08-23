@@ -1,108 +1,124 @@
 # Command reference
 
-Run `repoprover-codex COMMAND --help` for the exact installed parser. Global
-`--codex` and `--cache-home` options appear before the subcommand.
+Run `proof-assistant COMMAND --help` for the installed version's complete
+arguments. The deprecated `repoprover-codex` alias invokes the same parser
+during the 0.1 line.
 
-## Persistent manuscript commands
+## Interactive interface
 
-### `manuscript init`
+```bash
+proof-assistant
+proof-assistant tui
+```
 
-Creates a new persistent project. Requires `--manuscript`, `--task-file`, and
-`--project`. The project must be new/empty, disjoint from the manuscript, on
-local storage, inside the user home, and outside Dropbox.
+Both launch the Textual application. Bare invocation is the normal user entry
+point.
 
-### `manuscript verify`
+## Persistent manuscript projects
 
-Runs one incremental pass. Requires `--project` and `--model`; the configured
-manuscript/task paths are reused unless overridden.
+The TUI is preferred for creation because it provides stable source import,
+task editing, Dropbox warnings, impact review, and recovery screens.
 
-Controls:
+```bash
+proof-assistant manuscript init \
+  --manuscript /absolute/path/to/source \
+  --project "$HOME/proof-assistant/example"
+```
 
-- `--effort`
-- `--jobs 1|2`
-- `--batch-size COUNT`
-- `--lean-pool-size COUNT`
-- `--lean-memory-limit-gb GIB`
-- `--turn-timeout SECONDS`
-- `--request-timeout SECONDS`
-- `--setup-timeout SECONDS`
-- `--gc-timeout SECONDS`
+`init` creates the project-owned default `VERIFY.yaml`; it does not accept or
+require an external task file.
 
-`--turn-timeout 86400` permits one Codex batch to run for up to one day. It is
-not the timeout for Lake setup or an entire multi-batch verification pass.
+```bash
+proof-assistant manuscript verify --project PROJECT [OPTIONS]
+```
 
-### `manuscript status`
+Important options:
 
-Shows current snapshot, live mutation state, latest run, certificate count,
-claim-state counts, and open questions. Add `--json` for machine-readable
-output. Status is safe during a running verification.
+- `--model MODEL` and `--effort EFFORT` select an exact pair advertised by
+  `models`;
+- `--jobs 1|2` limits independent proof workers;
+- `--batch-size N` bounds claims assigned to one turn;
+- `--turn-timeout SECONDS` applies to each Codex turn (`86400` is one day);
+- `--setup-timeout SECONDS` bounds Lean/cache preparation; and
+- `--lean-memory-limit-gb GB` bounds configured Lean worker memory where
+  supported.
 
-### `manuscript graph`
+Project inspection:
 
-Exports the current manuscript graph. Use `--format json|dot`; add `--output`
-to write atomically to a chosen file.
+```bash
+proof-assistant manuscript status --project PROJECT [--json]
+proof-assistant manuscript graph --project PROJECT [--format json|dot]
+proof-assistant manuscript questions --project PROJECT [--json]
+proof-assistant manuscript diff --project PROJECT
+proof-assistant manuscript audit --project PROJECT
+```
 
-### `manuscript questions`
+Expert state-management commands:
 
-Lists open structured questions. `--json` emits records. Explicitly close one
-with `--resolve QUESTION --reason TEXT` or `--dismiss QUESTION --reason TEXT`;
-a source edit normally supersedes it automatically.
+```bash
+proof-assistant manuscript invalidate --project PROJECT --claim CLAIM_ID \
+  [--claim CLAIM_ID] [--include-dependents]
+proof-assistant manuscript correspondence --project PROJECT [OPTIONS]
+```
 
-### `manuscript correspondence`
+Use these only when you understand their review/state consequences. The TUI
+routes ordinary clarification and source-change handling through higher-level
+workflow contracts.
 
-Lists manuscript-to-Lean mapping proposals. For a task requiring human review,
-use `--approve CLAIM`; use `--reject CLAIM --reason TEXT` for an unfaithful
-formal statement. Approval still requires a later independent build.
+## Installation and provider diagnostics
 
-### `manuscript diff`
+```bash
+proof-assistant compiler-check
+proof-assistant doctor
+proof-assistant models
+proof-assistant smoke --model MODEL --effort EFFORT
+```
 
-Prints the latest source-snapshot patch.
+- `compiler-check` compiles and executes a native C program.
+- `doctor` checks Codex app-server initialization and model listing.
+- `models` prints exact model IDs and supported reasoning effort.
+- `smoke` runs one real client-defined dynamic-tool round trip.
 
-### `manuscript invalidate`
+## Managed cache
 
-Marks one or more `--claim` IDs invalidated. Add `--include-dependents` to apply
-the reverse dependency closure. Lean files and old certificate provenance are
-retained.
+```bash
+proof-assistant cache path
+proof-assistant cache init [--max-gb N] [--min-free-gb N]
+proof-assistant cache status
+proof-assistant cache doctor
+proof-assistant cache gc [--gc-timeout SECONDS]
+proof-assistant cache prepare --project LEAN_PROJECT
+proof-assistant cache attach --project LEAN_PROJECT
+```
 
-### `manuscript audit`
+The default path intentionally remains `$HOME/.cache/repoprover-codex` after
+the product rename, so the existing shared Mathlib depot is reused.
 
-Prints a canonical JSON comparison of mapped manuscript and elaborated Lean
-dependencies.
+## Direct RepoProver operation
 
-## Legacy manuscript/proof commands
+```bash
+proof-assistant repoprover-prove \
+  --project LEAN_PROJECT \
+  --chapter CHAPTER \
+  --theorem THEOREM \
+  --lean-path FILE.lean \
+  --model MODEL \
+  --effort EFFORT
+```
 
-### `manuscript-run`
+This is an advanced integration diagnostic, not the normal manuscript UI.
 
-Runs one file-specified task in a new/empty `--output`. It remains compatible
-with earlier automation but does not resume incrementally.
+## Persistent verification exit codes
 
-Required: `--manuscript`, `--task-file`, `--output`, and `--model`. Effort,
-timeouts, Lean workers, memory, compiler, and GC controls mirror the persistent
-verify command.
+| Code | Meaning |
+|---:|---|
+| 0 | selected scope verified |
+| 10 | clarification required |
+| 11 | partial/inconclusive; not evidence of falsity |
+| 12 | kernel-checked counterexample outcome |
+| 20 | setup/project/cache failure |
+| 21 | Codex provider/authentication/protocol failure |
+| 22 | Lean build/extraction/merge failure |
 
-### `repoprover-prove`
-
-Runs one RepoProver `PROVE` task against a prepared Lean project. Requires
-`--project`, `--chapter`, `--theorem`, and `--model`; accepts `--lean-path` and
-`--source-tex`.
-
-## Environment/provider commands
-
-- `compiler-check`: compile and execute a native program for Lean/Lake.
-- `doctor`: verify Codex connectivity, authentication, model inventory, and
-  fail-closed MCP/skill isolation.
-- `models`: list exact model IDs and supported efforts.
-- `smoke`: perform a real isolated Codex dynamic-tool round trip.
-
-## Cache commands
-
-- `cache path`: print the validated cache root.
-- `cache init`: create the cache and configure `--max-gb`/`--min-free-gb`.
-- `cache doctor`: validate location, layout, policy, usage, and compiler.
-- `cache status`: show coarse managed usage, headroom, and reservations.
-- `cache attach --project`: move a project `.lake` tree into managed storage.
-- `cache prepare --project`: share dependencies and build without Codex.
-- `cache gc`: run deadline-bounded coarse eviction; accepts `--gc-timeout`.
-
-See [Cache and storage](CACHE_AND_STORAGE.md) before changing limits or cleaning
-an active machine.
+The TUI converts these outcomes into typed workflow states and appropriate
+findings, clarification, or recovery screens.

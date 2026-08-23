@@ -4,7 +4,7 @@ import os
 import shutil
 import subprocess
 import traceback
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -130,6 +130,10 @@ class VerificationResult:
     reconciled: tuple[str, ...]
     questions: tuple[str, ...]
     counterexamples: tuple[str, ...]
+
+
+class VerificationCancelled(RuntimeError):
+    pass
 
 
 def _git(path: Path, arguments: Sequence[str], *, check: bool = True) -> str:
@@ -441,20 +445,47 @@ def verify_project(
     options: VerifyOptions,
     manuscript: str | Path | None = None,
     task_file: str | Path | None = None,
+    expected_inventory_sha256: str | None = None,
+    event_hook: Callable[[str, str, dict[str, object]], None] | None = None,
+    cancellation_checkpoint: Callable[[], None] | None = None,
 ) -> VerificationResult:
+    def checkpoint() -> None:
+        if cancellation_checkpoint is not None:
+            try:
+                cancellation_checkpoint()
+            except Exception as exc:
+                raise VerificationCancelled(
+                    str(exc) or "Verification cancelled"
+                ) from exc
+
+    def notify(phase: str, message: str, **details: object) -> None:
+        if event_hook is not None:
+            event_hook(phase, message, details)
+
     options.validate()
+    checkpoint()
+    notify("VALIDATING", "Validated verification options and project location")
     layout = CacheLayout.discover(options.cache_home)
     ensure_project_outside_dropbox(session.project, layout)
     with project_lock(session.project, exclusive=True):
         prepared: PreparedPass | None = None
         try:
             runtime_env, compiler = _runtime_environment(layout)
+            notify("CACHE_SETUP", "Prepared the shared Lean cache runtime")
             provisional_environment, _inputs = environment_fingerprint(session.project)
             prepared = session.prepare_pass(
                 manuscript=manuscript,
                 task_file=task_file,
                 environment_hash=provisional_environment,
+                expected_inventory_sha256=expected_inventory_sha256,
                 _already_locked=True,
+            )
+            checkpoint()
+            notify(
+                "IMPACT_ANALYSIS",
+                "Imported the stable manuscript snapshot and computed affected claims",
+                affected=len(prepared.affected),
+                selected=len(prepared.selected),
             )
             run_directory = session.runs / f"{prepared.run_id:06d}"
             policy = cache_policy(layout.load_config())
@@ -485,6 +516,8 @@ def verify_project(
                         timeout=options.setup_timeout,
                         depot_claim=depot,
                     )
+                checkpoint()
+                notify("LEAN_BUILD", "Completed Lean dependency setup")
                 atomic_write_text(
                     run_directory / "setup.log", command_records_text(setup_records)
                 )
@@ -511,6 +544,12 @@ def verify_project(
                         env=runtime_env,
                         timeout=options.setup_timeout,
                     )
+                )
+                checkpoint()
+                notify(
+                    "LEAN_EXTRACTION",
+                    "Extracted the baseline Lean dependency graph",
+                    declarations=len(baseline_declarations),
                 )
                 baseline_axioms = {
                     item.name for item in baseline_declarations if item.kind == "axiom"
@@ -590,6 +629,7 @@ def verify_project(
                 technical_errors: list[str] = []
                 round_index = 0
                 while round_index <= len(prepared.selected) + 1:
+                    checkpoint()
                     round_index += 1
                     with StateStore(session.database_path) as store:
                         edges = _edges(store)
@@ -620,6 +660,12 @@ def verify_project(
                         )
                         if not ready:
                             break
+                        notify(
+                            "PROOF_BATCH",
+                            "Scheduled the next dependency-ready proof frontier",
+                            round=round_index,
+                            claims=len(ready),
+                        )
                         for claim_id in ready:
                             store.set_claim_state(
                                 claim_id,
@@ -698,6 +744,7 @@ def verify_project(
                                             message=error,
                                         )
                         _remove_worktree(session.project, Path(result.workspace))
+                    checkpoint()
 
                     source_mutation = _git(
                         session.project,
@@ -723,6 +770,11 @@ def verify_project(
                         env=runtime_env,
                         timeout=options.setup_timeout,
                     )
+                    notify(
+                        "LEAN_BUILD",
+                        "Independently built the merged proof frontier",
+                        round=round_index,
+                    )
                     atomic_write_text(
                         run_directory / f"round-{round_index:04d}-build.log",
                         command_records_text([build]),
@@ -739,6 +791,11 @@ def verify_project(
                     )
                     environment_hash, _inputs = environment_fingerprint(session.project)
                     with StateStore(session.database_path) as store:
+                        notify(
+                            "CERTIFICATION",
+                            "Checked kernel evidence for the merged proof frontier",
+                            round=round_index,
+                        )
                         store.replace_lean_graph(declarations, run_id=prepared.run_id)
                         certification = certify_current_correspondence(
                             store,
@@ -772,6 +829,8 @@ def verify_project(
                     env=runtime_env,
                     timeout=options.setup_timeout,
                 )
+                checkpoint()
+                notify("LEAN_BUILD", "Completed the final independent Lean build")
                 atomic_write_text(
                     run_directory / "final-build.log",
                     command_records_text([final_build]),
@@ -851,6 +910,7 @@ def verify_project(
                         reconciled=sorted(all_reconciled),
                         invalidated=sorted(prepared.affected),
                     )
+                    notify("REPORTING", "Rendered verification reports and exports")
                     store.finish_run(
                         prepared.run_id,
                         status="COMPLETE" if exit_code in {0, 10, 11, 12} else "FAILED",
@@ -883,6 +943,7 @@ def verify_project(
                 session._commit_host_changes(
                     f"Record incremental verification run {prepared.run_id:06d}: {outcome}"
                 )
+                notify("COMPLETE", detail, outcome=outcome, exit_code=exit_code)
                 return VerificationResult(
                     outcome=outcome,
                     detail=detail,
@@ -901,8 +962,16 @@ def verify_project(
                 with StateStore(session.database_path) as store:
                     store.finish_run(
                         prepared.run_id,
-                        status="FAILED",
-                        outcome="setup_failure",
+                        status=(
+                            "INTERRUPTED"
+                            if isinstance(exc, VerificationCancelled)
+                            else "FAILED"
+                        ),
+                        outcome=(
+                            "interrupted"
+                            if isinstance(exc, VerificationCancelled)
+                            else "setup_failure"
+                        ),
                         completed_at=utc_now(),
                         detail=f"{type(exc).__name__}: {exc}",
                     )

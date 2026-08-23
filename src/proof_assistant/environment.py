@@ -5,9 +5,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from collections.abc import MutableMapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import MutableMapping
 
 
 class EnvironmentCheckError(RuntimeError):
@@ -58,7 +58,7 @@ def configure_portable_locale(
 def _compiler_smoke(executable: str, *, timeout: float = 30.0) -> str | None:
     """Compile and execute a C program, returning an error or ``None``."""
     try:
-        with tempfile.TemporaryDirectory(prefix="repoprover-codex-cc-") as raw_tmp:
+        with tempfile.TemporaryDirectory(prefix="proof-assistant-cc-") as raw_tmp:
             tmp = Path(raw_tmp)
             source = tmp / "check.c"
             binary = tmp / "check"

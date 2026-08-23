@@ -120,9 +120,9 @@ class CodexBackend:
             "initialize",
             {
                 "clientInfo": {
-                    "name": "repoprover-codex",
-                    "title": "RepoProver Codex backend",
-                    "version": "0.4.1",
+                    "name": "proof-assistant",
+                    "title": "Proof Assistant backend",
+                    "version": "0.1.0",
                 },
                 "capabilities": {"experimentalApi": True},
             },
@@ -412,7 +412,7 @@ class CodexBackend:
                 method = str(notification.get("method") or "")
                 params = notification.get("params") or {}
 
-                if method == "_repoprover_codex/server_exited":
+                if method == "_proof_assistant/server_exited":
                     raise CodexServerExited(
                         f"codex app-server exited during turn: {params!r}"
                     )

@@ -1,4 +1,4 @@
-"""Codex app-server integration for RepoProver."""
+"""Proof Assistant: incremental formal verification for manuscripts."""
 
 from .backend import CodexBackend, CodexConfig, CodexResult, CodexToolCall
 from .cache import CacheLayout, CacheLocationError
@@ -13,4 +13,4 @@ __all__ = [
     "CodexToolCall",
     "run_repoprover_agent",
 ]
-__version__ = "0.4.1"
+__version__ = "0.1.0"

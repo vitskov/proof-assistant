@@ -1,13 +1,11 @@
-
-import os
 import stat
 import subprocess
 import textwrap
 
 import pytest
 
-from repoprover_codex import protocol
-from repoprover_codex.protocol import (
+from proof_assistant import protocol
+from proof_assistant.protocol import (
     AppServerClient,
     CodexProtocolError,
     isolated_skill_config_args,
