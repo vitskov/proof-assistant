@@ -1,6 +1,6 @@
 # Proof Assistant
 
-Proof Assistant is an interactive formal referee for LaTeX mathematics. Point
+Proof Assistant is an interactive formal referee for mathematics manuscripts typeset in LaTeX. Point
 it at a manuscript folder, describe what should be checked, and it builds a
 persistent Lean verification project. When the manuscript changes, it preserves
 valid work and revisits only the affected part of the proof graph.
