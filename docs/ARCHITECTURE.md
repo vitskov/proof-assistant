@@ -36,3 +36,28 @@ and effort values are validated against the installed app-server's
 The process-level concurrency default is deliberately conservative: at most
 two active Codex turns in one process. The cache lease design separately makes
 concurrent Lean projects safe.
+
+## Storage control plane
+
+```text
+managed operation
+    |
+    v
+exclusive admission lease
+    |
+    +--> recover dead reservations via OS leases
+    +--> reconcile one SQLite row per coarse eviction unit
+    +--> bounded GC if limits require it
+    +--> persist conservative capacity reservation
+    |
+    v
+shared build/global/depot leases during Lake and Codex work
+    |
+    v
+refresh dirty rows -> release reservation -> best-effort bounded GC
+```
+
+The data plane remains plain Lake directories and symlinks. The SQLite index is
+accounting metadata and can be reconstructed from coarse filesystem units. It
+does not contain proof source, authentication material, or irreplaceable
+evidence.

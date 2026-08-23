@@ -59,10 +59,13 @@ input manuscript is copied and never modified.
 - Child-process isolation from local MCP servers, apps, plugins, and skills.
 - File-based manuscript, task, and output interface.
 - Independent final Lean build and evidence-based result classification.
-- Shared content-addressed Mathlib/REPL dependency depots.
+- Shared content-addressed Mathlib/REPL dependency depots across projects whose
+  package names and source roots differ but whose dependency declarations match.
 - Isolated per-project root builds with process-held cache leases.
-- LRU garbage collection, a 16 GiB default cache ceiling, and a 25 GiB
-  default filesystem free-space reserve.
+- Transactional capacity reservations and a persistent coarse-grained cache
+  index with crash recovery.
+- Deadline-bounded garbage collection, a 16 GiB default cache ceiling, and a
+  25 GiB default filesystem free-space reserve.
 - macOS and Linux local-mode support.
 
 ## Commands
@@ -77,7 +80,7 @@ input manuscript is copied and never modified.
 | `repoprover-prove` | Run one RepoProver PROVE task on an existing Lean project. |
 | `cache status` | Show cache usage, limits, and disk headroom. |
 | `cache prepare` | Prepare and build a Lean project without starting Codex. |
-| `cache gc` | Enforce limits by evicting inactive LRU entries. |
+| `cache gc` | Enforce limits with bounded, coarse-unit eviction. |
 
 ## Storage model
 
@@ -85,24 +88,36 @@ Large Lean dependencies are stored once per compatible dependency fingerprint:
 
 ```text
 ~/.cache/repoprover-codex/
+├── cache-index.sqlite3                    # transactional accounting
 ├── lake/dependencies/deps-<fingerprint>/  # shared Mathlib/REPL depot
 ├── lake/builds/<project>-<path-hash>/     # small isolated root build
 ├── mathlib-downloads/
 ├── lake/system/
 ├── locks/
+├── trash/                                 # atomic GC quarantine
 └── config.json                            # compiler and disk policy
 ```
 
-The fingerprint includes the Lake configuration, Lean toolchain, operating
-system, architecture, and native compiler identity. Compatible projects share
-the dependency depot but never their manuscript/root build products. Active
-entries are protected by advisory locks that the operating system releases if
-a process exits or is killed.
+For standard `lakefile.lean` Git requirements, the fingerprint uses normalized
+dependency name/URL/revision triples rather than project package declarations
+or source roots. It also includes the Lean toolchain, operating system,
+architecture, and native compiler identity. Unknown Lake syntax falls back to
+a conservative whole-file hash. Compatible projects share the dependency
+depot but never their manuscript/root build products.
 
-Before expensive setup, the package evicts inactive least-recently-used cache
-entries until both configured limits are satisfied. If active entries prevent
-that, the run fails before downloading or compiling rather than filling the
-disk.
+Before expensive setup, an admission lock makes cleanup and a conservative
+capacity reservation atomic. The index contains one row per build, depot, or
+bulk cache—not one row per Mathlib archive. Changed entries are measured once;
+the eviction loop never recursively rescans the cache. Deletion first renames a
+whole unit into `trash/`, then traverses it once with a deadline and progress
+messages. Active entries are protected by advisory locks that the operating
+system releases if a process exits or is killed; stale reservations and
+interrupted quarantines are recovered automatically.
+
+The default GC deadline is 900 seconds and can be changed per command with
+`--gc-timeout`. If accounting or deletion reaches that deadline, the command
+fails explicitly and leaves any partial deletion isolated in `trash/` for the
+next bounded recovery pass.
 
 ## Documentation
 
@@ -118,7 +133,7 @@ primary operating manual.
 
 ## Project status
 
-Version 0.3.0 is tested locally on macOS with Python 3.13, Lean 4.28, Lake 5,
+Version 0.4.0 is tested locally on macOS with Python 3.13, Lean 4.28, Lake 5,
 and the pinned RepoProver checkout recorded in `TEST_REPORT.md`.
 
 No pull request, issue, or push has been made to

@@ -48,6 +48,25 @@ Acceptance criteria:
 4. Their top-level `.lake` links resolve to different project-build paths.
 5. The second project adds only its small root build, not another Mathlib tree.
 6. `cache status` remains below both disk limits.
+7. A generated manuscript workspace with the same dependency revisions prints
+   the same dependency key despite its different package name and source roots.
+
+## Cache-GC regression checks
+
+`tests/test_cache.py` includes the former pathological shape directly: 10,000
+Mathlib download files plus a capacity violation. The test asserts one coarse
+candidate, one recursive measurement, and an empty recreated download root.
+Additional cases cover:
+
+- two simultaneous reservations that would exceed the configured maximum;
+- stale reservation recovery through a released OS lease;
+- active entries that must not be evicted;
+- interrupted quarantine recovery;
+- index schema migration and dirty-entry crash state; and
+- expired accounting and deletion deadlines.
+
+These are operation-count assertions, not timing-only benchmarks, so a fast
+machine cannot hide a reintroduction of the nested-rescan algorithm.
 
 ## Real RepoProver/Codex checks
 
@@ -64,7 +83,7 @@ agents. This is a local-mode package target; SLURM is not required on macOS.
 ```bash
 git diff --check
 "$HOME/.venvs/repoprover-codex/bin/python" -m pytest -q
-uv build
+uv build --python "$HOME/.venvs/repoprover-codex/bin/python"
 ```
 
 Install the wheel into a fresh external Python 3.13 environment, run

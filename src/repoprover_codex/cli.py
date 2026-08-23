@@ -278,6 +278,7 @@ def cmd_cache_doctor(args) -> int:
     print(f"cache limit: {_format_gib(policy.max_bytes)}")
     print(f"filesystem free: {_format_gib(usage.free_bytes)}")
     print(f"minimum free space: {_format_gib(policy.min_free_bytes)}")
+    print(f"active reservations: {_format_gib(usage.reserved_bytes)}")
     return 0
 
 
@@ -313,6 +314,8 @@ def cmd_cache_status(args) -> int:
     print(f"Mathlib downloads: {_format_gib(usage.download_bytes)}")
     print(f"Lake system cache: {_format_gib(usage.lake_system_bytes)}")
     print(f"temporary files: {_format_gib(usage.temporary_bytes)}")
+    print(f"active reservations: {_format_gib(usage.reserved_bytes)}")
+    print(f"accounting index: {layout.index_path}")
     return 0
 
 
@@ -321,7 +324,13 @@ def cmd_cache_gc(args) -> int:
         layout = _cache_layout(args)
         layout.create()
         policy = cache_policy(layout.load_config())
-        result = garbage_collect_cache(layout, policy, strict=False)
+        result = garbage_collect_cache(
+            layout,
+            policy,
+            strict=False,
+            timeout=args.gc_timeout,
+            progress=lambda message: print(message, file=sys.stderr),
+        )
     except CacheLocationError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
@@ -329,6 +338,7 @@ def cmd_cache_gc(args) -> int:
     print(f"after: {_format_gib(result.after.managed_bytes)}")
     print(f"filesystem free: {_format_gib(result.after.free_bytes)}")
     print(f"removed entries: {len(result.removed)}")
+    print(f"recursive measurements: {result.recursive_measurements}")
     for item in result.removed:
         print(f"  removed {item}")
     for item in result.skipped_active:
@@ -371,6 +381,8 @@ def cmd_cache_prepare(args) -> int:
             attach=True,
             reserve_gb=reserve,
             lease_timeout=args.setup_timeout,
+            gc_timeout=args.gc_timeout,
+            progress=lambda message: print(message, file=sys.stderr),
         )
         managed_lake = session.__enter__()
         claim = claim_dependency_depot(
@@ -507,6 +519,21 @@ def cmd_repoprover_prove(args) -> int:
         return 5
     if cache_config is None or cache_config.lean_cc != compiler.executable:
         cache_layout.record_compiler(compiler)
+    runtime_env = cache_layout.runtime_environment(
+        os.environ, lean_cc=compiler.executable
+    )
+    dependency_target = dependency_depot_target(
+        cache_layout,
+        dependency_cache_key(project, env=runtime_env),
+    )
+    if not dependency_depot_ready(dependency_target):
+        print("OUTCOME: tool_failure", file=sys.stderr)
+        print(
+            "ERROR: dependency depot is not prepared; run "
+            f"`repoprover-codex cache prepare --project {project}` first",
+            file=sys.stderr,
+        )
+        return 5
     try:
         cache_session = managed_project_session(
             project,
@@ -515,9 +542,18 @@ def cmd_repoprover_prove(args) -> int:
             attach=False,
             reserve_gb=WARM_PROJECT_RESERVE_GB,
             lease_timeout=args.request_timeout,
+            gc_timeout=args.gc_timeout,
+            progress=lambda message: print(message, file=sys.stderr),
         )
         cache_session.__enter__()
         _hold_cleanup(lambda session=cache_session: session.__exit__(None, None, None))
+        depot_claim = claim_dependency_depot(
+            project,
+            cache_layout,
+            env=runtime_env,
+            timeout=args.request_timeout,
+        )
+        _hold_cleanup(depot_claim.close)
     except CacheLocationError as exc:
         print("OUTCOME: tool_failure", file=sys.stderr)
         print(f"ERROR: cache capacity/lease check failed: {exc}", file=sys.stderr)
@@ -632,6 +668,25 @@ def cmd_manuscript_run(args) -> int:
     print(f"input mode: {paths.source_mode}")
     print(f"LaTeX sources: {len(paths.latex_sources)}")
 
+    def record_phase(phase: str, detail: str) -> None:
+        payload = {
+            "schema_version": 1,
+            "command": "manuscript-run",
+            "started_at": started_at,
+            "outcome": "running",
+            "phase": phase,
+            "detail": detail,
+            "output": str(paths.output),
+            "workspace": str(paths.workspace),
+        }
+        write_json(paths.output / "RUN_STATUS.json", payload)
+
+    def cache_progress(message: str) -> None:
+        print(message, file=sys.stderr)
+        record_phase("cache_gc", message)
+
+    record_phase("cache_preflight", "Validating cache capacity and reservations")
+
     try:
         cache_layout.create()
         cache_config = cache_layout.load_config()
@@ -662,6 +717,8 @@ def cmd_manuscript_run(args) -> int:
             attach=True,
             reserve_gb=reserve_gb,
             lease_timeout=args.setup_timeout,
+            gc_timeout=args.gc_timeout,
+            progress=cache_progress,
         )
         managed_lake = cache_session.__enter__()
         _hold_cleanup(lambda session=cache_session: session.__exit__(None, None, None))
@@ -688,6 +745,7 @@ def cmd_manuscript_run(args) -> int:
         file=sys.stderr,
     )
     print(f"Lean native compiler: {compiler.executable}", file=sys.stderr)
+    record_phase("dependency_setup", "Preparing Lean dependencies and root build")
 
     try:
         setup_records = bootstrap_lean_workspace(
@@ -757,6 +815,7 @@ def cmd_manuscript_run(args) -> int:
         pool_size=args.lean_pool_size,
         instance_mem_limit_gb=memory_limit,
     )
+    record_phase("codex_turn", "RepoProver agent is running through Codex")
     try:
         from .integration import run_repoprover_agent
 
@@ -927,7 +986,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-gb",
         type=float,
         default=None,
-        help="Hard managed-cache limit in GiB (default: 16)",
+        help="Managed-cache admission limit in GiB (default: 16)",
     )
     cache_init.add_argument(
         "--min-free-gb",
@@ -950,7 +1009,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     cache_status.set_defaults(func=cmd_cache_status)
     cache_gc = cache_sub.add_parser(
-        "gc", help="Evict inactive least-recently-used entries to enforce limits"
+        "gc", help="Evict inactive coarse cache units to enforce limits"
+    )
+    cache_gc.add_argument(
+        "--gc-timeout",
+        type=float,
+        default=900.0,
+        help="Maximum cache-GC time in seconds (default: 900)",
     )
     cache_gc.set_defaults(func=cmd_cache_gc)
     cache_prepare = cache_sub.add_parser(
@@ -960,6 +1025,7 @@ def build_parser() -> argparse.ArgumentParser:
     cache_prepare.add_argument("--project", required=True)
     cache_prepare.add_argument("--lean-cc", default=None)
     cache_prepare.add_argument("--setup-timeout", type=float, default=1800.0)
+    cache_prepare.add_argument("--gc-timeout", type=float, default=900.0)
     cache_prepare.set_defaults(func=cmd_cache_prepare)
 
     s = sub.add_parser("smoke", help="Run a real dynamic-tool smoke test")
@@ -992,6 +1058,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     rp.add_argument("--request-timeout", type=float, default=120.0)
     rp.add_argument("--turn-timeout", type=float, default=1800.0)
+    rp.add_argument("--gc-timeout", type=float, default=900.0)
     rp.set_defaults(func=cmd_repoprover_prove)
 
     manuscript = sub.add_parser(
@@ -1035,6 +1102,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     manuscript.add_argument("--request-timeout", type=float, default=120.0)
     manuscript.add_argument("--turn-timeout", type=float, default=3600.0)
+    manuscript.add_argument("--gc-timeout", type=float, default=900.0)
     manuscript.set_defaults(func=cmd_manuscript_run)
     return p
 

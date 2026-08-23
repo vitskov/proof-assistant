@@ -67,3 +67,5 @@ scripts/install-dev.sh
 The installer preserves compatible dependency depots. A changed Lean,
 Mathlib, REPL, platform, architecture, or compiler identity naturally selects
 a different depot; bounded garbage collection can later remove the old one.
+The cache index is migrated in place and stale process reservations are
+recovered from operating-system leases.

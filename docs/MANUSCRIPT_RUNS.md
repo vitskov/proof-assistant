@@ -25,10 +25,13 @@ repoprover-codex manuscript-run \
   --output "$OUTPUT" \
   --model gpt-5.6-sol \
   --effort high \
+  --gc-timeout 900 \
   --turn-timeout 86400
 ```
 
 `86400` is one day in seconds. It limits the Codex turn, not dependency setup.
+`--gc-timeout` bounds cache reconciliation plus deletion; its default is 900
+seconds.
 
 ## Task-file example
 
@@ -73,6 +76,10 @@ output/
 Large Mathlib and REPL state is not copied into the output. The workspace's
 `.lake` points to a small isolated project build, whose dependency directory
 points to a compatible shared depot.
+
+`RUN_STATUS.json` is written before cache admission and updated through
+`cache_preflight`, `cache_gc`, `dependency_setup`, and `codex_turn`. A terminal
+failure or success replaces the running status with the final outcome.
 
 ## Result semantics
 

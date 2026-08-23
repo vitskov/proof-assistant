@@ -5,19 +5,21 @@ import hashlib
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
 import uuid
-from collections.abc import Iterator, Mapping, MutableMapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, MutableMapping, Sequence
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import IO, Self
 
+from .cache_index import CacheIndex, CacheIndexError, IndexedCacheEntry
 from .environment import (
     CompilerCheck,
     configure_portable_locale,
@@ -32,9 +34,10 @@ DEFAULT_CACHE_MAX_GB = 16.0
 DEFAULT_MIN_FREE_GB = 25.0
 COLD_DEPOT_RESERVE_GB = 10.0
 WARM_PROJECT_RESERVE_GB = 1.0
+DEFAULT_GC_TIMEOUT_SECONDS = 900.0
 _GIB = 1024**3
 _CONFIG_SCHEMA = 2
-_DEPOT_SCHEMA = 1
+_DEPOT_SCHEMA = 2
 _REMOTE_FILESYSTEM_MARKERS = (
     "remote:",
     "nfs",
@@ -91,6 +94,7 @@ class CacheUsage:
     download_bytes: int
     lake_system_bytes: int
     temporary_bytes: int
+    reserved_bytes: int = 0
 
 
 @dataclass(frozen=True)
@@ -99,6 +103,7 @@ class CacheGcResult:
     after: CacheUsage
     removed: tuple[str, ...]
     skipped_active: tuple[str, ...]
+    recursive_measurements: int = 0
 
 
 @dataclass
@@ -118,6 +123,29 @@ class CacheLease:
         if not self.handle.closed:
             fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
             self.handle.close()
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        self.close()
+
+
+@dataclass
+class CacheReservation:
+    """Capacity held for one process and recovered through its OS lease."""
+
+    index: CacheIndex
+    identifier: str
+    lease: CacheLease
+
+    def close(self) -> None:
+        lock_path = self.lease.path
+        try:
+            self.index.remove_reservation(self.identifier)
+        finally:
+            self.lease.close()
+            lock_path.unlink(missing_ok=True)
 
     def __enter__(self) -> Self:
         return self
@@ -168,6 +196,14 @@ class CacheLayout:
         return self.root / "tmp"
 
     @property
+    def trash(self) -> Path:
+        return self.root / "trash"
+
+    @property
+    def index_path(self) -> Path:
+        return self.root / "cache-index.sqlite3"
+
+    @property
     def config_path(self) -> Path:
         return self.root / "config.json"
 
@@ -182,6 +218,7 @@ class CacheLayout:
             self.fixtures,
             self.locks,
             self.temporary,
+            self.trash,
         )
 
     @classmethod
@@ -658,8 +695,13 @@ def attach_project_cache(project: str | Path, layout: CacheLayout) -> Path:
         lock.rmdir()
 
 
-def _allocated_size(root: Path) -> int:
-    """Return allocated bytes without following symlinks."""
+def _allocated_size(
+    root: Path,
+    *,
+    deadline: float | None = None,
+    progress: Callable[[str], None] | None = None,
+) -> int:
+    """Return allocated bytes in one bounded traversal without following links."""
     try:
         initial = root.lstat()
     except FileNotFoundError:
@@ -667,23 +709,207 @@ def _allocated_size(root: Path) -> int:
     total = initial.st_blocks * 512
     if root.is_symlink() or not root.is_dir():
         return total
-    for directory, directories, files in os.walk(root, followlinks=False):
-        base = Path(directory)
-        for name in directories + files:
-            item = base / name
-            try:
-                total += item.lstat().st_blocks * 512
-            except FileNotFoundError:
-                continue
+    processed = 0
+    last_report = time.monotonic()
+    stack = [root]
+    while stack:
+        now = time.monotonic()
+        if deadline is not None and now >= deadline:
+            raise CacheCapacityError(
+                f"Cache accounting exceeded its time limit while measuring {root}"
+            )
+        if progress is not None and now - last_report >= 30.0:
+            progress(f"cache GC measuring {root.name}: {processed} nodes inspected")
+            last_report = now
+        directory = stack.pop()
+        try:
+            entries = os.scandir(directory)
+        except FileNotFoundError:
+            continue
+        with entries:
+            for entry in entries:
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise CacheCapacityError(
+                        "Cache accounting exceeded its time limit while measuring "
+                        f"{root}"
+                    )
+                item = Path(entry.path)
+                try:
+                    stat = item.lstat()
+                except FileNotFoundError:
+                    continue
+                total += stat.st_blocks * 512
+                processed += 1
+                if entry.is_dir(follow_symlinks=False):
+                    stack.append(item)
     return total
 
 
-def cache_usage(layout: CacheLayout) -> CacheUsage:
-    dependency = _allocated_size(layout.lake_dependencies)
-    builds = _allocated_size(layout.lake_builds)
-    downloads = _allocated_size(layout.mathlib_downloads)
-    lake_system = _allocated_size(layout.lake_system)
-    temporary = _allocated_size(layout.temporary)
+def _entry_signature(path: Path) -> str:
+    try:
+        stat = path.lstat()
+    except FileNotFoundError:
+        return "missing"
+    return ":".join(
+        str(value)
+        for value in (stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_size)
+    )
+
+
+def _cache_entry_specs(
+    layout: CacheLayout,
+) -> list[tuple[Path, str, str, float, str]]:
+    """Return one specification per eviction unit, never per bulk-cache file."""
+    specs: list[tuple[Path, str, str, float, str]] = []
+    child_groups = (
+        (layout.lake_builds, "build"),
+        (layout.lake_dependencies, "depot"),
+        (layout.temporary, "temporary"),
+        (layout.trash, "trash"),
+    )
+    for parent, kind in child_groups:
+        for item in _direct_children(parent):
+            try:
+                modified = item.lstat().st_mtime
+            except FileNotFoundError:
+                continue
+            lease_name = (
+                "global-cache"
+                if kind in {"temporary", "trash"}
+                or (kind == "depot" and item.name.startswith("."))
+                else f"{kind}-{item.name}"
+            )
+            specs.append((item, kind, lease_name, modified, _entry_signature(item)))
+
+    bulk_groups = (
+        (layout.mathlib_downloads, "download"),
+        (layout.lake_system, "lake-system"),
+    )
+    for root, kind in bulk_groups:
+        if not _direct_children(root):
+            continue
+        try:
+            modified = root.lstat().st_mtime
+        except FileNotFoundError:
+            continue
+        specs.append((root, kind, "global-cache", modified, _entry_signature(root)))
+    return specs
+
+
+def reconcile_cache_index(
+    layout: CacheLayout,
+    *,
+    deadline: float | None = None,
+    progress: Callable[[str], None] | None = None,
+) -> int:
+    """Reconcile top-level eviction units, measuring each changed unit once."""
+    layout.create()
+    index = CacheIndex(layout.index_path)
+    try:
+        existing = {entry.path: entry for entry in index.entries()}
+        seen: set[Path] = set()
+        measurements = 0
+        for path, kind, lease_name, modified, signature in _cache_entry_specs(layout):
+            seen.add(path)
+            current = existing.get(path)
+            if (
+                current is not None
+                and current.signature == signature
+                and current.kind == kind
+                and current.state == "ready"
+            ):
+                continue
+            lease = try_cache_lease(layout, lease_name, exclusive=True)
+            if lease is None:
+                index.mark_dirty(
+                    path,
+                    kind=kind,
+                    signature=signature,
+                    lease_name=lease_name,
+                )
+                continue
+            try:
+                allocated = _allocated_size(path, deadline=deadline, progress=progress)
+            finally:
+                lease.close()
+            measurements += 1
+            index.upsert_entry(
+                IndexedCacheEntry(
+                    path=path,
+                    kind=kind,
+                    allocated_bytes=allocated,
+                    last_used=modified,
+                    signature=signature,
+                    lease_name=lease_name,
+                    state="ready",
+                )
+            )
+        index.remove_entries_not_in(seen)
+        return measurements
+    except CacheIndexError as exc:
+        raise CacheLocationError(str(exc)) from exc
+
+
+def refresh_cache_index_entry(
+    layout: CacheLayout,
+    path: Path,
+    *,
+    kind: str,
+    lease_name: str,
+    deadline: float | None = None,
+    progress: Callable[[str], None] | None = None,
+) -> None:
+    """Record a known-mutated entry with one post-operation measurement."""
+    index = CacheIndex(layout.index_path)
+    try:
+        if not path.exists() and not path.is_symlink():
+            index.remove_entry(path)
+            return
+        stat = path.lstat()
+        index.upsert_entry(
+            IndexedCacheEntry(
+                path=path,
+                kind=kind,
+                allocated_bytes=_allocated_size(
+                    path, deadline=deadline, progress=progress
+                ),
+                last_used=stat.st_mtime,
+                signature=_entry_signature(path),
+                lease_name=lease_name,
+                state="ready",
+            )
+        )
+    except CacheIndexError as exc:
+        raise CacheLocationError(str(exc)) from exc
+
+
+def cache_usage(
+    layout: CacheLayout,
+    *,
+    reconcile: bool = True,
+    timeout: float = DEFAULT_GC_TIMEOUT_SECONDS,
+    progress: Callable[[str], None] | None = None,
+) -> CacheUsage:
+    if reconcile:
+        reconcile_cache_index(
+            layout,
+            deadline=time.monotonic() + timeout,
+            progress=progress,
+        )
+    index = CacheIndex(layout.index_path)
+    try:
+        entries = index.entries()
+        reserved = sum(item.reserved_bytes for item in index.reservations())
+    except CacheIndexError as exc:
+        raise CacheLocationError(str(exc)) from exc
+    totals: dict[str, int] = {}
+    for entry in entries:
+        totals[entry.kind] = totals.get(entry.kind, 0) + entry.allocated_bytes
+    dependency = totals.get("depot", 0)
+    builds = totals.get("build", 0)
+    downloads = totals.get("download", 0)
+    lake_system = totals.get("lake-system", 0)
+    temporary = totals.get("temporary", 0) + totals.get("trash", 0)
     return CacheUsage(
         managed_bytes=dependency + builds + downloads + lake_system + temporary,
         free_bytes=shutil.disk_usage(layout.root).free,
@@ -692,6 +918,7 @@ def cache_usage(layout: CacheLayout) -> CacheUsage:
         download_bytes=downloads,
         lake_system_bytes=lake_system,
         temporary_bytes=temporary,
+        reserved_bytes=reserved,
     )
 
 
@@ -745,9 +972,12 @@ def acquire_cache_lease(
 @dataclass(frozen=True)
 class _CacheCandidate:
     path: Path
+    kind: str
+    allocated_bytes: int
     lease_name: str
     label: str
     modified: float
+    state: str
 
 
 def _direct_children(parent: Path) -> list[Path]:
@@ -758,29 +988,37 @@ def _direct_children(parent: Path) -> list[Path]:
 
 
 def _gc_candidates(layout: CacheLayout) -> list[_CacheCandidate]:
-    candidates: list[_CacheCandidate] = []
-    groups = (
-        (layout.lake_builds, "build", False),
-        (layout.lake_dependencies, "depot", False),
-        (layout.mathlib_downloads, "download", True),
-        (layout.lake_system, "lake-system", True),
-        (layout.temporary, "temporary", True),
+    try:
+        entries = CacheIndex(layout.index_path).entries()
+    except CacheIndexError as exc:
+        raise CacheLocationError(str(exc)) from exc
+    # Plan from coarse eviction units. In particular, the complete download
+    # namespace is one candidate regardless of how many .ltar files it holds.
+    priority = {
+        "trash": 0,
+        "temporary": 1,
+        "build": 2,
+        "depot": 3,
+        "download": 4,
+        "lake-system": 5,
+    }
+    candidates = [
+        _CacheCandidate(
+            path=entry.path,
+            kind=entry.kind,
+            allocated_bytes=entry.allocated_bytes,
+            lease_name=entry.lease_name,
+            label=f"{entry.kind}:{entry.path.name}",
+            modified=entry.last_used,
+            state=entry.state,
+        )
+        for entry in entries
+        if entry.state in {"ready", "dirty", "deleting"}
+    ]
+    return sorted(
+        candidates,
+        key=lambda item: (priority.get(item.kind, 99), item.modified, item.label),
     )
-    for parent, kind, global_lease in groups:
-        for item in _direct_children(parent):
-            try:
-                modified = item.lstat().st_mtime
-            except FileNotFoundError:
-                continue
-            lease_name = (
-                "global-cache"
-                if global_lease or (kind == "depot" and item.name.startswith("."))
-                else f"{kind}-{item.name}"
-            )
-            candidates.append(
-                _CacheCandidate(item, lease_name, f"{kind}:{item.name}", modified)
-            )
-    return sorted(candidates, key=lambda item: (item.modified, item.label))
 
 
 def _make_tree_writable(root: Path) -> None:
@@ -809,6 +1047,7 @@ def _remove_cache_path(path: Path, layout: CacheLayout) -> None:
         layout.mathlib_downloads,
         layout.lake_system,
         layout.temporary,
+        layout.trash,
     }:
         raise CacheLocationError(f"Refusing to remove unmanaged cache path: {path}")
     if path.is_symlink() or path.is_file():
@@ -819,31 +1058,221 @@ def _remove_cache_path(path: Path, layout: CacheLayout) -> None:
         shutil.rmtree(path)
 
 
-def garbage_collect_cache(
+def _delete_tree_bounded(
+    root: Path,
+    *,
+    deadline: float,
+    progress: Callable[[str], None] | None,
+) -> None:
+    """Delete one tree in a single traversal with deadline/progress checks."""
+    if root.is_symlink() or root.is_file():
+        root.unlink(missing_ok=True)
+        return
+    if not root.exists():
+        return
+    processed = 0
+    last_report = time.monotonic()
+
+    def checkpoint() -> None:
+        nonlocal last_report
+        now = time.monotonic()
+        if now >= deadline:
+            raise CacheCapacityError(
+                "Cache garbage collection exceeded its time limit while "
+                f"deleting {root}; partial data remains safely quarantined"
+            )
+        if progress is not None and now - last_report >= 30.0:
+            progress(f"cache GC deleting {root.name}: {processed} nodes removed")
+            last_report = now
+
+    stack: list[tuple[Path, bool]] = [(root, False)]
+    while stack:
+        checkpoint()
+        path, visited = stack.pop()
+        if visited:
+            try:
+                path.rmdir()
+            except FileNotFoundError:
+                pass
+            processed += 1
+            continue
+        try:
+            path.chmod(path.stat().st_mode | 0o700)
+        except FileNotFoundError:
+            continue
+        stack.append((path, True))
+        with os.scandir(path) as entries:
+            for entry in entries:
+                checkpoint()
+                item = Path(entry.path)
+                if entry.is_dir(follow_symlinks=False):
+                    stack.append((item, False))
+                    continue
+                try:
+                    item.unlink()
+                except PermissionError:
+                    item.chmod(item.stat().st_mode | 0o600)
+                    item.unlink()
+                except FileNotFoundError:
+                    pass
+                processed += 1
+    if root.exists():
+        # The traversal normally removes the root itself. Reaching this branch
+        # means an external writer raced deletion despite the cache lease.
+        raise CacheCapacityError(
+            f"Cache entry changed while it was being deleted: {root}"
+        )
+
+
+def _quarantine_and_delete(
+    candidate: _CacheCandidate,
+    layout: CacheLayout,
+    *,
+    deadline: float,
+    progress: Callable[[str], None] | None,
+) -> None:
+    path = candidate.path
+    if not path.exists() and not path.is_symlink():
+        return
+    if path.parent == layout.trash:
+        quarantined = path
+    else:
+        allowed_children = {
+            layout.lake_builds,
+            layout.lake_dependencies,
+            layout.temporary,
+        }
+        allowed_bulk = {layout.mathlib_downloads, layout.lake_system}
+        if path.parent not in allowed_children and path not in allowed_bulk:
+            raise CacheLocationError(
+                f"Refusing to delete unmanaged cache entry: {path}"
+            )
+        quarantined = layout.trash / f"gc-{uuid.uuid4().hex}-{path.name}"
+        os.replace(path, quarantined)
+        if path in allowed_bulk:
+            path.mkdir(parents=True, exist_ok=True)
+    _delete_tree_bounded(quarantined, deadline=deadline, progress=progress)
+
+
+def _usage_after_removal(
+    usage: CacheUsage,
+    candidate: _CacheCandidate,
+    layout: CacheLayout,
+) -> CacheUsage:
+    amount = candidate.allocated_bytes
+    changes: dict[str, int] = {
+        "managed_bytes": max(0, usage.managed_bytes - amount),
+        "free_bytes": shutil.disk_usage(layout.root).free,
+    }
+    field = {
+        "depot": "dependency_bytes",
+        "build": "build_bytes",
+        "download": "download_bytes",
+        "lake-system": "lake_system_bytes",
+        "temporary": "temporary_bytes",
+        "trash": "temporary_bytes",
+    }.get(candidate.kind)
+    if field is not None:
+        changes[field] = max(0, getattr(usage, field) - amount)
+    return replace(usage, **changes)
+
+
+def _clear_stale_reservations(layout: CacheLayout, index: CacheIndex) -> None:
+    for reservation in index.reservations():
+        lease = try_cache_lease(layout, reservation.lock_name, exclusive=True)
+        if lease is None:
+            continue
+        try:
+            index.remove_reservation(reservation.identifier)
+        finally:
+            lease.close()
+            lease.path.unlink(missing_ok=True)
+    live_lock_names = {item.lock_name for item in index.reservations()}
+    for lock_path in layout.locks.glob("reservation-*.lease"):
+        lock_name = lock_path.name.removesuffix(".lease")
+        if lock_name in live_lock_names:
+            continue
+        lease = try_cache_lease(layout, lock_name, exclusive=True)
+        if lease is None:
+            continue
+        lease.close()
+        lock_path.unlink(missing_ok=True)
+
+
+def _garbage_collect_cache_locked(
     layout: CacheLayout,
     policy: CachePolicy,
     *,
-    reserve_bytes: int = 0,
-    protected: Sequence[Path] = (),
-    strict: bool = True,
+    reserve_bytes: int,
+    protected: Sequence[Path],
+    strict: bool,
+    timeout: float,
+    progress: Callable[[str], None] | None,
 ) -> CacheGcResult:
-    """Evict inactive LRU entries until both cache and disk limits are safe."""
-    layout.create()
-    protected_paths = {item.absolute() for item in protected}
-    before = cache_usage(layout)
+    deadline = time.monotonic() + timeout
+    if progress is not None:
+        progress("cache GC reconciling coarse cache index")
+    measurements = reconcile_cache_index(
+        layout,
+        deadline=deadline,
+        progress=progress,
+    )
+    index = CacheIndex(layout.index_path)
+    _clear_stale_reservations(layout, index)
+    before = cache_usage(layout, reconcile=False)
     current = before
     removed: list[str] = []
     skipped: list[str] = []
+    protected_paths = {item.absolute() for item in protected}
+    dirty_paths = {entry.path for entry in index.entries() if entry.state == "dirty"}
 
     def safe(usage: CacheUsage) -> bool:
+        requested = reserve_bytes + usage.reserved_bytes
         return (
-            usage.managed_bytes + reserve_bytes <= policy.max_bytes
-            and usage.free_bytes - reserve_bytes >= policy.min_free_bytes
+            (not dirty_paths or usage.reserved_bytes > 0)
+            and usage.managed_bytes + requested <= policy.max_bytes
+            and usage.free_bytes - requested >= policy.min_free_bytes
         )
 
-    if safe(current):
-        return CacheGcResult(before, current, (), ())
+    requested = reserve_bytes + current.reserved_bytes
+    impossible_without_external_space = (
+        requested > policy.max_bytes
+        or current.free_bytes + current.managed_bytes - requested
+        < policy.min_free_bytes
+    )
+    if strict and impossible_without_external_space:
+        raise CacheCapacityError(
+            "Cache safety limits cannot be satisfied even after deleting all "
+            "inactive managed data: "
+            f"managed={current.managed_bytes / _GIB:.1f} GiB, "
+            f"limit={policy.max_gb:.1f} GiB, "
+            f"free={current.free_bytes / _GIB:.1f} GiB, "
+            f"active/requested reservations={requested / _GIB:.1f} GiB, "
+            f"minimum free={policy.min_free_gb:.1f} GiB"
+        )
+
+    if not safe(current) and progress is not None:
+        required = max(
+            0,
+            current.managed_bytes
+            + current.reserved_bytes
+            + reserve_bytes
+            - policy.max_bytes,
+            policy.min_free_bytes
+            + current.reserved_bytes
+            + reserve_bytes
+            - current.free_bytes,
+        )
+        progress(
+            "cache GC required: "
+            f"reclaim at least {required / _GIB:.2f} GiB from coarse entries"
+        )
+
     for candidate in _gc_candidates(layout):
+        if safe(current):
+            break
+        if time.monotonic() >= deadline:
+            raise CacheCapacityError("Cache garbage collection exceeded its time limit")
         if candidate.path.absolute() in protected_paths:
             continue
         lease = try_cache_lease(layout, candidate.lease_name, exclusive=True)
@@ -851,25 +1280,74 @@ def garbage_collect_cache(
             skipped.append(candidate.label)
             continue
         try:
-            _remove_cache_path(candidate.path, layout)
+            if progress is not None:
+                progress(
+                    f"cache GC evicting {candidate.label} "
+                    f"({candidate.allocated_bytes / _GIB:.2f} GiB)"
+                )
+            index.mark_deleting(candidate.path)
+            _quarantine_and_delete(
+                candidate,
+                layout,
+                deadline=deadline,
+                progress=progress,
+            )
+            index.remove_entry(candidate.path)
+            dirty_paths.discard(candidate.path)
             removed.append(candidate.label)
+            current = _usage_after_removal(current, candidate, layout)
         finally:
             lease.close()
-        current = cache_usage(layout)
-        if safe(current):
-            break
 
     if strict and not safe(current):
+        requested = reserve_bytes + current.reserved_bytes
         raise CacheCapacityError(
             "Cache safety limits cannot be satisfied: "
             f"managed={current.managed_bytes / _GIB:.1f} GiB, "
             f"limit={policy.max_gb:.1f} GiB, "
             f"free={current.free_bytes / _GIB:.1f} GiB, "
-            f"required reserve={reserve_bytes / _GIB:.1f} GiB, "
+            f"active/requested reservations={requested / _GIB:.1f} GiB, "
             f"minimum free={policy.min_free_gb:.1f} GiB. "
             "Active cache entries were not evicted."
         )
-    return CacheGcResult(before, current, tuple(removed), tuple(skipped))
+    return CacheGcResult(
+        before,
+        current,
+        tuple(removed),
+        tuple(skipped),
+        recursive_measurements=measurements,
+    )
+
+
+def garbage_collect_cache(
+    layout: CacheLayout,
+    policy: CachePolicy,
+    *,
+    reserve_bytes: int = 0,
+    protected: Sequence[Path] = (),
+    strict: bool = True,
+    timeout: float = DEFAULT_GC_TIMEOUT_SECONDS,
+    progress: Callable[[str], None] | None = None,
+) -> CacheGcResult:
+    """Evict coarse inactive entries without rescanning inside the loop."""
+    layout.create()
+    started = time.monotonic()
+    admission = acquire_cache_lease(
+        layout, "admission", exclusive=True, timeout=timeout
+    )
+    try:
+        remaining = max(0.0, timeout - (time.monotonic() - started))
+        return _garbage_collect_cache_locked(
+            layout,
+            policy,
+            reserve_bytes=reserve_bytes,
+            protected=protected,
+            strict=strict,
+            timeout=remaining,
+            progress=progress,
+        )
+    finally:
+        admission.close()
 
 
 def ensure_cache_capacity(
@@ -878,6 +1356,8 @@ def ensure_cache_capacity(
     *,
     reserve_gb: float,
     protected: Sequence[Path] = (),
+    timeout: float = DEFAULT_GC_TIMEOUT_SECONDS,
+    progress: Callable[[str], None] | None = None,
 ) -> CacheGcResult:
     return garbage_collect_cache(
         layout,
@@ -885,7 +1365,59 @@ def ensure_cache_capacity(
         reserve_bytes=int(reserve_gb * _GIB),
         protected=protected,
         strict=True,
+        timeout=timeout,
+        progress=progress,
     )
+
+
+def reserve_cache_capacity(
+    layout: CacheLayout,
+    policy: CachePolicy,
+    *,
+    reserve_gb: float,
+    protected: Sequence[Path] = (),
+    timeout: float = DEFAULT_GC_TIMEOUT_SECONDS,
+    progress: Callable[[str], None] | None = None,
+) -> tuple[CacheGcResult, CacheReservation]:
+    """Atomically collect space and publish a crash-recoverable reservation."""
+    layout.create()
+    started = time.monotonic()
+    admission = acquire_cache_lease(
+        layout, "admission", exclusive=True, timeout=timeout
+    )
+    reservation_lease: CacheLease | None = None
+    try:
+        remaining = max(0.0, timeout - (time.monotonic() - started))
+        result = _garbage_collect_cache_locked(
+            layout,
+            policy,
+            reserve_bytes=int(reserve_gb * _GIB),
+            protected=protected,
+            strict=True,
+            timeout=remaining,
+            progress=progress,
+        )
+        identifier = uuid.uuid4().hex
+        lock_name = f"reservation-{identifier}"
+        reservation_lease = acquire_cache_lease(
+            layout,
+            lock_name,
+            exclusive=True,
+            timeout=max(0.0, timeout - (time.monotonic() - started)),
+        )
+        index = CacheIndex(layout.index_path)
+        index.add_reservation(identifier, int(reserve_gb * _GIB), lock_name)
+        return result, CacheReservation(index, identifier, reservation_lease)
+    except CacheIndexError as exc:
+        if reservation_lease is not None:
+            reservation_lease.close()
+        raise CacheLocationError(str(exc)) from exc
+    except Exception:
+        if reservation_lease is not None:
+            reservation_lease.close()
+        raise
+    finally:
+        admission.close()
 
 
 @contextmanager
@@ -897,28 +1429,97 @@ def managed_project_session(
     attach: bool,
     reserve_gb: float,
     lease_timeout: float = 600.0,
+    gc_timeout: float = DEFAULT_GC_TIMEOUT_SECONDS,
+    progress: Callable[[str], None] | None = None,
 ) -> Iterator[Path]:
     """Protect global caches and one project build for the complete operation."""
     target = project_cache_target(project, layout)
-    ensure_cache_capacity(layout, policy, reserve_gb=reserve_gb, protected=(target,))
-    global_lease = acquire_cache_lease(
-        layout, "global-cache", exclusive=False, timeout=lease_timeout
+    _gc_result, reservation = reserve_cache_capacity(
+        layout,
+        policy,
+        reserve_gb=reserve_gb,
+        protected=(target,),
+        timeout=gc_timeout,
+        progress=progress,
     )
-    build_lease = acquire_cache_lease(
-        layout, f"build-{target.name}", exclusive=False, timeout=lease_timeout
-    )
+    global_lease: CacheLease | None = None
+    build_lease: CacheLease | None = None
     try:
+        global_lease = acquire_cache_lease(
+            layout, "global-cache", exclusive=False, timeout=lease_timeout
+        )
+        build_lease = acquire_cache_lease(
+            layout, f"build-{target.name}", exclusive=False, timeout=lease_timeout
+        )
         managed = (
             attach_project_cache(project, layout)
             if attach
             else ensure_project_cache_managed(project, layout)
         )
+        index = CacheIndex(layout.index_path)
+        try:
+            index.mark_dirty(
+                target,
+                kind="build",
+                signature=_entry_signature(target),
+                lease_name=f"build-{target.name}",
+            )
+            for path, kind in (
+                (layout.mathlib_downloads, "download"),
+                (layout.lake_system, "lake-system"),
+            ):
+                index.mark_dirty(
+                    path,
+                    kind=kind,
+                    signature=_entry_signature(path),
+                    lease_name="global-cache",
+                )
+        except CacheIndexError as exc:
+            raise CacheLocationError(str(exc)) from exc
         os.utime(managed, None)
         yield managed
     finally:
-        build_lease.close()
-        global_lease.close()
-        garbage_collect_cache(layout, policy, strict=False)
+        try:
+            refresh_cache_index_entry(
+                layout,
+                target,
+                kind="build",
+                lease_name=f"build-{target.name}",
+                deadline=time.monotonic() + gc_timeout,
+                progress=progress,
+            )
+            for path, kind in (
+                (layout.mathlib_downloads, "download"),
+                (layout.lake_system, "lake-system"),
+            ):
+                if _direct_children(path):
+                    refresh_cache_index_entry(
+                        layout,
+                        path,
+                        kind=kind,
+                        lease_name="global-cache",
+                        deadline=time.monotonic() + gc_timeout,
+                        progress=progress,
+                    )
+        finally:
+            if build_lease is not None:
+                build_lease.close()
+            if global_lease is not None:
+                global_lease.close()
+            reservation.close()
+        try:
+            garbage_collect_cache(
+                layout,
+                policy,
+                strict=False,
+                timeout=gc_timeout,
+                progress=progress,
+            )
+        except CacheLocationError as exc:
+            # Admission already protected the operation. Post-run GC is a
+            # maintenance optimization and must not erase a successful result.
+            if progress is not None:
+                progress(f"WARNING: post-run cache GC failed: {exc}")
 
 
 def dependency_cache_key(
@@ -926,24 +1527,51 @@ def dependency_cache_key(
     *,
     env: Mapping[str, str] | None = None,
 ) -> str:
-    """Hash dependency configuration, toolchain, platform, and compiler identity."""
+    """Hash dependency declarations, toolchain, platform, and compiler identity."""
     root = Path(project).expanduser().resolve()
-    files: list[dict[str, str]] = []
-    for name in ("lean-toolchain", "lakefile.lean", "lakefile.toml"):
-        path = root / name
-        if path.is_file():
-            files.append(
-                {
-                    "name": name,
-                    "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-                }
-            )
-    if not any(item["name"].startswith("lakefile.") for item in files):
+    toolchain = root / "lean-toolchain"
+    lakefile_lean = root / "lakefile.lean"
+    lakefile_toml = root / "lakefile.toml"
+    lakefile = lakefile_lean if lakefile_lean.is_file() else lakefile_toml
+    if not lakefile.is_file():
         raise CacheLocationError(f"Lean project has no lakefile: {root}")
+
+    contents = lakefile.read_text(encoding="utf-8")
+    requirements: list[dict[str, str]] = []
+    if lakefile == lakefile_lean:
+        pattern = re.compile(
+            r"(?ms)^\s*require\s+(?P<name>«[^»]+»|[A-Za-z0-9_.-]+)\s+"
+            r"from\s+git\s*\"(?P<url>[^\"]+)\"\s*@\s*\"(?P<rev>[^\"]+)\""
+        )
+        requirements = [
+            {
+                "name": match.group("name").strip("«»"),
+                "url": match.group("url"),
+                "revision": match.group("rev"),
+            }
+            for match in pattern.finditer(contents)
+        ]
+    dependency_configuration: object
+    if requirements:
+        dependency_configuration = sorted(
+            requirements, key=lambda item: (item["name"], item["url"], item["revision"])
+        )
+    else:
+        # Unknown Lake syntax fails conservatively: project-only changes may
+        # reduce reuse, but can never alias distinct dependency configurations.
+        dependency_configuration = {
+            "file": lakefile.name,
+            "sha256": hashlib.sha256(lakefile.read_bytes()).hexdigest(),
+        }
     source = os.environ if env is None else env
     identity = {
         "schema": _DEPOT_SCHEMA,
-        "files": files,
+        "lean_toolchain": (
+            hashlib.sha256(toolchain.read_bytes()).hexdigest()
+            if toolchain.is_file()
+            else ""
+        ),
+        "dependencies": dependency_configuration,
         "system": platform.system(),
         "machine": platform.machine(),
         "lean_cc": source.get("LEAN_CC", ""),
@@ -1028,7 +1656,10 @@ class DependencyDepotClaim:
         else:
             link.parent.mkdir(parents=True, exist_ok=True)
             link.symlink_to(self.target / "packages", target_is_directory=True)
-        os.utime(self.target, None)
+        try:
+            CacheIndex(self.layout.index_path).touch_entry(self.target)
+        except CacheIndexError as exc:
+            raise CacheLocationError(str(exc)) from exc
 
     def promote(self) -> None:
         if self.ready:
@@ -1088,6 +1719,12 @@ class DependencyDepotClaim:
         _seal_tree_read_only(self.target / "packages")
         (self.target / "READY").write_text("ready\n", encoding="utf-8")
         os.utime(self.target, None)
+        refresh_cache_index_entry(
+            self.layout,
+            self.target,
+            kind="depot",
+            lease_name=f"depot-{self.target.name}",
+        )
         self.ready = True
         self.lease.downgrade()
 

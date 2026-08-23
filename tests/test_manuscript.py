@@ -238,7 +238,10 @@ def test_cli_exposes_cache_limits_status_gc_and_prepare():
     assert init.max_gb == 12
     assert init.min_free_gb == 20
     assert build_parser().parse_args(["cache", "status"]).cache_command == "status"
-    assert build_parser().parse_args(["cache", "gc"]).cache_command == "gc"
+    gc = build_parser().parse_args(["cache", "gc", "--gc-timeout", "30"])
+    assert gc.cache_command == "gc"
+    assert gc.gc_timeout == 30
     prepare = build_parser().parse_args(["cache", "prepare", "--project", "/tmp/toy"])
     assert prepare.project == "/tmp/toy"
     assert prepare.setup_timeout == 1800.0
+    assert prepare.gc_timeout == 900.0
