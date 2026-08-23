@@ -1,7 +1,11 @@
 from types import SimpleNamespace
 
 from repoprover_codex.backend import CodexToolCall
-from repoprover_codex.cli import _target_declaration, _verify_repoprover_proof
+from repoprover_codex.cli import (
+    _run_status_is_terminal,
+    _target_declaration,
+    _verify_repoprover_proof,
+)
 
 
 class FakeAgent:
@@ -73,3 +77,14 @@ def test_failed_lean_check_is_tool_failure(tmp_path):
         FakeAgent(), wrapped_with(failed), lean_file, "toy_theorem"
     )
     assert outcome == "tool_failure"
+
+
+def test_terminal_run_status_cannot_be_replaced_by_cleanup_progress(tmp_path):
+    status = tmp_path / "RUN_STATUS.json"
+    assert not _run_status_is_terminal(status)
+
+    status.write_text('{"outcome": "running", "phase": "codex_turn"}')
+    assert not _run_status_is_terminal(status)
+
+    status.write_text('{"outcome": "unverified", "exit_code": 4}')
+    assert _run_status_is_terminal(status)

@@ -54,7 +54,7 @@ All locations are outside Dropbox.
 
 ## Automated suite
 
-`python -m pytest -q` completed with **88 passed**. The supported installer ran
+`python -m pytest -q` completed with **89 passed**. The supported installer ran
 the same suite after reinstalling version 0.4.0 with uv and after compiling and
 executing a native test program.
 
@@ -70,6 +70,9 @@ The cache-focused coverage now includes:
 - dirty-entry crash recovery and version-1 index migration;
 - interrupted atomic-quarantine recovery; and
 - hard deadlines for accounting and deletion.
+
+The run-lifecycle coverage also verifies that deferred post-run cache progress
+cannot overwrite a terminal `RUN_STATUS.json` outcome.
 
 The existing suite continues to cover cache-location/Dropbox enforcement,
 compiler checks, dependency publication, concurrent warm claims, isolated root
@@ -127,7 +130,7 @@ and `trash/` empty.
 
 `scripts/install-dev.sh` used uv and Python 3.13.15, upgraded the external
 editable installation from 0.3.0 to 0.4.0, compiled and executed a C program,
-selected `/usr/bin/clang`, initialized the 16/25 GiB policy, and passed all 88
+selected `/usr/bin/clang`, initialized the 16/25 GiB policy, and passed all 89
 tests. The subsequent cache status check migrated the accounting index to
 schema 2.
 

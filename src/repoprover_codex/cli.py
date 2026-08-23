@@ -58,6 +58,17 @@ def _format_gib(value: int) -> str:
     return f"{value / (1024**3):.2f} GiB"
 
 
+def _run_status_is_terminal(path: Path) -> bool:
+    """Prevent deferred cleanup progress from replacing a finished outcome."""
+    if not path.is_file():
+        return False
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return payload.get("outcome") not in {None, "running"}
+
+
 def _write_manuscript_failure(
     paths,
     *,
@@ -669,6 +680,9 @@ def cmd_manuscript_run(args) -> int:
     print(f"LaTeX sources: {len(paths.latex_sources)}")
 
     def record_phase(phase: str, detail: str) -> None:
+        status_path = paths.output / "RUN_STATUS.json"
+        if _run_status_is_terminal(status_path):
+            return
         payload = {
             "schema_version": 1,
             "command": "manuscript-run",
@@ -679,7 +693,7 @@ def cmd_manuscript_run(args) -> int:
             "output": str(paths.output),
             "workspace": str(paths.workspace),
         }
-        write_json(paths.output / "RUN_STATUS.json", payload)
+        write_json(status_path, payload)
 
     def cache_progress(message: str) -> None:
         print(message, file=sys.stderr)
