@@ -1,31 +1,25 @@
 # Start here
 
-This ZIP contains the complete internal `repoprover-codex` project.
+Choose the guide that matches what you want to do:
 
-On the Linux server or Mac with Codex CLI already installed:
+- Install or upgrade: [docs/INSTALLATION.md](docs/INSTALLATION.md)
+- Verify a manuscript: [docs/MANUSCRIPT_RUNS.md](docs/MANUSCRIPT_RUNS.md)
+- Understand or clean disk usage:
+  [docs/CACHE_AND_STORAGE.md](docs/CACHE_AND_STORAGE.md)
+- Develop and test the bridge: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)
 
-```bash
-unzip repoprover-codex-handoff.zip
-cd repoprover-codex
-codex
-```
-
-Then tell Codex:
-
-> Read `CODEX_HANDOFF.md` completely. Continue the implementation and execute the test plan autonomously. Fix problems you find. Do not open or prepare an upstream RepoProver pull request.
-
-The same handoff explicitly covers Linux and macOS local-mode testing.
-
-For the installed high-level manuscript workflow, place the requested work in a
-UTF-8 file and run:
+The shortest installed manuscript command is:
 
 ```bash
 repoprover-codex manuscript-run \
-  --manuscript /absolute/path/to/latex-source \
-  --task-file /absolute/path/to/task.md \
-  --output "$HOME/repoprover-runs/run-001" \
-  --model gpt-5.6-luna \
-  --effort low
+  --manuscript "$MANUSCRIPT" \
+  --task-file "$TASK" \
+  --output "$OUTPUT" \
+  --model gpt-5.6-sol \
+  --effort high \
+  --turn-timeout 86400
 ```
 
-The output directory must be new or empty and must be outside Dropbox.
+The manuscript is read-only. The output must be new or empty and outside
+Dropbox. Run `repoprover-codex cache status` before a large job if you want to
+see current disk headroom.

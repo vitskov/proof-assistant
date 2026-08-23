@@ -1,15 +1,22 @@
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
+import platform
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
+import uuid
+from collections.abc import Iterator, Mapping, MutableMapping, Sequence
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Mapping, MutableMapping, Sequence
+from typing import IO, Self
 
 from .environment import (
     CompilerCheck,
@@ -18,9 +25,16 @@ from .environment import (
     select_native_compiler,
 )
 
-
 CACHE_HOME_ENV = "REPOPROVER_CODEX_CACHE_HOME"
-_CONFIG_SCHEMA = 1
+CACHE_MAX_GB_ENV = "REPOPROVER_CODEX_CACHE_MAX_GB"
+MIN_FREE_GB_ENV = "REPOPROVER_CODEX_MIN_FREE_GB"
+DEFAULT_CACHE_MAX_GB = 16.0
+DEFAULT_MIN_FREE_GB = 25.0
+COLD_DEPOT_RESERVE_GB = 10.0
+WARM_PROJECT_RESERVE_GB = 1.0
+_GIB = 1024**3
+_CONFIG_SCHEMA = 2
+_DEPOT_SCHEMA = 1
 _REMOTE_FILESYSTEM_MARKERS = (
     "remote:",
     "nfs",
@@ -38,6 +52,10 @@ class CacheLocationError(RuntimeError):
     """Raised when a cache root violates the local-storage policy."""
 
 
+class CacheCapacityError(CacheLocationError):
+    """Raised before work when cache limits cannot be satisfied safely."""
+
+
 @dataclass(frozen=True)
 class CacheConfig:
     schema_version: int
@@ -46,6 +64,66 @@ class CacheConfig:
     lean_cc: str
     lean_compiler: bool
     compiler_fallback_used: bool
+    max_bytes: int
+    min_free_bytes: int
+
+
+@dataclass(frozen=True)
+class CachePolicy:
+    max_bytes: int
+    min_free_bytes: int
+
+    @property
+    def max_gb(self) -> float:
+        return self.max_bytes / _GIB
+
+    @property
+    def min_free_gb(self) -> float:
+        return self.min_free_bytes / _GIB
+
+
+@dataclass(frozen=True)
+class CacheUsage:
+    managed_bytes: int
+    free_bytes: int
+    dependency_bytes: int
+    build_bytes: int
+    download_bytes: int
+    lake_system_bytes: int
+    temporary_bytes: int
+
+
+@dataclass(frozen=True)
+class CacheGcResult:
+    before: CacheUsage
+    after: CacheUsage
+    removed: tuple[str, ...]
+    skipped_active: tuple[str, ...]
+
+
+@dataclass
+class CacheLease:
+    """A process-scoped advisory lock released automatically on process death."""
+
+    path: Path
+    handle: IO[str]
+    exclusive: bool
+
+    def downgrade(self) -> None:
+        if self.exclusive:
+            fcntl.flock(self.handle.fileno(), fcntl.LOCK_SH)
+            self.exclusive = False
+
+    def close(self) -> None:
+        if not self.handle.closed:
+            fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
+            self.handle.close()
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        self.close()
 
 
 @dataclass(frozen=True)
@@ -114,7 +192,7 @@ class CacheLayout:
         user_home: str | Path | None = None,
         dropbox_roots: Sequence[str | Path] | None = None,
         filesystem_type: str | None = None,
-    ) -> "CacheLayout":
+    ) -> CacheLayout:
         home = Path(user_home).expanduser() if user_home else Path.home()
         configured = cache_home or os.environ.get(CACHE_HOME_ENV)
         requested = (
@@ -173,6 +251,13 @@ class CacheLayout:
             return None
         try:
             raw = json.loads(self.config_path.read_text(encoding="utf-8"))
+            if raw.get("schema_version") == 1:
+                raw = {
+                    **raw,
+                    "schema_version": _CONFIG_SCHEMA,
+                    "max_bytes": int(DEFAULT_CACHE_MAX_GB * _GIB),
+                    "min_free_bytes": int(DEFAULT_MIN_FREE_GB * _GIB),
+                }
             config = CacheConfig(**raw)
         except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise CacheLocationError(
@@ -188,7 +273,15 @@ class CacheLayout:
             )
         return config
 
-    def record_compiler(self, check: CompilerCheck) -> CacheConfig:
+    def record_compiler(
+        self,
+        check: CompilerCheck,
+        *,
+        policy: CachePolicy | None = None,
+    ) -> CacheConfig:
+        if policy is None:
+            existing = self.load_config()
+            policy = cache_policy(existing)
         config = CacheConfig(
             schema_version=_CONFIG_SCHEMA,
             cache_root=str(self.root),
@@ -196,6 +289,8 @@ class CacheLayout:
             lean_cc=check.executable,
             lean_compiler=check.lean_compiler,
             compiler_fallback_used=check.fallback_used,
+            max_bytes=policy.max_bytes,
+            min_free_bytes=policy.min_free_bytes,
         )
         self.root.mkdir(parents=True, exist_ok=True)
         temporary_path: Path | None = None
@@ -218,6 +313,47 @@ class CacheLayout:
             if temporary_path is not None:
                 temporary_path.unlink(missing_ok=True)
         return config
+
+
+def _positive_gb(value: str | float, name: str) -> int:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise CacheLocationError(f"{name} must be a positive number of GiB") from exc
+    if parsed <= 0:
+        raise CacheLocationError(f"{name} must be a positive number of GiB")
+    return int(parsed * _GIB)
+
+
+def cache_policy(
+    config: CacheConfig | None = None,
+    *,
+    env: Mapping[str, str] | None = None,
+    max_gb: float | None = None,
+    min_free_gb: float | None = None,
+) -> CachePolicy:
+    """Resolve stored limits with explicit/environment overrides."""
+    source = os.environ if env is None else env
+    stored_max = config.max_bytes if config else int(DEFAULT_CACHE_MAX_GB * _GIB)
+    stored_free = config.min_free_bytes if config else int(DEFAULT_MIN_FREE_GB * _GIB)
+    max_value: str | float | None = max_gb
+    free_value: str | float | None = min_free_gb
+    if max_value is None:
+        max_value = source.get(CACHE_MAX_GB_ENV)
+    if free_value is None:
+        free_value = source.get(MIN_FREE_GB_ENV)
+    return CachePolicy(
+        max_bytes=(
+            _positive_gb(max_value, CACHE_MAX_GB_ENV)
+            if max_value is not None
+            else stored_max
+        ),
+        min_free_bytes=(
+            _positive_gb(free_value, MIN_FREE_GB_ENV)
+            if free_value is not None
+            else stored_free
+        ),
+    )
 
 
 def _is_within(path: Path, parent: Path) -> bool:
@@ -267,18 +403,14 @@ def _macos_filesystem_type(path: Path, mount_table: str) -> str:
             continue
         _device, mounted = line.split(" on ", 1)
         mount_text, option_text = mounted.rsplit(" (", 1)
-        mount_point = Path(
-            mount_text.replace("\\040", " ").replace("\\011", "\t")
-        )
+        mount_point = Path(mount_text.replace("\\040", " ").replace("\\011", "\t"))
         try:
             within = _is_within(path, mount_point)
         except ValueError:
             within = False
         if not within:
             continue
-        option_items = [
-            item.strip().casefold() for item in option_text[:-1].split(",")
-        ]
+        option_items = [item.strip().casefold() for item in option_text[:-1].split(",")]
         options = set(option_items)
         filesystem = option_items[0] if option_items else ""
         if filesystem:
@@ -337,9 +469,7 @@ def validate_cache_root(
 ) -> tuple[Path, str]:
     """Return a canonical cache root after enforcing home/local/Dropbox rules."""
     home = (
-        Path(user_home).expanduser().resolve()
-        if user_home
-        else Path.home().resolve()
+        Path(user_home).expanduser().resolve() if user_home else Path.home().resolve()
     )
     raw = Path(requested).expanduser()
     if not raw.is_absolute():
@@ -373,13 +503,18 @@ def initialize_cache(
     layout: CacheLayout,
     *,
     env: Mapping[str, str] | None = None,
+    max_gb: float | None = None,
+    min_free_gb: float | None = None,
 ) -> tuple[CacheConfig, CompilerCheck]:
     """Create the layout and prove the selected native compiler works."""
     layout.create()
     runtime = layout.runtime_environment(env)
     ensure_lean_on_path(runtime)
     check = select_native_compiler(runtime)
-    config = layout.record_compiler(check)
+    policy = cache_policy(
+        layout.load_config(), env=env, max_gb=max_gb, min_free_gb=min_free_gb
+    )
+    config = layout.record_compiler(check, policy=policy)
     return config, check
 
 
@@ -393,14 +528,10 @@ def project_cache_target(project: str | Path, layout: CacheLayout) -> Path:
     return layout.lake_builds / f"{safe_name or 'project'}-{digest}"
 
 
-def ensure_project_outside_dropbox(
-    project: str | Path, layout: CacheLayout
-) -> Path:
+def ensure_project_outside_dropbox(project: str | Path, layout: CacheLayout) -> Path:
     """Return a canonical project path after enforcing the Dropbox policy."""
     root = Path(project).expanduser().resolve()
-    named_dropbox = any(
-        part.casefold().startswith("dropbox") for part in root.parts
-    )
+    named_dropbox = any(part.casefold().startswith("dropbox") for part in root.parts)
     if named_dropbox or any(
         _is_within(root, dropbox) for dropbox in layout.dropbox_roots
     ):
@@ -500,6 +631,7 @@ def attach_project_cache(project: str | Path, layout: CacheLayout) -> Path:
                     "Existing .lake symlink points outside the managed cache: "
                     f"{resolved}"
                 )
+            resolved.mkdir(parents=True, exist_ok=True)
             return resolved
         if lake.exists() and not lake.is_dir():
             raise CacheLocationError(f"Expected a .lake directory, found: {lake}")
@@ -524,3 +656,510 @@ def attach_project_cache(project: str | Path, layout: CacheLayout) -> Path:
         return ensure_project_cache_managed(root, layout)
     finally:
         lock.rmdir()
+
+
+def _allocated_size(root: Path) -> int:
+    """Return allocated bytes without following symlinks."""
+    try:
+        initial = root.lstat()
+    except FileNotFoundError:
+        return 0
+    total = initial.st_blocks * 512
+    if root.is_symlink() or not root.is_dir():
+        return total
+    for directory, directories, files in os.walk(root, followlinks=False):
+        base = Path(directory)
+        for name in directories + files:
+            item = base / name
+            try:
+                total += item.lstat().st_blocks * 512
+            except FileNotFoundError:
+                continue
+    return total
+
+
+def cache_usage(layout: CacheLayout) -> CacheUsage:
+    dependency = _allocated_size(layout.lake_dependencies)
+    builds = _allocated_size(layout.lake_builds)
+    downloads = _allocated_size(layout.mathlib_downloads)
+    lake_system = _allocated_size(layout.lake_system)
+    temporary = _allocated_size(layout.temporary)
+    return CacheUsage(
+        managed_bytes=dependency + builds + downloads + lake_system + temporary,
+        free_bytes=shutil.disk_usage(layout.root).free,
+        dependency_bytes=dependency,
+        build_bytes=builds,
+        download_bytes=downloads,
+        lake_system_bytes=lake_system,
+        temporary_bytes=temporary,
+    )
+
+
+def _lease_name(value: str) -> str:
+    safe = "".join(
+        character if character.isalnum() or character in "-_" else "-"
+        for character in value
+    ).strip("-")
+    if not safe:
+        raise CacheLocationError("Cache lease name must not be empty")
+    return safe[:180]
+
+
+def try_cache_lease(
+    layout: CacheLayout,
+    name: str,
+    *,
+    exclusive: bool,
+) -> CacheLease | None:
+    layout.locks.mkdir(parents=True, exist_ok=True)
+    lock_path = layout.locks / f"{_lease_name(name)}.lease"
+    handle = lock_path.open("a+", encoding="utf-8")
+    mode = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+    try:
+        fcntl.flock(handle.fileno(), mode | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.close()
+        return None
+    return CacheLease(lock_path, handle, exclusive)
+
+
+def acquire_cache_lease(
+    layout: CacheLayout,
+    name: str,
+    *,
+    exclusive: bool,
+    timeout: float = 600.0,
+) -> CacheLease:
+    deadline = time.monotonic() + timeout
+    while True:
+        lease = try_cache_lease(layout, name, exclusive=exclusive)
+        if lease is not None:
+            return lease
+        if time.monotonic() >= deadline:
+            raise CacheLocationError(
+                f"Timed out waiting for active cache lease: {_lease_name(name)}"
+            )
+        time.sleep(0.1)
+
+
+@dataclass(frozen=True)
+class _CacheCandidate:
+    path: Path
+    lease_name: str
+    label: str
+    modified: float
+
+
+def _direct_children(parent: Path) -> list[Path]:
+    try:
+        return list(parent.iterdir())
+    except FileNotFoundError:
+        return []
+
+
+def _gc_candidates(layout: CacheLayout) -> list[_CacheCandidate]:
+    candidates: list[_CacheCandidate] = []
+    groups = (
+        (layout.lake_builds, "build", False),
+        (layout.lake_dependencies, "depot", False),
+        (layout.mathlib_downloads, "download", True),
+        (layout.lake_system, "lake-system", True),
+        (layout.temporary, "temporary", True),
+    )
+    for parent, kind, global_lease in groups:
+        for item in _direct_children(parent):
+            try:
+                modified = item.lstat().st_mtime
+            except FileNotFoundError:
+                continue
+            lease_name = (
+                "global-cache"
+                if global_lease or (kind == "depot" and item.name.startswith("."))
+                else f"{kind}-{item.name}"
+            )
+            candidates.append(
+                _CacheCandidate(item, lease_name, f"{kind}:{item.name}", modified)
+            )
+    return sorted(candidates, key=lambda item: (item.modified, item.label))
+
+
+def _make_tree_writable(root: Path) -> None:
+    if root.is_symlink() or not root.exists():
+        return
+    for directory, directories, files in os.walk(root):
+        for name in directories:
+            item = Path(directory) / name
+            try:
+                item.chmod(item.stat().st_mode | 0o700)
+            except FileNotFoundError:
+                pass
+        for name in files:
+            item = Path(directory) / name
+            try:
+                item.chmod(item.stat().st_mode | 0o600)
+            except FileNotFoundError:
+                pass
+    root.chmod(root.stat().st_mode | 0o700)
+
+
+def _remove_cache_path(path: Path, layout: CacheLayout) -> None:
+    if path.parent not in {
+        layout.lake_builds,
+        layout.lake_dependencies,
+        layout.mathlib_downloads,
+        layout.lake_system,
+        layout.temporary,
+    }:
+        raise CacheLocationError(f"Refusing to remove unmanaged cache path: {path}")
+    if path.is_symlink() or path.is_file():
+        path.unlink(missing_ok=True)
+        return
+    if path.exists():
+        _make_tree_writable(path)
+        shutil.rmtree(path)
+
+
+def garbage_collect_cache(
+    layout: CacheLayout,
+    policy: CachePolicy,
+    *,
+    reserve_bytes: int = 0,
+    protected: Sequence[Path] = (),
+    strict: bool = True,
+) -> CacheGcResult:
+    """Evict inactive LRU entries until both cache and disk limits are safe."""
+    layout.create()
+    protected_paths = {item.absolute() for item in protected}
+    before = cache_usage(layout)
+    current = before
+    removed: list[str] = []
+    skipped: list[str] = []
+
+    def safe(usage: CacheUsage) -> bool:
+        return (
+            usage.managed_bytes + reserve_bytes <= policy.max_bytes
+            and usage.free_bytes - reserve_bytes >= policy.min_free_bytes
+        )
+
+    if safe(current):
+        return CacheGcResult(before, current, (), ())
+    for candidate in _gc_candidates(layout):
+        if candidate.path.absolute() in protected_paths:
+            continue
+        lease = try_cache_lease(layout, candidate.lease_name, exclusive=True)
+        if lease is None:
+            skipped.append(candidate.label)
+            continue
+        try:
+            _remove_cache_path(candidate.path, layout)
+            removed.append(candidate.label)
+        finally:
+            lease.close()
+        current = cache_usage(layout)
+        if safe(current):
+            break
+
+    if strict and not safe(current):
+        raise CacheCapacityError(
+            "Cache safety limits cannot be satisfied: "
+            f"managed={current.managed_bytes / _GIB:.1f} GiB, "
+            f"limit={policy.max_gb:.1f} GiB, "
+            f"free={current.free_bytes / _GIB:.1f} GiB, "
+            f"required reserve={reserve_bytes / _GIB:.1f} GiB, "
+            f"minimum free={policy.min_free_gb:.1f} GiB. "
+            "Active cache entries were not evicted."
+        )
+    return CacheGcResult(before, current, tuple(removed), tuple(skipped))
+
+
+def ensure_cache_capacity(
+    layout: CacheLayout,
+    policy: CachePolicy,
+    *,
+    reserve_gb: float,
+    protected: Sequence[Path] = (),
+) -> CacheGcResult:
+    return garbage_collect_cache(
+        layout,
+        policy,
+        reserve_bytes=int(reserve_gb * _GIB),
+        protected=protected,
+        strict=True,
+    )
+
+
+@contextmanager
+def managed_project_session(
+    project: str | Path,
+    layout: CacheLayout,
+    policy: CachePolicy,
+    *,
+    attach: bool,
+    reserve_gb: float,
+    lease_timeout: float = 600.0,
+) -> Iterator[Path]:
+    """Protect global caches and one project build for the complete operation."""
+    target = project_cache_target(project, layout)
+    ensure_cache_capacity(layout, policy, reserve_gb=reserve_gb, protected=(target,))
+    global_lease = acquire_cache_lease(
+        layout, "global-cache", exclusive=False, timeout=lease_timeout
+    )
+    build_lease = acquire_cache_lease(
+        layout, f"build-{target.name}", exclusive=False, timeout=lease_timeout
+    )
+    try:
+        managed = (
+            attach_project_cache(project, layout)
+            if attach
+            else ensure_project_cache_managed(project, layout)
+        )
+        os.utime(managed, None)
+        yield managed
+    finally:
+        build_lease.close()
+        global_lease.close()
+        garbage_collect_cache(layout, policy, strict=False)
+
+
+def dependency_cache_key(
+    project: str | Path,
+    *,
+    env: Mapping[str, str] | None = None,
+) -> str:
+    """Hash dependency configuration, toolchain, platform, and compiler identity."""
+    root = Path(project).expanduser().resolve()
+    files: list[dict[str, str]] = []
+    for name in ("lean-toolchain", "lakefile.lean", "lakefile.toml"):
+        path = root / name
+        if path.is_file():
+            files.append(
+                {
+                    "name": name,
+                    "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                }
+            )
+    if not any(item["name"].startswith("lakefile.") for item in files):
+        raise CacheLocationError(f"Lean project has no lakefile: {root}")
+    source = os.environ if env is None else env
+    identity = {
+        "schema": _DEPOT_SCHEMA,
+        "files": files,
+        "system": platform.system(),
+        "machine": platform.machine(),
+        "lean_cc": source.get("LEAN_CC", ""),
+    }
+    encoded = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()[:24]
+
+
+def dependency_depot_target(layout: CacheLayout, key: str) -> Path:
+    if not key or any(character not in "0123456789abcdef" for character in key):
+        raise CacheLocationError(f"Invalid dependency cache key: {key!r}")
+    return layout.lake_dependencies / f"deps-{key}"
+
+
+def dependency_depot_ready(target: Path) -> bool:
+    return (
+        (target / "READY").is_file()
+        and (target / "packages").is_dir()
+        and (target / "lake-manifest.json").is_file()
+    )
+
+
+def _write_json_atomic(path: Path, payload: object) -> None:
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    temporary.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    os.replace(temporary, path)
+
+
+def _seal_tree_read_only(root: Path) -> None:
+    for directory, directories, files in os.walk(root):
+        for name in files:
+            item = Path(directory) / name
+            item.chmod(item.stat().st_mode & ~0o222)
+        for name in directories:
+            item = Path(directory) / name
+            item.chmod(item.stat().st_mode & ~0o222)
+    root.chmod(root.stat().st_mode & ~0o222)
+
+
+@dataclass
+class DependencyDepotClaim:
+    project: Path
+    layout: CacheLayout
+    key: str
+    target: Path
+    lease: CacheLease
+    ready: bool
+    promoted: bool = False
+
+    @property
+    def packages_link(self) -> Path:
+        return self.project / ".lake" / "packages"
+
+    @property
+    def project_manifest(self) -> Path:
+        return self.project / "lake-manifest.json"
+
+    def _attach_ready(self) -> None:
+        manifest = self.target / "lake-manifest.json"
+        if self.project_manifest.exists():
+            if self.project_manifest.read_bytes() != manifest.read_bytes():
+                raise CacheLocationError(
+                    "Project manifest differs from the matching dependency depot"
+                )
+        else:
+            shutil.copy2(manifest, self.project_manifest)
+        link = self.packages_link
+        if link.is_symlink():
+            if link.resolve() != (self.target / "packages").resolve():
+                raise CacheLocationError(
+                    f"Existing packages symlink points outside its depot: {link}"
+                )
+        elif link.exists():
+            if any(link.iterdir()):
+                raise CacheLocationError(
+                    f"Refusing to replace a nonempty project packages directory: {link}"
+                )
+            link.rmdir()
+            link.symlink_to(self.target / "packages", target_is_directory=True)
+        else:
+            link.parent.mkdir(parents=True, exist_ok=True)
+            link.symlink_to(self.target / "packages", target_is_directory=True)
+        os.utime(self.target, None)
+
+    def promote(self) -> None:
+        if self.ready:
+            return
+        packages = self.packages_link
+        if packages.is_symlink() or not packages.is_dir():
+            raise CacheLocationError(
+                f"Lake did not materialize a local packages directory: {packages}"
+            )
+        if not self.project_manifest.is_file():
+            raise CacheLocationError("lake update did not create lake-manifest.json")
+        staging = self.layout.lake_dependencies / (
+            f".{self.target.name}.staging-{os.getpid()}-{uuid.uuid4().hex}"
+        )
+        staging.mkdir()
+        try:
+            shutil.move(str(packages), str(staging / "packages"))
+            shutil.copy2(self.project_manifest, staging / "lake-manifest.json")
+            _write_json_atomic(
+                staging / "metadata.json",
+                {
+                    "schema_version": _DEPOT_SCHEMA,
+                    "key": self.key,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "platform": platform.system(),
+                    "architecture": platform.machine(),
+                    "manifest_sha256": hashlib.sha256(
+                        self.project_manifest.read_bytes()
+                    ).hexdigest(),
+                },
+            )
+            os.replace(staging, self.target)
+            packages.symlink_to(self.target / "packages", target_is_directory=True)
+            self.promoted = True
+        except Exception:
+            if packages.is_symlink():
+                packages.unlink()
+            source = (
+                self.target / "packages"
+                if (self.target / "packages").exists()
+                else staging / "packages"
+            )
+            if source.exists() and not packages.exists():
+                _make_tree_writable(source)
+                shutil.move(str(source), str(packages))
+            if self.target.exists():
+                _remove_cache_path(self.target, self.layout)
+            if staging.exists():
+                _remove_cache_path(staging, self.layout)
+            raise
+
+    def commit(self) -> None:
+        if self.ready:
+            return
+        if not self.promoted:
+            raise CacheLocationError("Dependency depot has not been promoted")
+        _seal_tree_read_only(self.target / "packages")
+        (self.target / "READY").write_text("ready\n", encoding="utf-8")
+        os.utime(self.target, None)
+        self.ready = True
+        self.lease.downgrade()
+
+    def rollback(self) -> None:
+        if self.ready or not self.promoted:
+            return
+        packages = self.packages_link
+        if packages.is_symlink():
+            packages.unlink()
+        source = self.target / "packages"
+        if source.exists():
+            _make_tree_writable(source)
+            shutil.move(str(source), str(packages))
+        if self.target.exists():
+            _remove_cache_path(self.target, self.layout)
+        self.promoted = False
+
+    def close(self) -> None:
+        if not self.ready:
+            self.rollback()
+        self.lease.close()
+
+
+def claim_dependency_depot(
+    project: str | Path,
+    layout: CacheLayout,
+    *,
+    env: Mapping[str, str] | None = None,
+    timeout: float = 600.0,
+) -> DependencyDepotClaim:
+    root = Path(project).expanduser().resolve()
+    key = dependency_cache_key(root, env=env)
+    target = dependency_depot_target(layout, key)
+    lease_name = f"depot-{target.name}"
+
+    # Ready depots are immutable, so compatible jobs can safely share them.
+    # A shared lease also waits for an active builder to publish its atomic
+    # READY marker. If no depot exists, callers race non-blockingly for the
+    # exclusive builder lease; losers return to waiting in shared mode.
+    deadline = time.monotonic() + timeout
+    while True:
+        remaining = max(0.0, deadline - time.monotonic())
+        lease = acquire_cache_lease(
+            layout, lease_name, exclusive=False, timeout=remaining
+        )
+        ready = dependency_depot_ready(target)
+        if ready:
+            break
+        lease.close()
+        lease = try_cache_lease(layout, lease_name, exclusive=True)
+        if lease is not None:
+            ready = dependency_depot_ready(target)
+            break
+        if time.monotonic() >= deadline:
+            raise CacheLocationError(
+                f"Timed out waiting for active cache lease: {lease_name}"
+            )
+    claim = DependencyDepotClaim(
+        project=root,
+        layout=layout,
+        key=key,
+        target=target,
+        lease=lease,
+        ready=ready,
+    )
+    try:
+        if claim.ready:
+            claim._attach_ready()
+            lease.downgrade()
+        elif target.exists():
+            _remove_cache_path(target, layout)
+        return claim
+    except Exception:
+        lease.close()
+        raise

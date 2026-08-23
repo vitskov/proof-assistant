@@ -6,9 +6,10 @@ import queue
 import re
 import subprocess
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 
 class CodexProtocolError(RuntimeError):
@@ -49,9 +50,7 @@ def isolated_tool_config_args(
             env=child_env,
         )
     except FileNotFoundError as exc:
-        raise CodexProtocolError(
-            f"Codex executable not found: {executable!r}"
-        ) from exc
+        raise CodexProtocolError(f"Codex executable not found: {executable!r}") from exc
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise CodexProtocolError(
             f"Could not inspect configured Codex MCP servers: {exc}"
@@ -80,8 +79,7 @@ def isolated_tool_config_args(
             raise CodexProtocolError("Codex MCP listing contained an invalid name")
         if _SAFE_CONFIG_KEY.fullmatch(name) is None:
             raise CodexProtocolError(
-                "Cannot safely isolate Codex MCP server with unsupported name "
-                f"{name!r}"
+                f"Cannot safely isolate Codex MCP server with unsupported name {name!r}"
             )
         args.extend(
             [
@@ -126,7 +124,7 @@ def isolated_skill_config_args(
                 "clientInfo": {
                     "name": "repoprover-codex-skill-probe",
                     "title": "RepoProver Codex skill isolation probe",
-                    "version": "0.2.0",
+                    "version": "0.3.0",
                 },
                 "capabilities": {"experimentalApi": True},
             },
@@ -144,26 +142,24 @@ def isolated_skill_config_args(
     finally:
         probe.close()
 
-    if not isinstance(response, dict) or not isinstance(
-        response.get("data"), list
-    ):
+    if not isinstance(response, dict) or not isinstance(response.get("data"), list):
         raise CodexProtocolError("skills/list returned an invalid isolation response")
     paths: set[str] = set()
     for entry in response["data"]:
-        if not isinstance(entry, dict) or not isinstance(
-            entry.get("skills"), list
-        ):
-            raise CodexProtocolError("skills/list contained an invalid workspace record")
+        if not isinstance(entry, dict) or not isinstance(entry.get("skills"), list):
+            raise CodexProtocolError(
+                "skills/list contained an invalid workspace record"
+            )
         errors = entry.get("errors") or []
         if not isinstance(errors, list) or errors:
             raise CodexProtocolError(
                 "Codex reported skill discovery errors; refusing an unverified child"
             )
         for skill in entry["skills"]:
-            if not isinstance(skill, dict) or not isinstance(
-                skill.get("path"), str
-            ):
-                raise CodexProtocolError("skills/list contained an invalid skill record")
+            if not isinstance(skill, dict) or not isinstance(skill.get("path"), str):
+                raise CodexProtocolError(
+                    "skills/list contained an invalid skill record"
+                )
             paths.add(skill["path"])
 
     selectors = ",".join(
@@ -202,7 +198,7 @@ class AppServerClient:
         self._reader: threading.Thread | None = None
         self._next_id = 1
         self._pending: dict[int, _Pending] = {}
-        self._notifications: "queue.Queue[dict[str, Any]]" = queue.Queue()
+        self._notifications: queue.Queue[dict[str, Any]] = queue.Queue()
         self._handlers: dict[str, Callable[[dict[str, Any]], Any]] = {}
         self._state_lock = threading.Lock()
         self._write_lock = threading.Lock()

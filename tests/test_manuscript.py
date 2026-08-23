@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from repoprover_codex.cache import dependency_cache_key
 from repoprover_codex.cli import build_parser
 from repoprover_codex.manuscript import (
     CommandRecord,
@@ -18,7 +19,7 @@ from repoprover_codex.manuscript import (
 
 def _raw_inputs(tmp_path):
     manuscript = tmp_path / "source"
-    manuscript.mkdir()
+    manuscript.mkdir(parents=True)
     (manuscript / "main.tex").write_text(
         r"\begin{theorem}For every $n$, $n=n$.\end{theorem}" + "\n",
         encoding="utf-8",
@@ -90,6 +91,23 @@ def test_prepare_existing_lean_project_preserves_root_layout(tmp_path):
     assert not (prepared.workspace / "manuscript").exists()
     assert (prepared.workspace / "Book.lean").is_file()
     assert prepared.latex_sources == ("main.tex",)
+
+
+def test_generated_manuscript_projects_share_dependency_fingerprint(tmp_path):
+    first_manuscript, first_task = _raw_inputs(tmp_path / "first")
+    second_manuscript, second_task = _raw_inputs(tmp_path / "second")
+
+    first = prepare_manuscript_workspace(
+        first_manuscript, tmp_path / "first-run", first_task
+    )
+    second = prepare_manuscript_workspace(
+        second_manuscript, tmp_path / "second-run", second_task
+    )
+
+    environment = {"LEAN_CC": "/usr/bin/clang"}
+    assert dependency_cache_key(
+        first.workspace, env=environment
+    ) == dependency_cache_key(second.workspace, env=environment)
 
 
 def test_prepare_refuses_nonempty_output(tmp_path):
@@ -211,3 +229,16 @@ def test_cli_exposes_file_based_manuscript_interface():
     assert args.task_file == "/input/task.md"
     assert args.output == "/output/run"
     assert args.turn_timeout == 3600.0
+
+
+def test_cli_exposes_cache_limits_status_gc_and_prepare():
+    init = build_parser().parse_args(
+        ["cache", "init", "--max-gb", "12", "--min-free-gb", "20"]
+    )
+    assert init.max_gb == 12
+    assert init.min_free_gb == 20
+    assert build_parser().parse_args(["cache", "status"]).cache_command == "status"
+    assert build_parser().parse_args(["cache", "gc"]).cache_command == "gc"
+    prepare = build_parser().parse_args(["cache", "prepare", "--project", "/tmp/toy"])
+    assert prepare.project == "/tmp/toy"
+    assert prepare.setup_timeout == 1800.0

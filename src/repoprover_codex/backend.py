@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import queue
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from .models import validate_model_effort
 from .protocol import (
@@ -121,7 +122,7 @@ class CodexBackend:
                 "clientInfo": {
                     "name": "repoprover-codex",
                     "title": "RepoProver Codex backend",
-                    "version": "0.2.0",
+                    "version": "0.3.0",
                 },
                 "capabilities": {"experimentalApi": True},
             },
@@ -195,15 +196,13 @@ class CodexBackend:
             },
             timeout=self.config.request_timeout,
         )
-        if not isinstance(response, dict) or not isinstance(
-            response.get("data"), list
-        ):
-            raise CodexProtocolError("skills/list returned an invalid isolation response")
+        if not isinstance(response, dict) or not isinstance(response.get("data"), list):
+            raise CodexProtocolError(
+                "skills/list returned an invalid isolation response"
+            )
         enabled: list[str] = []
         for entry in response["data"]:
-            if not isinstance(entry, dict) or not isinstance(
-                entry.get("skills"), list
-            ):
+            if not isinstance(entry, dict) or not isinstance(entry.get("skills"), list):
                 raise CodexProtocolError(
                     "skills/list contained an invalid workspace record"
                 )
@@ -405,7 +404,8 @@ class CodexBackend:
                     )
                 except queue.Empty as exc:
                     raise TimeoutError(
-                        f"Codex turn did not complete within {self.config.turn_timeout}s"
+                        "Codex turn did not complete within "
+                        f"{self.config.turn_timeout}s"
                     ) from exc
 
                 events.append(notification)

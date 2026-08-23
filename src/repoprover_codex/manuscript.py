@@ -647,15 +647,20 @@ def bootstrap_lean_workspace(
     *,
     env: Mapping[str, str],
     timeout: float,
+    depot_claim: Any | None = None,
 ) -> list[CommandRecord]:
     """Fetch/build the dependencies required by RepoProver's Lean REPL."""
     records: list[CommandRecord] = []
-    for argv, required in (
-        (("lake", "update"), True),
-        (("lake", "exe", "cache", "get"), False),
-        (("lake", "build", "repl"), True),
-        (("lake", "build"), True),
-    ):
+
+    if depot_claim is not None and depot_claim.ready:
+        initial_commands = ((("lake", "build", "repl"), True),)
+    else:
+        initial_commands = (
+            (("lake", "update"), True),
+            (("lake", "exe", "cache", "get"), False),
+            (("lake", "build", "repl"), True),
+        )
+    for argv, required in initial_commands:
         record = run_command(
             argv,
             cwd=workspace,
@@ -665,7 +670,34 @@ def bootstrap_lean_workspace(
         )
         records.append(record)
         if required and not record.succeeded:
-            break
+            return records
+
+    if depot_claim is not None and not depot_claim.ready:
+        depot_claim.promote()
+        relocated_repl = run_command(
+            ("lake", "build", "repl"),
+            cwd=workspace,
+            env=env,
+            timeout=timeout,
+        )
+        records.append(relocated_repl)
+        if not relocated_repl.succeeded:
+            depot_claim.rollback()
+            return records
+
+    root_build = run_command(
+        ("lake", "build"),
+        cwd=workspace,
+        env=env,
+        timeout=timeout,
+    )
+    records.append(root_build)
+    if not root_build.succeeded:
+        if depot_claim is not None and not depot_claim.ready:
+            depot_claim.rollback()
+        return records
+    if depot_claim is not None and not depot_claim.ready:
+        depot_claim.commit()
     return records
 
 

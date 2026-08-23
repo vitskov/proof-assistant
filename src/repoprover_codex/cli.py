@@ -6,17 +6,29 @@ import os
 import re
 import shutil
 import sys
+from collections.abc import Callable
 from dataclasses import asdict
 from pathlib import Path
 
 from .backend import CodexBackend, CodexConfig
 from .cache import (
+    COLD_DEPOT_RESERVE_GB,
+    WARM_PROJECT_RESERVE_GB,
+    CacheCapacityError,
     CacheLayout,
     CacheLocationError,
     attach_project_cache,
+    cache_policy,
+    cache_usage,
+    claim_dependency_depot,
+    dependency_cache_key,
+    dependency_depot_ready,
+    dependency_depot_target,
     ensure_project_cache_managed,
     ensure_project_outside_dropbox,
+    garbage_collect_cache,
     initialize_cache,
+    managed_project_session,
 )
 from .environment import (
     EnvironmentCheckError,
@@ -25,6 +37,25 @@ from .environment import (
     select_native_compiler,
 )
 from .models import model_id, supported_efforts
+
+_ACTIVE_CLEANUPS: list[Callable[[], None]] = []
+
+
+def _hold_cleanup(callback: Callable[[], None]) -> None:
+    _ACTIVE_CLEANUPS.append(callback)
+
+
+def _release_active_resources() -> None:
+    while _ACTIVE_CLEANUPS:
+        callback = _ACTIVE_CLEANUPS.pop()
+        try:
+            callback()
+        except Exception as exc:
+            print(f"WARNING: cache cleanup failed: {exc}", file=sys.stderr)
+
+
+def _format_gib(value: int) -> str:
+    return f"{value / (1024**3):.2f} GiB"
 
 
 def _write_manuscript_failure(
@@ -81,21 +112,19 @@ def cmd_doctor(args) -> int:
     backend = _backend(args)
     try:
         backend.client.start()
-        info = backend.initialize()
+        backend.initialize()
         print("app-server initialize: OK")
         catalog = backend.model_catalog()
         print(f"models visible to Codex: {len(catalog)}")
         if catalog:
             print("default/first models:")
             for entry in catalog[:10]:
-                print(
-                    f"  {model_id(entry)} "
-                    f"[{', '.join(supported_efforts(entry)) or 'effort metadata unavailable'}]"
+                efforts = (
+                    ", ".join(supported_efforts(entry)) or "effort metadata unavailable"
                 )
+                print(f"  {model_id(entry)} [{efforts}]")
         print("authentication/backend status: app-server responded successfully")
-        print(
-            "NOTE: this package did not inspect OAuth tokens or OPENAI_API_KEY."
-        )
+        print("NOTE: this package did not inspect OAuth tokens or OPENAI_API_KEY.")
         return 0
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
@@ -111,10 +140,7 @@ def cmd_models(args) -> int:
         backend.initialize()
         catalog = backend.model_catalog()
         for entry in catalog:
-            print(
-                f"{model_id(entry)}\t"
-                f"{','.join(supported_efforts(entry)) or '-'}"
-            )
+            print(f"{model_id(entry)}\t{','.join(supported_efforts(entry)) or '-'}")
         return 0
     finally:
         backend.close()
@@ -157,7 +183,10 @@ def cmd_smoke(args) -> int:
         backend.close()
 
     if not seen:
-        print("ERROR: Codex completed without invoking the dynamic echo tool", file=sys.stderr)
+        print(
+            "ERROR: Codex completed without invoking the dynamic echo tool",
+            file=sys.stderr,
+        )
         return 3
     print(f"tool calls: {json.dumps(seen)}")
     print(f"final: {result.final_text}")
@@ -193,7 +222,11 @@ def cmd_cache_path(args) -> int:
 def cmd_cache_init(args) -> int:
     try:
         layout = _cache_layout(args)
-        config, check = initialize_cache(layout)
+        config, check = initialize_cache(
+            layout,
+            max_gb=getattr(args, "max_gb", None),
+            min_free_gb=getattr(args, "min_free_gb", None),
+        )
     except (CacheLocationError, EnvironmentCheckError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
@@ -206,6 +239,8 @@ def cmd_cache_init(args) -> int:
     print(f"worktrees: {layout.worktrees}")
     print(f"fixtures: {layout.fixtures}")
     print(f"native compiler: {check.executable}")
+    print(f"cache limit: {_format_gib(config.max_bytes)}")
+    print(f"minimum free space: {_format_gib(config.min_free_bytes)}")
     print(f"configuration: {layout.config_path}")
     if config.compiler_fallback_used:
         print("Lean bundled compiler failed; recorded working fallback")
@@ -228,6 +263,8 @@ def cmd_cache_doctor(args) -> int:
             )
         runtime = layout.runtime_environment(lean_cc=config.lean_cc)
         check = select_native_compiler(runtime)
+        policy = cache_policy(config)
+        usage = cache_usage(layout)
     except (CacheLocationError, EnvironmentCheckError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
@@ -237,6 +274,10 @@ def cmd_cache_doctor(args) -> int:
     print("inside Dropbox: no")
     print(f"native compiler: {check.executable}")
     print("compile/run smoke check: OK")
+    print(f"managed cache: {_format_gib(usage.managed_bytes)}")
+    print(f"cache limit: {_format_gib(policy.max_bytes)}")
+    print(f"filesystem free: {_format_gib(usage.free_bytes)}")
+    print(f"minimum free space: {_format_gib(policy.min_free_bytes)}")
     return 0
 
 
@@ -252,9 +293,131 @@ def cmd_cache_attach(args) -> int:
     return 0
 
 
-_DECLARATION_RE = re.compile(
-    r"(?m)^[ \t]*(?:theorem|lemma)\s+(?P<name>[^\s:{(]+)"
-)
+def cmd_cache_status(args) -> int:
+    try:
+        layout = _cache_layout(args)
+        layout.create()
+        config = layout.load_config()
+        policy = cache_policy(config)
+        usage = cache_usage(layout)
+    except CacheLocationError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+    print(f"cache root: {layout.root}")
+    print(f"managed cache: {_format_gib(usage.managed_bytes)}")
+    print(f"cache limit: {_format_gib(policy.max_bytes)}")
+    print(f"filesystem free: {_format_gib(usage.free_bytes)}")
+    print(f"minimum free space: {_format_gib(policy.min_free_bytes)}")
+    print(f"dependency depots: {_format_gib(usage.dependency_bytes)}")
+    print(f"isolated project builds: {_format_gib(usage.build_bytes)}")
+    print(f"Mathlib downloads: {_format_gib(usage.download_bytes)}")
+    print(f"Lake system cache: {_format_gib(usage.lake_system_bytes)}")
+    print(f"temporary files: {_format_gib(usage.temporary_bytes)}")
+    return 0
+
+
+def cmd_cache_gc(args) -> int:
+    try:
+        layout = _cache_layout(args)
+        layout.create()
+        policy = cache_policy(layout.load_config())
+        result = garbage_collect_cache(layout, policy, strict=False)
+    except CacheLocationError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+    print(f"before: {_format_gib(result.before.managed_bytes)}")
+    print(f"after: {_format_gib(result.after.managed_bytes)}")
+    print(f"filesystem free: {_format_gib(result.after.free_bytes)}")
+    print(f"removed entries: {len(result.removed)}")
+    for item in result.removed:
+        print(f"  removed {item}")
+    for item in result.skipped_active:
+        print(f"  active {item}")
+    return 0
+
+
+def cmd_cache_prepare(args) -> int:
+    """Prepare and validate one Lean project without starting Codex."""
+    from .manuscript import bootstrap_lean_workspace, command_records_text
+
+    project = Path(args.project).expanduser().resolve()
+    claim = None
+    session = None
+    try:
+        layout = _cache_layout(args)
+        layout.create()
+        config = layout.load_config()
+        if config is None:
+            config, _check = initialize_cache(layout)
+        if args.lean_cc:
+            os.environ["LEAN_CC"] = args.lean_cc
+        compiler = configure_lean_runtime()
+        if config.lean_cc != compiler.executable:
+            config = layout.record_compiler(compiler)
+        runtime_env = layout.runtime_environment(
+            os.environ, lean_cc=compiler.executable
+        )
+        key = dependency_cache_key(project, env=runtime_env)
+        depot = dependency_depot_target(layout, key)
+        reserve = (
+            WARM_PROJECT_RESERVE_GB
+            if dependency_depot_ready(depot)
+            else COLD_DEPOT_RESERVE_GB
+        )
+        session = managed_project_session(
+            project,
+            layout,
+            cache_policy(config),
+            attach=True,
+            reserve_gb=reserve,
+            lease_timeout=args.setup_timeout,
+        )
+        managed_lake = session.__enter__()
+        claim = claim_dependency_depot(
+            project, layout, env=runtime_env, timeout=args.setup_timeout
+        )
+        was_ready = claim.ready
+        records = bootstrap_lean_workspace(
+            project,
+            env=runtime_env,
+            timeout=args.setup_timeout,
+            depot_claim=claim,
+        )
+        failed = next(
+            (record for record in records if record.required and not record.succeeded),
+            None,
+        )
+        if failed is not None:
+            print(command_records_text(records), file=sys.stderr)
+            print(
+                f"ERROR: required setup command failed: {' '.join(failed.argv)}",
+                file=sys.stderr,
+            )
+            return 5
+        print(f"project: {project}")
+        print(f"managed .lake: {managed_lake}")
+        print(f"dependency key: {claim.key}")
+        print(f"dependency depot: {claim.target}")
+        print(f"dependency depot reused: {'yes' if was_ready else 'no'}")
+        print(f"native compiler: {compiler.executable}")
+        print("lake build: OK")
+        return 0
+    except (
+        CacheLocationError,
+        CacheCapacityError,
+        EnvironmentCheckError,
+        OSError,
+    ) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+    finally:
+        if claim is not None:
+            claim.close()
+        if session is not None:
+            session.__exit__(None, None, None)
+
+
+_DECLARATION_RE = re.compile(r"(?m)^[ \t]*(?:theorem|lemma)\s+(?P<name>[^\s:{(]+)")
 
 
 def _target_declaration(source: str, theorem_name: str) -> str | None:
@@ -267,7 +430,9 @@ def _target_declaration(source: str, theorem_name: str) -> str | None:
     return None
 
 
-def _verify_repoprover_proof(agent, wrapped, lean_path: Path, theorem_name: str) -> tuple[str, str]:
+def _verify_repoprover_proof(
+    agent, wrapped, lean_path: Path, theorem_name: str
+) -> tuple[str, str]:
     """Return a semantic outcome and supporting detail for one PROVE run."""
     calls = wrapped.codex.tool_calls
     if not calls:
@@ -295,7 +460,6 @@ def _verify_repoprover_proof(agent, wrapped, lean_path: Path, theorem_name: str)
     if verification.lstrip().startswith("Error:"):
         return "tool_failure", f"final RepoProver lean_check failed: {verification}"
     return "proved", verification
-
 
 
 def cmd_repoprover_prove(args) -> int:
@@ -338,11 +502,26 @@ def cmd_repoprover_prove(args) -> int:
     try:
         compiler = configure_lean_runtime()
     except EnvironmentCheckError as exc:
-        print(f"OUTCOME: tool_failure", file=sys.stderr)
+        print("OUTCOME: tool_failure", file=sys.stderr)
         print(f"ERROR: Lean compiler preflight failed: {exc}", file=sys.stderr)
         return 5
     if cache_config is None or cache_config.lean_cc != compiler.executable:
         cache_layout.record_compiler(compiler)
+    try:
+        cache_session = managed_project_session(
+            project,
+            cache_layout,
+            cache_policy(cache_layout.load_config()),
+            attach=False,
+            reserve_gb=WARM_PROJECT_RESERVE_GB,
+            lease_timeout=args.request_timeout,
+        )
+        cache_session.__enter__()
+        _hold_cleanup(lambda session=cache_session: session.__exit__(None, None, None))
+    except CacheLocationError as exc:
+        print("OUTCOME: tool_failure", file=sys.stderr)
+        print(f"ERROR: cache capacity/lease check failed: {exc}", file=sys.stderr)
+        return 5
     print(f"cache root: {cache_layout.root}", file=sys.stderr)
     print(f"Lean native compiler: {compiler.executable}", file=sys.stderr)
 
@@ -459,7 +638,6 @@ def cmd_manuscript_run(args) -> int:
         cache_layout.apply_runtime_environment(
             lean_cc=cache_config.lean_cc if cache_config else None
         )
-        managed_lake = attach_project_cache(paths.workspace, cache_layout)
 
         if args.lean_cc:
             os.environ["LEAN_CC"] = args.lean_cc
@@ -470,6 +648,30 @@ def cmd_manuscript_run(args) -> int:
             os.environ,
             lean_cc=compiler.executable,
         )
+        policy = cache_policy(cache_layout.load_config())
+        dependency_key = dependency_cache_key(paths.workspace, env=runtime_env)
+        dependency_target = dependency_depot_target(cache_layout, dependency_key)
+        dependency_was_ready = dependency_depot_ready(dependency_target)
+        reserve_gb = (
+            WARM_PROJECT_RESERVE_GB if dependency_was_ready else COLD_DEPOT_RESERVE_GB
+        )
+        cache_session = managed_project_session(
+            paths.workspace,
+            cache_layout,
+            policy,
+            attach=True,
+            reserve_gb=reserve_gb,
+            lease_timeout=args.setup_timeout,
+        )
+        managed_lake = cache_session.__enter__()
+        _hold_cleanup(lambda session=cache_session: session.__exit__(None, None, None))
+        depot_claim = claim_dependency_depot(
+            paths.workspace,
+            cache_layout,
+            env=runtime_env,
+            timeout=args.setup_timeout,
+        )
+        _hold_cleanup(depot_claim.close)
     except (CacheLocationError, EnvironmentCheckError, OSError) as exc:
         return _write_manuscript_failure(
             paths,
@@ -480,13 +682,28 @@ def cmd_manuscript_run(args) -> int:
         )
 
     print(f"managed .lake: {managed_lake}", file=sys.stderr)
+    print(f"dependency depot: {depot_claim.target}", file=sys.stderr)
+    print(
+        f"dependency depot reused: {'yes' if dependency_was_ready else 'no'}",
+        file=sys.stderr,
+    )
     print(f"Lean native compiler: {compiler.executable}", file=sys.stderr)
 
-    setup_records = bootstrap_lean_workspace(
-        paths.workspace,
-        env=runtime_env,
-        timeout=args.setup_timeout,
-    )
+    try:
+        setup_records = bootstrap_lean_workspace(
+            paths.workspace,
+            env=runtime_env,
+            timeout=args.setup_timeout,
+            depot_claim=depot_claim,
+        )
+    except (CacheLocationError, OSError) as exc:
+        return _write_manuscript_failure(
+            paths,
+            started_at=started_at,
+            outcome="setup_failure",
+            detail=f"Dependency depot preparation failed: {exc}",
+            exit_code=5,
+        )
     (paths.artifacts / "setup.log").write_text(
         command_records_text(setup_records), encoding="utf-8"
     )
@@ -634,6 +851,9 @@ def cmd_manuscript_run(args) -> int:
                 else None
             ),
             "managed_lake": str(managed_lake),
+            "dependency_depot": str(depot_claim.target),
+            "dependency_key": depot_claim.key,
+            "dependency_reused": dependency_was_ready,
         },
         "codex": {
             "model": wrapped.codex.model,
@@ -703,6 +923,18 @@ def build_parser() -> argparse.ArgumentParser:
     cache_init = cache_sub.add_parser(
         "init", help="Create cache directories and record a working compiler"
     )
+    cache_init.add_argument(
+        "--max-gb",
+        type=float,
+        default=None,
+        help="Hard managed-cache limit in GiB (default: 16)",
+    )
+    cache_init.add_argument(
+        "--min-free-gb",
+        type=float,
+        default=None,
+        help="Minimum filesystem free-space reserve in GiB (default: 25)",
+    )
     cache_init.set_defaults(func=cmd_cache_init)
     cache_doctor = cache_sub.add_parser(
         "doctor", help="Validate cache location, layout, and compiler"
@@ -713,6 +945,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     cache_attach.add_argument("--project", required=True)
     cache_attach.set_defaults(func=cmd_cache_attach)
+    cache_status = cache_sub.add_parser(
+        "status", help="Show cache usage, limits, and filesystem headroom"
+    )
+    cache_status.set_defaults(func=cmd_cache_status)
+    cache_gc = cache_sub.add_parser(
+        "gc", help="Evict inactive least-recently-used entries to enforce limits"
+    )
+    cache_gc.set_defaults(func=cmd_cache_gc)
+    cache_prepare = cache_sub.add_parser(
+        "prepare",
+        help="Attach, share dependencies, and build a Lean project without Codex",
+    )
+    cache_prepare.add_argument("--project", required=True)
+    cache_prepare.add_argument("--lean-cc", default=None)
+    cache_prepare.add_argument("--setup-timeout", type=float, default=1800.0)
+    cache_prepare.set_defaults(func=cmd_cache_prepare)
 
     s = sub.add_parser("smoke", help="Run a real dynamic-tool smoke test")
     s.add_argument("--model", required=True)
@@ -793,7 +1041,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
-    return int(args.func(args))
+    try:
+        return int(args.func(args))
+    finally:
+        _release_active_resources()
 
 
 if __name__ == "__main__":
