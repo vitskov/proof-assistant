@@ -30,6 +30,9 @@ from proof_assistant.workflow.contracts import (
     NewProjectRequest,
     ProgressEvent,
     ProgressPhase,
+    ProjectAvailability,
+    ProjectCatalogEntry,
+    ProjectDestinationInspection,
     ProjectSummary,
     SourceInspection,
     VerificationSettings,
@@ -65,14 +68,20 @@ class NewProjectDraft:
     task_text: str | None
     settings: VerificationSettings
 
-    def request(self, main_file: str) -> NewProjectRequest:
+    def request(
+        self, main_file: str, *, resolved_project_path: Path | None = None
+    ) -> NewProjectRequest:
         """Create the strict backend request after a main file is selected."""
 
         return NewProjectRequest(
             name=self.name,
             source_path=self.source_path,
             main_file=main_file,
-            project_path=self.project_path,
+            project_path=(
+                resolved_project_path
+                if resolved_project_path is not None
+                else self.project_path
+            ),
             task_text=self.task_text,
             settings=self.settings,
         )
@@ -152,6 +161,14 @@ class WelcomeScreen(NoticeScreen):
             project = event.button.data
             if isinstance(project, Path):
                 self.proof_app.resume_project(project)
+        elif button_id.startswith("select-existing-main-"):
+            entry = event.button.data
+            if isinstance(entry, ProjectCatalogEntry):
+                self.proof_app.show_existing_project_main_selection(entry)
+        elif button_id.startswith("open-catalog-"):
+            project = event.button.data
+            if isinstance(project, Path):
+                self.proof_app.open_location(project)
 
     def load_projects(self) -> None:
         self.show_notice("Loading project catalog…")
@@ -168,24 +185,44 @@ class WelcomeScreen(NoticeScreen):
 
         self.run_worker(load, thread=True, exclusive=True, group="catalog")
 
-    async def _render_projects(self, projects: tuple[ProjectSummary, ...]) -> None:
+    async def _render_projects(self, projects: tuple[ProjectCatalogEntry, ...]) -> None:
         container = self.query_one("#project-list", Vertical)
         await container.remove_children()
         if not projects:
             await container.mount(
                 Static("No projects yet. Choose New project to begin.")
             )
-        for index, project in enumerate(projects):
-            warning = " · Dropbox source" if project.source_in_dropbox else ""
-            detail = Static(
-                f"{project.name}\n{project.project_path}\n"
-                f"Main: {project.main_file}\n"
-                f"{project.workflow_state.value}{warning}",
-                classes="project-summary",
-            )
-            button = Button("Resume", id=f"resume-{index}")
-            button.data = project.project_path
-            await container.mount(Horizontal(detail, button, classes="project-row"))
+        for index, entry in enumerate(projects):
+            project = entry.project
+            lines = [entry.name, str(entry.project_path), entry.availability.value]
+            if project is not None:
+                warning = " · Dropbox source" if project.source_in_dropbox else ""
+                lines.extend(
+                    [
+                        f"Main: {project.main_file}",
+                        f"State: {project.workflow_state.value}{warning}",
+                    ]
+                )
+            if entry.issue:
+                lines.append(f"Issue: {entry.issue}")
+            detail = Static("\n".join(lines), classes="project-summary")
+            controls: list[Button] = []
+            if entry.resumable:
+                button = Button("Resume", id=f"resume-{index}")
+                button.data = entry.project_path
+                controls.append(button)
+            elif entry.availability == ProjectAvailability.NEEDS_MAIN_FILE:
+                button = Button("Select main file", id=f"select-existing-main-{index}")
+                button.data = entry
+                controls.append(button)
+            elif entry.availability in {
+                ProjectAvailability.INCOMPLETE,
+                ProjectAvailability.OCCUPIED,
+            }:
+                button = Button("Open folder", id=f"open-catalog-{index}")
+                button.data = entry.project_path
+                controls.append(button)
+            await container.mount(Horizontal(detail, *controls, classes="project-row"))
         self.show_notice(f"{len(projects)} project(s) available.")
 
 
@@ -323,12 +360,14 @@ class MainFileSelectionScreen(NoticeScreen):
         self,
         draft: NewProjectDraft,
         inspection: SourceInspection,
+        destination: ProjectDestinationInspection,
         *,
         selected_main: str | None = None,
     ) -> None:
         super().__init__()
         self.draft = draft
         self.inspection = inspection
+        self.destination = destination
         self.selected_main = selected_main
 
     def compose(self) -> ComposeResult:
@@ -393,6 +432,7 @@ class MainFileSelectionScreen(NoticeScreen):
         self.proof_app.review_new_project(
             self.draft,
             self.inspection,
+            self.destination,
             main_file,
             auto_selected=False,
         )
@@ -407,6 +447,7 @@ class ProjectReviewScreen(NoticeScreen):
         self,
         draft: NewProjectDraft,
         inspection: SourceInspection,
+        destination: ProjectDestinationInspection,
         main_file: str,
         *,
         auto_selected: bool,
@@ -414,6 +455,7 @@ class ProjectReviewScreen(NoticeScreen):
         super().__init__()
         self.draft = draft
         self.inspection = inspection
+        self.destination = destination
         self.main_file = main_file
         self.auto_selected = auto_selected
 
@@ -446,11 +488,6 @@ class ProjectReviewScreen(NoticeScreen):
         yield Footer()
 
     def _detail(self) -> str:
-        project_path = (
-            str(self.draft.project_path)
-            if self.draft.project_path is not None
-            else "automatic default under $HOME/proof-assistant"
-        )
         selection = (
             "automatically selected (only LaTeX source found)"
             if self.auto_selected
@@ -464,7 +501,7 @@ class ProjectReviewScreen(NoticeScreen):
         return (
             f"Project name: {self.draft.name}\n"
             f"Authoritative source: {self.draft.source_path}\n"
-            f"Managed project: {project_path}\n"
+            f"Managed project: {self.destination.project_path}\n"
             f"Main LaTeX file: {self.main_file}\n"
             f"Main-file selection: {selection}\n"
             f"LaTeX files discovered: {len(self.inspection.candidates)}\n"
@@ -476,6 +513,7 @@ class ProjectReviewScreen(NoticeScreen):
             self.proof_app.show_main_file_selection(
                 self.draft,
                 self.inspection,
+                self.destination,
                 selected_main=self.main_file,
             )
         else:
@@ -483,11 +521,128 @@ class ProjectReviewScreen(NoticeScreen):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "confirm-create":
-            self.proof_app.create_project(self.draft.request(self.main_file))
+            self.proof_app.create_project(
+                self.draft.request(
+                    self.main_file,
+                    resolved_project_path=self.destination.project_path,
+                )
+            )
         elif event.button.id == "review-back":
             self.action_back()
         elif event.button.id == "cancel":
             self.proof_app.show_welcome()
+
+
+class ExistingProjectMainFileSelectionScreen(NoticeScreen):
+    """Recover a catalogued legacy project through backend-provided candidates."""
+
+    BINDINGS = [("escape", "back", "Projects")]
+
+    def __init__(self, entry: ProjectCatalogEntry) -> None:
+        super().__init__()
+        if entry.availability != ProjectAvailability.NEEDS_MAIN_FILE:
+            raise ValueError("existing-project selection requires NEEDS_MAIN_FILE")
+        self.entry = entry
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        with VerticalScroll(id="page"):
+            yield Static("Select a main file for the existing project", classes="title")
+            yield Static(
+                f"Project: {self.entry.project_path}\n"
+                f"Source: {_path_text(self.entry.source_path)}\n"
+                f"Issue: {self.entry.issue or 'Main-file selection is required.'}",
+                markup=False,
+            )
+            buttons: list[RadioButton] = []
+            for index, candidate in enumerate(self.entry.main_file_candidates):
+                hints: list[str] = []
+                if candidate.has_documentclass:
+                    hints.append("contains \\documentclass")
+                if candidate.relative_path == self.entry.suggested_main_file:
+                    hints.append("suggested")
+                suffix = f"  ({', '.join(hints)})" if hints else ""
+                buttons.append(
+                    RadioButton(
+                        f"{candidate.relative_path}{suffix}",
+                        value=False,
+                        id=f"existing-main-option-{index}",
+                    )
+                )
+            yield RadioSet(*buttons, id="existing-main-file-options")
+            with Horizontal(classes="toolbar"):
+                yield Button(
+                    "Save selected main file",
+                    id="confirm-existing-main",
+                    variant="success",
+                )
+                yield Button("Projects", id="back")
+            yield Static(
+                "Selection is persisted by the backend before the project resumes.",
+                id="status-line",
+                classes="muted",
+            )
+        yield Footer()
+
+    def action_back(self) -> None:
+        self.proof_app.show_welcome()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "back":
+            self.action_back()
+            return
+        if event.button.id != "confirm-existing-main":
+            return
+        index = self.query_one("#existing-main-file-options", RadioSet).pressed_index
+        if index < 0:
+            self.show_notice("Select one main LaTeX file first.", error=True)
+            return
+        main_file = self.entry.main_file_candidates[index].relative_path
+        self.proof_app.select_existing_project_main_file(self.entry, main_file)
+
+
+class ProjectDestinationConflictScreen(NoticeScreen):
+    """Show a backend-classified destination conflict without mutating it."""
+
+    def __init__(
+        self,
+        draft: NewProjectDraft,
+        inspection: ProjectDestinationInspection,
+    ) -> None:
+        super().__init__()
+        self.draft = draft
+        self.inspection = inspection
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        with Vertical(id="page"):
+            yield Static("Managed project destination is unavailable", classes="title")
+            yield Static(
+                f"Resolved project path: {self.inspection.project_path}\n"
+                f"Classification: {self.inspection.availability.value}\n"
+                f"Issue: {self.inspection.issue or 'The destination is unavailable.'}",
+                classes="error",
+                id="destination-conflict",
+                markup=False,
+            )
+            with Horizontal(classes="toolbar"):
+                yield Button("Back to setup", id="back", variant="primary")
+                yield Button("Return to projects", id="projects")
+                yield Button("Open folder", id="open-folder")
+            yield Static(
+                "No source was imported and no project was created.",
+                id="status-line",
+                classes="muted",
+            )
+        yield Footer()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "back":
+            self.proof_app.show_new_project(self.draft)
+        elif event.button.id == "projects":
+            self.proof_app.show_welcome()
+        elif event.button.id == "open-folder":
+            self.proof_app.open_location(self.inspection.project_path)
 
 
 class DashboardScreen(NoticeScreen):
@@ -857,6 +1012,7 @@ class ChangeReviewScreen(NoticeScreen):
             f"Certificates expected to remain unaffected\n{unaffected}\n\n"
             f"Clarifications superseded by this change\n{superseded}\n\n"
             f"Task changed: {'yes' if plan.task_changed else 'no'}\n"
+            f"Main file changed: {'yes' if plan.main_file_changed else 'no'}\n"
             f"Plan: {plan.plan_id}\nInventory: {plan.candidate_inventory_sha256}"
         )
 

@@ -9,6 +9,9 @@ from .contracts import (
     LatexSourceCandidate,
     NewProjectRequest,
     ProgressEvent,
+    ProjectAvailability,
+    ProjectCatalogEntry,
+    ProjectDestinationInspection,
     ProjectSummary,
     SourceInspection,
     SourceLocation,
@@ -26,12 +29,16 @@ __all__ = [
     "LatexSourceCandidate",
     "NewProjectRequest",
     "ProgressEvent",
+    "ProjectAvailability",
+    "ProjectCatalogEntry",
+    "ProjectDestinationInspection",
     "ProjectSummary",
     "SourceLocation",
     "SourceInspection",
     "VerificationSettings",
     "CancellationFlag",
     "ProofAssistantWorkflow",
+    "ProjectDestinationError",
     "StaleChangePlanError",
     "WorkflowSnapshot",
     "WorkflowState",
@@ -39,7 +46,12 @@ __all__ = [
 
 
 def __getattr__(name: str):
-    if name in {"CancellationFlag", "ProofAssistantWorkflow", "StaleChangePlanError"}:
+    if name in {
+        "CancellationFlag",
+        "ProofAssistantWorkflow",
+        "ProjectDestinationError",
+        "StaleChangePlanError",
+    }:
         from . import service
 
         return getattr(service, name)

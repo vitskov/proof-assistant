@@ -58,19 +58,21 @@ Test the Textual app with its pilot/headless driver. Cover:
 
 1. one-file automatic main-file announcement, multi-file explicit root
    selection, and resume without reselection;
-2. new-project and resume selection;
-3. default and customized project-owned task;
-4. external Dropbox-source warning without rejecting the source;
-5. rejection of Dropbox managed project destinations;
-6. a progress view that lists the main/input closure, shows every typed stage,
+2. reconciled resumable, needs-main-file, incomplete, and occupied catalog rows;
+3. backend-only legacy main-file recovery and destination preflight;
+4. new-project and resume selection;
+5. default and customized project-owned task;
+6. external Dropbox-source warning without rejecting the source;
+7. rejection of Dropbox managed project destinations;
+8. a progress view that lists the main/input closure, shows every typed stage,
    and exposes selectable/copyable read-only text;
-7. clarification rendering with the actual multi-file source path and
+9. clarification rendering with the actual multi-file source path and
    highlighted lines;
-8. stable multi-file change detection and complete impact preview;
-9. explicit confirmation, plus rejection/recomputation of stale plans;
-10. no-change resume returning to the existing clarification screen;
-11. interrupted/failure recovery and read-only active-project status; and
-12. findings categories and evidence paths.
+10. stable multi-file change detection and complete impact preview;
+11. explicit confirmation, plus rejection/recomputation of stale plans;
+12. no-change resume returning to the existing clarification screen;
+13. interrupted/failure recovery and read-only active-project status; and
+14. findings categories and evidence paths.
 
 Backend source tests must cover rapid editor-style replace sequences,
 simultaneous changes to several `\input` files, adds/deletes/renames, and staged

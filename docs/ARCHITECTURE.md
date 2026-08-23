@@ -9,7 +9,10 @@ Textual TUI
     | typed commands, immutable view models, progress events
     v
 UI-neutral workflow service
-    | project/source/task/change-plan contracts
+    | typed project/source/task/change-plan contracts
+    v
+backend project management
+    | catalog reconciliation, occupancy, migration, destination policy
     v
 persistent incremental verifier
     | snapshots, SQLite, graphs, Codex workers, Lean certification
@@ -30,17 +33,21 @@ closure, invoke Codex directly, or decide certification state.
 
 Owns the UI-neutral application state machine. Immutable contracts live in
 `workflow.contracts`; `workflow.service.ProofAssistantWorkflow` implements
-`default_task_text`, `inspect_source`, `list_projects`, `create_project`,
-`resume_project`, `plan_changes`, and `confirm_and_verify`. `CancellationFlag` and
+`default_task_text`, `inspect_source`, `inspect_project_destination`,
+`list_projects`, `create_project`, `select_project_main_file`, `resume_project`,
+`plan_changes`, and `confirm_and_verify`. `CancellationFlag` and
 `StaleChangePlanError` make cancellation and stale confirmation explicit. The
 service maps persisted backend state to screens but contains no Textual imports.
 
 ### `proof_assistant.workspace`
 
-Owns the project catalog (default
-`$HOME/.config/proof-assistant/projects.json`), Dropbox/path policy, stable source observation,
-staged copying, complete inventories, and project-owned task management. It
-does not prove claims or directly render UI.
+Contains the distinct `workspace.management.ProjectManager` backend component.
+It owns project discovery, catalog reconciliation (default
+`$HOME/.config/proof-assistant/projects.json`), destination occupancy and
+Dropbox/path policy, legacy main-file migration, stable source observation,
+staged copying, and complete inventories. It does not prove claims or render
+UI. The TUI is prohibited from importing this package and can access project
+management only through workflow contracts.
 
 ### `proof_assistant.presentation`
 
@@ -68,6 +75,11 @@ implicit meaning or mutable UI objects.
   and a project-owned task. There is no backend state in which a new project
   has an implicit root. Project creation rejects overlapping paths and managed
   Dropbox destinations.
+- `ProjectDestinationInspection` is the backend's non-mutating preflight for the
+  resolved default or explicit destination. `ProjectCatalogEntry` uses the same
+  classifier and is tagged `RESUMABLE`, `NEEDS_MAIN_FILE`, `INCOMPLETE`, or
+  `OCCUPIED`; impossible tag/payload combinations are rejected by the contract.
+  Occupied paths remain visible and are never deleted to make creation succeed.
 - `ProjectSummary` and `ChangeImpactPlan` expose the persisted main file and
   its ordered, resolved input closure. A UI therefore renders the exact backend
   interpretation rather than reconstructing inclusion topology.
@@ -115,7 +127,9 @@ The TUI has no permission to infer this closure. It displays the candidates
 returned by `inspect_source`, supplies the selected `main_file` to
 `create_project`, and renders the `main_file`/`input_files` returned by the
 backend. A one-file folder is an unambiguous UI shortcut, not an optional
-backend field.
+backend field. For an ambiguous legacy project, it renders candidates from a
+`NEEDS_MAIN_FILE` catalog entry and calls `select_project_main_file`; only the
+backend validates and persists that choice.
 
 ## Verification authority
 

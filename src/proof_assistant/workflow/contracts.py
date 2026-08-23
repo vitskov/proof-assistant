@@ -13,7 +13,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Protocol
 
-CONTRACT_SCHEMA_VERSION = 2
+CONTRACT_SCHEMA_VERSION = 3
 
 
 class WorkflowState(StrEnum):
@@ -59,6 +59,17 @@ class ClaimChangeKind(StrEnum):
     TASK_SCOPE = "TASK_SCOPE"
     TASK_MODE = "TASK_MODE"
     POLICY = "POLICY"
+
+
+class ProjectAvailability(StrEnum):
+    """Backend classification shared by catalog display and creation preflight."""
+
+    AVAILABLE = "AVAILABLE"
+    RESUMABLE = "RESUMABLE"
+    MIGRATION_READY = "MIGRATION_READY"
+    NEEDS_MAIN_FILE = "NEEDS_MAIN_FILE"
+    INCOMPLETE = "INCOMPLETE"
+    OCCUPIED = "OCCUPIED"
 
 
 @dataclass(frozen=True)
@@ -122,6 +133,56 @@ class ProjectSummary:
 
 
 @dataclass(frozen=True)
+class ProjectCatalogEntry:
+    """A reconciled catalog row, including safe recovery/occupancy states."""
+
+    name: str
+    project_path: Path
+    availability: ProjectAvailability
+    project: ProjectSummary | None = None
+    issue: str | None = None
+    source_path: Path | None = None
+    main_file_candidates: tuple[LatexSourceCandidate, ...] = ()
+    suggested_main_file: str | None = None
+
+    def __post_init__(self) -> None:
+        has_project = self.project is not None
+        if (self.availability == ProjectAvailability.RESUMABLE) != has_project:
+            raise ValueError(
+                "A RESUMABLE catalog entry must carry exactly one ProjectSummary"
+            )
+        if self.availability == ProjectAvailability.NEEDS_MAIN_FILE:
+            choices = {
+                candidate.relative_path for candidate in self.main_file_candidates
+            }
+            if self.source_path is None or not choices:
+                raise ValueError(
+                    "NEEDS_MAIN_FILE requires a source path and candidate files"
+                )
+            if self.suggested_main_file not in choices:
+                raise ValueError(
+                    "NEEDS_MAIN_FILE suggestion must identify a candidate file"
+                )
+
+    @property
+    def resumable(self) -> bool:
+        return self.availability == ProjectAvailability.RESUMABLE
+
+
+@dataclass(frozen=True)
+class ProjectDestinationInspection:
+    """Non-mutating classification of a proposed managed-project path."""
+
+    project_path: Path
+    availability: ProjectAvailability
+    issue: str | None = None
+
+    @property
+    def can_create(self) -> bool:
+        return self.availability == ProjectAvailability.AVAILABLE
+
+
+@dataclass(frozen=True)
 class FileChange:
     path: str
     kind: FileChangeKind
@@ -154,10 +215,11 @@ class ChangeImpactPlan:
     task_changed: bool
     source_in_dropbox: bool
     created_at: str
+    main_file_changed: bool = False
 
     @property
     def has_changes(self) -> bool:
-        return bool(self.file_changes or self.task_changed)
+        return bool(self.file_changes or self.task_changed or self.main_file_changed)
 
 
 @dataclass(frozen=True)
@@ -261,9 +323,17 @@ class WorkflowServiceContract(Protocol):
 
     def inspect_source(self, source: Path) -> SourceInspection: ...
 
-    def list_projects(self) -> Sequence[ProjectSummary]: ...
+    def inspect_project_destination(
+        self, name: str, project_path: Path | None = None
+    ) -> ProjectDestinationInspection: ...
+
+    def list_projects(self) -> Sequence[ProjectCatalogEntry]: ...
 
     def create_project(self, request: NewProjectRequest) -> WorkflowSnapshot: ...
+
+    def select_project_main_file(
+        self, project: Path, main_file: str
+    ) -> WorkflowSnapshot: ...
 
     def resume_project(self, project: Path) -> WorkflowSnapshot: ...
 

@@ -48,8 +48,13 @@ from ..presentation.clarifications import (
     IsolatedCodexClarificationNarrator,
 )
 from ..workspace.catalog import ProjectCatalog
+from ..workspace.management import (
+    ManagedProjectKind,
+    ManagedProjectRecord,
+    ProjectConfigurationError,
+    ProjectManager,
+)
 from ..workspace.paths import (
-    default_project_path,
     is_in_dropbox,
     validate_managed_project_path,
 )
@@ -67,6 +72,9 @@ from .contracts import (
     ProgressEvent,
     ProgressPhase,
     ProgressSink,
+    ProjectAvailability,
+    ProjectCatalogEntry,
+    ProjectDestinationInspection,
     ProjectSummary,
     SourceInspection,
     VerificationSettings,
@@ -81,6 +89,16 @@ class StaleChangePlanError(RuntimeError):
 
 class WorkflowCancelled(RuntimeError):
     pass
+
+
+class ProjectDestinationError(RuntimeError):
+    """Creation/resumption conflict carrying the same typed catalog facts."""
+
+    def __init__(self, inspection: ProjectDestinationInspection) -> None:
+        self.inspection = inspection
+        super().__init__(
+            inspection.issue or "Managed project destination is unavailable"
+        )
 
 
 class CancellationFlag:
@@ -152,6 +170,7 @@ class ProofAssistantWorkflow:
                 else catalog_root / "projects.json"
             )
         self.catalog = ProjectCatalog(catalog_path)
+        self.projects = ProjectManager(self.catalog)
         self.cache_home = cache_home
         self.codex = codex
         self._provided_narrator = clarification_narrator
@@ -203,20 +222,48 @@ class ProofAssistantWorkflow:
             source_in_dropbox=is_in_dropbox(source),
         )
 
-    def list_projects(self) -> tuple[ProjectSummary, ...]:
-        summaries: list[ProjectSummary] = []
-        for record in self.catalog.records():
-            try:
-                summaries.append(self._summary(record.project_path))
-            except Exception:
-                continue
-        return tuple(summaries)
+    def inspect_project_destination(
+        self, name: str, project_path: Path | None = None
+    ) -> ProjectDestinationInspection:
+        resolved = self.projects.resolve_destination(name, project_path)
+        return self._destination_inspection(self.projects.inspect(resolved))
+
+    def list_projects(self) -> tuple[ProjectCatalogEntry, ...]:
+        entries: list[ProjectCatalogEntry] = []
+        for record in self.projects.entries():
+            if record.kind == ManagedProjectKind.RESUMABLE:
+                try:
+                    summary = self._summary(record.project_path)
+                except Exception as exc:
+                    entries.append(
+                        self._catalog_entry(
+                            ManagedProjectRecord(
+                                record.project_path,
+                                ManagedProjectKind.INCOMPLETE,
+                                record.name,
+                                f"Recognized project could not be opened: {exc}",
+                                source_path=record.source_path,
+                            )
+                        )
+                    )
+                else:
+                    entries.append(self._catalog_entry(record, project=summary))
+            else:
+                entries.append(self._catalog_entry(record))
+        return tuple(entries)
 
     def create_project(self, request: NewProjectRequest) -> WorkflowSnapshot:
+        inspection = self.inspect_project_destination(
+            request.name, request.project_path
+        )
+        if not inspection.can_create:
+            record = self.projects.inspect(inspection.project_path)
+            self.projects.remember_occupied(record)
+            raise ProjectDestinationError(inspection)
         source = request.source_path.expanduser().resolve()
-        inspection = self.inspect_source(source)
+        source_inspection = self.inspect_source(source)
         selected = Path(str(request.main_file)).as_posix()
-        candidate_paths = {item.relative_path for item in inspection.candidates}
+        candidate_paths = {item.relative_path for item in source_inspection.candidates}
         if selected not in candidate_paths:
             choices = ", ".join(sorted(candidate_paths))
             raise ValueError(
@@ -227,9 +274,7 @@ class ProofAssistantWorkflow:
             resolve_latex_closure(source, selected)
         except LatexIndexError as exc:
             raise ValueError(str(exc)) from exc
-        project = validate_managed_project_path(
-            request.project_path or default_project_path(request.name)
-        )
+        project = inspection.project_path
         source_in_dropbox = is_in_dropbox(source)
         IncrementalSession.initialize(
             manuscript=source,
@@ -248,6 +293,13 @@ class ProofAssistantWorkflow:
 
     def resume_project(self, project: Path) -> WorkflowSnapshot:
         project = validate_managed_project_path(project)
+        managed = self.projects.inspect(project)
+        if managed.kind == ManagedProjectKind.MIGRATION_READY:
+            # Session loading performs the manager-owned unambiguous migration.
+            IncrementalSession(project)._load_config()
+            managed = self.projects.inspect(project)
+        if managed.kind != ManagedProjectKind.RESUMABLE:
+            raise ProjectDestinationError(self._destination_inspection(managed))
         self._ensure_project_task(project)
         summary = self._summary(project)
         session = IncrementalSession(project)
@@ -296,6 +348,23 @@ class ProofAssistantWorkflow:
         self._record_workflow_state(project, state)
         return WorkflowSnapshot(state, self._summary(project), findings=findings)
 
+    def select_project_main_file(
+        self, project: Path, main_file: str
+    ) -> WorkflowSnapshot:
+        project = validate_managed_project_path(project)
+        try:
+            self.projects.select_main_file(project, main_file)
+        except ProjectConfigurationError as exc:
+            record = self.projects.inspect(project)
+            raise ProjectDestinationError(
+                ProjectDestinationInspection(
+                    project,
+                    ProjectAvailability(record.kind.value),
+                    str(exc),
+                )
+            ) from exc
+        return self.resume_project(project)
+
     def plan_changes(self, project: Path) -> ChangeImpactPlan | None:
         """Compute a complete candidate plan without changing project authority."""
         project = validate_managed_project_path(project)
@@ -342,6 +411,7 @@ class ProofAssistantWorkflow:
                 )
                 old_task_payload = json.loads(store.get_metadata("task_spec") or "{}")
                 old_task_sha = store.get_metadata("task_sha256")
+                main_file_changed = bool(store.get_metadata("pending_main_file_change"))
                 certificates = {
                     str(row["claim_id"]) for row in store.certificate_rows()
                 }
@@ -472,7 +542,7 @@ class ProofAssistantWorkflow:
             )
             for delta in deltas
         )
-        if not file_changes and not task_changed:
+        if not file_changes and not task_changed and not main_file_changed:
             return None
         superseded = tuple(
             sorted(
@@ -490,6 +560,7 @@ class ProofAssistantWorkflow:
             "base_snapshot": snapshot,
             "candidate_inventory_sha256": inventory.sha256,
             "task_sha256": task_sha,
+            "main_file_changed": main_file_changed,
             "file_changes": [
                 {
                     "path": item.path,
@@ -526,6 +597,7 @@ class ProofAssistantWorkflow:
             task_changed=task_changed,
             source_in_dropbox=is_in_dropbox(source),
             created_at=_now(),
+            main_file_changed=main_file_changed,
         )
 
     def confirm_and_verify(
@@ -701,6 +773,34 @@ class ProofAssistantWorkflow:
             source_in_dropbox=bool(
                 config.get("source_in_dropbox", is_in_dropbox(config["manuscript"]))
             ),
+        )
+
+    @staticmethod
+    def _destination_inspection(
+        record: ManagedProjectRecord,
+    ) -> ProjectDestinationInspection:
+        return ProjectDestinationInspection(
+            project_path=record.project_path,
+            availability=ProjectAvailability(record.kind.value),
+            issue=record.issue,
+        )
+
+    @staticmethod
+    def _catalog_entry(
+        record: ManagedProjectRecord, *, project: ProjectSummary | None = None
+    ) -> ProjectCatalogEntry:
+        return ProjectCatalogEntry(
+            name=record.name,
+            project_path=record.project_path,
+            availability=ProjectAvailability(record.kind.value),
+            project=project,
+            issue=record.issue,
+            source_path=record.source_path,
+            main_file_candidates=tuple(
+                LatexSourceCandidate(path, has_documentclass)
+                for path, has_documentclass in record.candidates
+            ),
+            suggested_main_file=record.suggested_main_file,
         )
 
     def _findings_from_store(self, project: Path) -> FindingSummary:

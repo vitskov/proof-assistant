@@ -17,11 +17,13 @@ from proof_assistant.tui.screens import (
     ChangeReviewScreen,
     ClarificationScreen,
     DashboardScreen,
+    ExistingProjectMainFileSelectionScreen,
     FindingsScreen,
     MainFileSelectionScreen,
     NewProjectDraft,
     NewProjectScreen,
     ProgressScreen,
+    ProjectDestinationConflictScreen,
     ProjectReviewScreen,
     RecoveryScreen,
     WelcomeScreen,
@@ -30,6 +32,8 @@ from proof_assistant.workflow.contracts import (
     ChangeImpactPlan,
     NewProjectRequest,
     ProgressEvent,
+    ProjectCatalogEntry,
+    ProjectDestinationInspection,
     ProjectSummary,
     SourceInspection,
     VerificationSettings,
@@ -129,6 +133,7 @@ class ProofAssistantApp(App[None]):
         self,
         draft: NewProjectDraft,
         inspection: SourceInspection,
+        destination: ProjectDestinationInspection,
         *,
         selected_main: str | None = None,
     ) -> None:
@@ -136,6 +141,7 @@ class ProofAssistantApp(App[None]):
             MainFileSelectionScreen(
                 draft,
                 inspection,
+                destination,
                 selected_main=selected_main,
             )
         )
@@ -144,6 +150,7 @@ class ProofAssistantApp(App[None]):
         self,
         draft: NewProjectDraft,
         inspection: SourceInspection,
+        destination: ProjectDestinationInspection,
         main_file: str,
         *,
         auto_selected: bool,
@@ -152,10 +159,14 @@ class ProofAssistantApp(App[None]):
             ProjectReviewScreen(
                 draft,
                 inspection,
+                destination,
                 main_file,
                 auto_selected=auto_selected,
             )
         )
+
+    def show_existing_project_main_selection(self, entry: ProjectCatalogEntry) -> None:
+        self.switch_screen(ExistingProjectMainFileSelectionScreen(entry))
 
     def open_location(self, path: Path) -> None:
         try:
@@ -166,7 +177,7 @@ class ProofAssistantApp(App[None]):
                 screen.show_notice(f"Could not open {path}: {exc}", error=True)
 
     def inspect_source_for_project(self, draft: NewProjectDraft) -> None:
-        """Inspect source through the backend before requiring a root choice."""
+        """Preflight destination and source through backend-owned contracts."""
 
         progress = ProgressScreen(
             "Inspecting manuscript source",
@@ -176,6 +187,14 @@ class ProofAssistantApp(App[None]):
 
         def inspect() -> None:
             try:
+                destination = self.service.inspect_project_destination(
+                    draft.name, draft.project_path
+                )
+                if not destination.can_create:
+                    self.call_from_thread(
+                        self._show_destination_conflict, draft, destination
+                    )
+                    return
                 result = self.service.inspect_source(draft.source_path)
             except Exception as exc:
                 self.call_from_thread(
@@ -185,12 +204,20 @@ class ProofAssistantApp(App[None]):
                     draft.project_path,
                 )
                 return
-            self.call_from_thread(self._after_source_inspection, draft, result)
+            self.call_from_thread(
+                self._after_source_inspection,
+                draft,
+                result,
+                destination,
+            )
 
         self.run_worker(inspect, thread=True, exclusive=True, group="workflow")
 
     def _after_source_inspection(
-        self, draft: NewProjectDraft, inspection: SourceInspection
+        self,
+        draft: NewProjectDraft,
+        inspection: SourceInspection,
+        destination: ProjectDestinationInspection,
     ) -> None:
         if not inspection.candidates:
             self.show_error(
@@ -203,11 +230,46 @@ class ProofAssistantApp(App[None]):
             self.review_new_project(
                 draft,
                 inspection,
+                destination,
                 inspection.candidates[0].relative_path,
                 auto_selected=True,
             )
             return
-        self.show_main_file_selection(draft, inspection)
+        self.show_main_file_selection(draft, inspection, destination)
+
+    def _show_destination_conflict(
+        self,
+        draft: NewProjectDraft,
+        inspection: ProjectDestinationInspection,
+    ) -> None:
+        self.switch_screen(ProjectDestinationConflictScreen(draft, inspection))
+
+    def select_existing_project_main_file(
+        self, entry: ProjectCatalogEntry, main_file: str
+    ) -> None:
+        progress = ProgressScreen(
+            "Saving existing project's main file",
+            project=entry.project_path,
+            main_file=main_file,
+        )
+        self.switch_screen(progress)
+
+        def select() -> None:
+            try:
+                snapshot = self.service.select_project_main_file(
+                    entry.project_path, main_file
+                )
+            except Exception as exc:
+                self.call_from_thread(
+                    self.show_error,
+                    "Could not save main-file selection",
+                    str(exc),
+                    entry.project_path,
+                )
+                return
+            self.call_from_thread(self.show_snapshot, snapshot)
+
+        self.run_worker(select, thread=True, exclusive=True, group="workflow")
 
     def create_project(self, request: NewProjectRequest) -> None:
         """Create and then immediately begin the first verification pass."""

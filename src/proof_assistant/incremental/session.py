@@ -19,6 +19,11 @@ from ..manuscript import (
     RAW_LEAN_TOOLCHAIN,
     ManuscriptInputError,
 )
+from ..workspace.management import (
+    CURRENT_PROJECT_SCHEMA_VERSION,
+    ProjectConfigurationError,
+    load_or_migrate_project_config,
+)
 from .graph import (
     affected_claims,
     build_graph,
@@ -30,7 +35,6 @@ from .graph import (
 from .io import atomic_write_json, atomic_write_text, canonical_hash
 from .latex import (
     LatexIndexError,
-    discover_latex_sources,
     explicit_reference_graph,
     index_manuscript,
     resolve_latex_closure,
@@ -42,7 +46,7 @@ from .snapshot import SnapshotRepository, sync_project_manuscript
 from .store import StateStore
 from .task import parse_task_file, parse_task_text, task_document
 
-PROJECT_CONFIG_VERSION = 2
+PROJECT_CONFIG_VERSION = CURRENT_PROJECT_SCHEMA_VERSION
 PROJECT_GITIGNORE = """\
 /.lake/
 /.repoprover/
@@ -318,88 +322,10 @@ class IncrementalSession:
         return result.stdout.strip()
 
     def _load_config(self) -> dict[str, Any]:
-        if not self.config_path.is_file():
-            raise IncrementalProjectError(
-                f"Not a Proof Assistant project: {self.project}"
-            )
         try:
-            config = json.loads(self.config_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise IncrementalProjectError(
-                f"Invalid project configuration: {exc}"
-            ) from exc
-        schema_version = config.get("schema_version")
-        if schema_version not in {1, PROJECT_CONFIG_VERSION}:
-            raise IncrementalProjectError("Unsupported incremental project schema")
-        if "main_file" not in config:
-            source = Path(str(config.get("manuscript", ""))).expanduser().resolve()
-            try:
-                candidates = discover_latex_sources(source)
-            except LatexIndexError as exc:
-                raise IncrementalProjectError(str(exc)) from exc
-            document_roots = [path for path, is_root in candidates if is_root]
-            if len(candidates) == 1:
-                main_file = candidates[0][0]
-            elif len(document_roots) == 1:
-                main_file = document_roots[0]
-            else:
-                choices = ", ".join(path for path, _is_root in candidates)
-                raise IncrementalProjectError(
-                    "This legacy project has no selected main LaTeX file and "
-                    "the choice is ambiguous. Start a new managed project in "
-                    "Proof Assistant and select the root, or set the relative "
-                    "`main_file` in .repoprover/config.json before resuming. "
-                    f"Candidates: {choices}"
-                )
-            try:
-                closure = resolve_latex_closure(source, main_file)
-            except LatexIndexError as exc:
-                raise IncrementalProjectError(str(exc)) from exc
-            config.update(
-                {
-                    "schema_version": PROJECT_CONFIG_VERSION,
-                    "main_file": closure[0],
-                    "input_files": list(closure[1:]),
-                    "package_version": __version__,
-                }
-            )
-            atomic_write_json(self.config_path, config)
-            if self.database_path.is_file():
-                with StateStore(self.database_path) as store:
-                    store.set_metadata("main_file", closure[0])
-                    store.set_metadata("input_files", json.dumps(closure[1:]))
-        elif schema_version != PROJECT_CONFIG_VERSION:
-            source = Path(str(config.get("manuscript", ""))).expanduser().resolve()
-            try:
-                closure = resolve_latex_closure(source, str(config["main_file"]))
-            except LatexIndexError as exc:
-                raise IncrementalProjectError(str(exc)) from exc
-            config.update(
-                {
-                    "schema_version": PROJECT_CONFIG_VERSION,
-                    "main_file": closure[0],
-                    "input_files": list(closure[1:]),
-                    "package_version": __version__,
-                }
-            )
-            atomic_write_json(self.config_path, config)
-            if self.database_path.is_file():
-                with StateStore(self.database_path) as store:
-                    store.set_metadata("main_file", closure[0])
-                    store.set_metadata("input_files", json.dumps(closure[1:]))
-        main_file = config.get("main_file")
-        if not isinstance(main_file, str) or not main_file.strip():
-            raise IncrementalProjectError(
-                "Project configuration must specify a non-empty relative `main_file`"
-            )
-        input_files = config.get("input_files", [])
-        if not isinstance(input_files, list) or not all(
-            isinstance(value, str) for value in input_files
-        ):
-            raise IncrementalProjectError(
-                "Project configuration `input_files` must be a list of relative paths"
-            )
-        return config
+            return load_or_migrate_project_config(self.project)
+        except ProjectConfigurationError as exc:
+            raise IncrementalProjectError(str(exc)) from exc
 
     def _task_path_from_config(self, config: dict[str, Any]) -> Path:
         value = Path(str(config["task_file"])).expanduser()
@@ -693,6 +619,7 @@ class IncrementalSession:
                     store.set_metadata("manuscript", str(source))
                     store.set_metadata("main_file", main_file)
                     store.set_metadata("input_files", json.dumps(input_files))
+                    store.set_metadata("pending_main_file_change", "")
                     stored_task_path = (
                         "VERIFY.yaml"
                         if task_path.resolve()

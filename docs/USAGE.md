@@ -210,6 +210,13 @@ The project database, not the TUI widget tree, is authoritative. On resume:
 | provider or Lean failure | diagnostic/retry |
 | another process owns the project | read-only progress/status |
 
+The welcome screen uses the same backend project classifier as creation. It
+shows resumable projects, legacy projects needing a main-file choice,
+incomplete project directories, and non-project occupied directories. The last
+two are never deleted or adopted automatically; use **Open folder** to inspect
+them. A new-project destination is checked before source inspection, and a
+conflict returns to the preserved setup form without importing anything.
+
 Proof Assistant does not regenerate a question or start another verification
 when the source has not changed.
 
@@ -218,9 +225,10 @@ project never asks you to select it again; the backend loads it and resolves its
 input closure before planning or verifying. For a legacy project that predates
 this contract, the backend can migrate an unambiguous source (one LaTeX file or
 one uniquely identifiable document root). If several possible roots remain,
-resume enters recovery and verification stops rather than guessing. Create a
-new managed project for that source and make the explicit root selection; the
-legacy project and its existing evidence remain intact.
+the project remains visible as **NEEDS_MAIN_FILE**. Choose **Select main file**,
+make a deliberate selection from the backend-provided candidates, and review
+the resulting proof-impact plan before starting another iteration. Existing
+evidence is preserved; the TUI never edits project metadata itself.
 
 ## Advanced status commands
 

@@ -10,11 +10,14 @@ multi-root manuscript acceptance, and cache and repository hygiene checks. The
 earlier provider-backed two-claim acceptance remains recorded separately below
 and was not rerun for this main-source/TUI development pass.
 
-- Complete automated suite: **187 passed**.
+- Complete automated suite: **201 passed**.
 - Supported installer: **passed**, including its mandatory compiler check and
   complete suite.
 - Fresh wheel and Python 3.13 environment: **passed**.
-- Textual Pilot suite: **10 passed**.
+- Textual Pilot suite: **13 passed**.
+- Live catalog regression: the installed backend surfaced the existing
+  `laplacians` project as **NEEDS_MAIN_FILE** with 17 candidates without
+  modifying its legacy configuration.
 - Installed multi-root sample: **1 selected claim indexed**, alternate root
   excluded.
 - Earlier real small manuscript baseline: **2/2 claims certified**.
@@ -56,7 +59,7 @@ Command:
 /Users/vui1/.venvs/proof-assistant/bin/python -m pytest -q
 ```
 
-Result: `187 passed` (50.53 seconds in the final installer run).
+Result: `201 passed` (56.48 seconds in the final installer run).
 
 The suite covers:
 
@@ -71,6 +74,9 @@ The suite covers:
   certificates;
 - project-owned default/custom `VERIFY.yaml` and migration of older external
   task configurations;
+- backend-owned project catalog reconciliation, default-path resolution,
+  destination occupancy, incomplete-directory visibility, explicit ambiguous
+  legacy-root migration, and non-destructive conflict handling;
 - stable before/copy/after source inventories, add/modify/delete/rename plans,
   task changes, transitive impact closure, and stale confirmation rejection;
 - deterministic resume routing for complete, interrupted, failed, externally
@@ -100,7 +106,7 @@ PROOF_ASSISTANT_PYTHON=3.13
 
 It used `uv`, installed the package and development dependencies, executed
 `proof-assistant compiler-check` before cache/test work, compiled and ran a C
-program with `/usr/bin/clang`, initialized the preserved cache, and ran all 187
+program with `/usr/bin/clang`, initialized the preserved cache, and ran all 201
 tests.
 
 An sdist and wheel were built outside Dropbox. The wheel was installed into a
@@ -143,7 +149,7 @@ the evidence was recorded.
 ## Earlier real verification acceptance
 
 The following provider-backed evidence was produced before this main-source/TUI
-pass and remains useful regression context. It was not rerun in the final 187-test
+pass and remains useful regression context. It was not rerun in the final 201-test
 gate.
 
 A fresh managed project outside Dropbox was initialized from the two-claim

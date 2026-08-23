@@ -47,8 +47,10 @@ Preserve the component silos:
 - `proof_assistant.workflow.contracts` defines immutable boundary values and
   `workflow.service.ProofAssistantWorkflow` owns UI-neutral flow/resume
   decisions;
-- `proof_assistant.workspace` owns catalog, paths, tasks, source observation,
-  staged import, and change plans;
+- `proof_assistant.workspace.management` is the distinct backend authority for
+  project discovery, destination occupancy, catalog reconciliation, and legacy
+  migration; adjacent workspace modules own source observation and staged
+  import;
 - `proof_assistant.presentation` owns source excerpts and presentation view
   models; and
 - `proof_assistant.incremental` owns verification state and certificates.
@@ -61,6 +63,12 @@ progress, and verification. A single-file TUI shortcut may auto-select that
 file, but must still call the backend with the explicit value. Never restore an
 all-`.tex` implicit index or make the TUI independently resolve `\input` and
 `\include` topology.
+
+Do not let a TUI inspect managed directories or parse project configuration.
+Use `inspect_project_destination` before creation, render every tagged
+`ProjectCatalogEntry`, and call `select_project_main_file` for ambiguous legacy
+recovery. The backend must remain the only owner of defaults, occupancy,
+migration, and persistence.
 
 No Textual import may cross into backend/workflow code. Do not let TUI widgets,
 filesystem notifications, unchecked paths, or model prose become state

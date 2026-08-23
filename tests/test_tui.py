@@ -14,10 +14,12 @@ from proof_assistant.tui import ProofAssistantApp
 from proof_assistant.tui.screens import (
     ChangeReviewScreen,
     ClarificationScreen,
+    ExistingProjectMainFileSelectionScreen,
     FindingsScreen,
     MainFileSelectionScreen,
     NewProjectScreen,
     ProgressScreen,
+    ProjectDestinationConflictScreen,
     ProjectReviewScreen,
     RecoveryScreen,
     WelcomeScreen,
@@ -37,6 +39,9 @@ from proof_assistant.workflow.contracts import (
     ProgressEvent,
     ProgressPhase,
     ProgressSink,
+    ProjectAvailability,
+    ProjectCatalogEntry,
+    ProjectDestinationInspection,
     ProjectSummary,
     SourceInspection,
     SourceLocation,
@@ -69,6 +74,22 @@ def project(*, state: WorkflowState = WorkflowState.PROJECT_READY) -> ProjectSum
         last_opened_at="2026-08-23T12:00:00Z",
         workflow_state=state,
         source_in_dropbox=True,
+    )
+
+
+def catalog_entry(
+    p: ProjectSummary,
+    *,
+    availability: ProjectAvailability = ProjectAvailability.RESUMABLE,
+    issue: str | None = None,
+) -> ProjectCatalogEntry:
+    return ProjectCatalogEntry(
+        name=p.name,
+        project_path=p.project_path,
+        availability=availability,
+        project=p if availability == ProjectAvailability.RESUMABLE else None,
+        issue=issue,
+        source_path=p.source_path,
     )
 
 
@@ -129,6 +150,7 @@ def change_plan(p: ProjectSummary) -> ChangeImpactPlan:
         task_changed=False,
         source_in_dropbox=True,
         created_at="2026-08-23T12:01:00Z",
+        main_file_changed=True,
     )
 
 
@@ -148,8 +170,10 @@ class FakeWorkflowService:
 
     def __init__(self) -> None:
         self.project = project()
-        self.projects: tuple[ProjectSummary, ...] = (self.project,)
+        self.projects: tuple[ProjectCatalogEntry, ...] = (catalog_entry(self.project),)
         self.inspected: list[Path] = []
+        self.inspected_destinations: list[tuple[str, Path | None]] = []
+        self.selected_main_files: list[tuple[Path, str]] = []
         self.created: list[NewProjectRequest] = []
         self.resumed: list[Path] = []
         self.planned: list[Path] = []
@@ -161,10 +185,17 @@ class FakeWorkflowService:
             suggested_main_file="main.tex",
             source_in_dropbox=True,
         )
+        self.destination_result = ProjectDestinationInspection(
+            project_path=self.project.project_path,
+            availability=ProjectAvailability.AVAILABLE,
+        )
         self.creation_release: threading.Event | None = None
         self.verification_release: threading.Event | None = None
         self.create_result = WorkflowSnapshot(WorkflowState.PROJECT_READY, self.project)
         self.resume_result = WorkflowSnapshot(WorkflowState.PROJECT_READY, self.project)
+        self.select_main_result = WorkflowSnapshot(
+            WorkflowState.PROJECT_READY, self.project
+        )
         self.verify_result = WorkflowSnapshot(
             WorkflowState.COMPLETED,
             ProjectSummary(
@@ -176,8 +207,19 @@ class FakeWorkflowService:
     def default_task_text(self) -> str:
         return "Verify every claimed theorem without sorry or new axioms."
 
-    def list_projects(self) -> Sequence[ProjectSummary]:
+    def list_projects(self) -> Sequence[ProjectCatalogEntry]:
         return self.projects
+
+    def inspect_project_destination(
+        self, name: str, project_path: Path | None = None
+    ) -> ProjectDestinationInspection:
+        self.inspected_destinations.append((name, project_path))
+        if self.destination_result.can_create and project_path is not None:
+            return ProjectDestinationInspection(
+                project_path=project_path,
+                availability=ProjectAvailability.AVAILABLE,
+            )
+        return self.destination_result
 
     def inspect_source(self, source: Path) -> SourceInspection:
         self.inspected.append(source)
@@ -193,6 +235,12 @@ class FakeWorkflowService:
         if self.creation_release is not None:
             self.creation_release.wait(timeout=3)
         return self.create_result
+
+    def select_project_main_file(
+        self, project_path: Path, main_file: str
+    ) -> WorkflowSnapshot:
+        self.selected_main_files.append((project_path, main_file))
+        return self.select_main_result
 
     def resume_project(self, project_path: Path) -> WorkflowSnapshot:
         self.resumed.append(project_path)
@@ -353,7 +401,9 @@ async def test_default_task_is_backend_owned() -> None:
         await settle_screen(pilot)
 
         assert service.created[0].task_text is None
-        assert service.created[0].project_path is None
+        assert (
+            service.created[0].project_path == service.destination_result.project_path
+        )
         assert service.created[0].main_file == "main.tex"
 
 
@@ -455,6 +505,139 @@ async def test_new_project_wizard_back_preserves_draft_and_selection() -> None:
             "Verify the key result."
         )
         assert service.created == []
+        await settle_screen(pilot)
+
+
+@async_test
+async def test_legacy_catalog_project_selects_main_and_recovers() -> None:
+    service = FakeWorkflowService()
+    legacy_path = Path("/projects/legacy-paper")
+    service.projects = (
+        ProjectCatalogEntry(
+            name="Legacy Paper",
+            project_path=legacy_path,
+            availability=ProjectAvailability.NEEDS_MAIN_FILE,
+            issue="Legacy project has no persisted main file.",
+            source_path=Path("/source/legacy"),
+            main_file_candidates=(
+                LatexSourceCandidate("article.tex", True),
+                LatexSourceCandidate("alternate.tex", True),
+            ),
+            suggested_main_file="article.tex",
+        ),
+    )
+    app = ProofAssistantApp(service)
+
+    async with app.run_test(size=(120, 45)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        await wait_for(
+            pilot,
+            lambda: bool(app.screen.query("#select-existing-main-0").nodes),
+        )
+        catalog_text = "\n".join(
+            str(widget.renderable) for widget in app.screen.query(".project-summary")
+        )
+        assert "Legacy Paper" in catalog_text
+        assert "NEEDS_MAIN_FILE" in catalog_text
+        assert "no persisted main file" in catalog_text
+
+        app.screen.query_one("#select-existing-main-0", Button).press()
+        await pilot.pause()
+        await wait_for(
+            pilot,
+            lambda: isinstance(app.screen, ExistingProjectMainFileSelectionScreen),
+        )
+        assert service.selected_main_files == []
+        assert "suggested" in str(app.screen.query_one("#existing-main-option-0").label)
+        await pilot.click("#existing-main-option-1")
+        await pilot.click("#confirm-existing-main")
+        await wait_for(
+            pilot, lambda: app.screen.__class__.__name__ == "DashboardScreen"
+        )
+        assert service.selected_main_files == [(legacy_path, "alternate.tex")]
+        await settle_screen(pilot)
+
+
+@async_test
+async def test_occupied_and_incomplete_catalog_entries_remain_visible() -> None:
+    service = FakeWorkflowService()
+    occupied = ProjectCatalogEntry(
+        name="Occupied Folder",
+        project_path=Path("/projects/occupied"),
+        availability=ProjectAvailability.OCCUPIED,
+        issue="Folder contains unrelated files.",
+    )
+    incomplete = ProjectCatalogEntry(
+        name="Incomplete Project",
+        project_path=Path("/projects/incomplete"),
+        availability=ProjectAvailability.INCOMPLETE,
+        issue="Managed metadata is incomplete.",
+    )
+    service.projects = (occupied, incomplete)
+    opened: list[Path] = []
+    app = ProofAssistantApp(service, location_opener=opened.append)
+
+    async with app.run_test(size=(120, 45)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        await wait_for(
+            pilot, lambda: len(app.screen.query(".project-summary").nodes) == 2
+        )
+        catalog_text = "\n".join(
+            str(widget.renderable) for widget in app.screen.query(".project-summary")
+        )
+        assert "OCCUPIED" in catalog_text
+        assert "Folder contains unrelated files" in catalog_text
+        assert "INCOMPLETE" in catalog_text
+        assert "Managed metadata is incomplete" in catalog_text
+        assert all(
+            not (button.id or "").startswith("resume-")
+            for button in app.screen.query(Button)
+        )
+        app.screen.query_one("#open-catalog-0", Button).press()
+        await pilot.pause()
+        assert opened == [Path("/projects/occupied")]
+
+
+@async_test
+async def test_destination_conflict_stops_before_source_inspection_or_creation() -> (
+    None
+):
+    service = FakeWorkflowService()
+    conflict_path = Path("/projects/already-used")
+    service.destination_result = ProjectDestinationInspection(
+        project_path=conflict_path,
+        availability=ProjectAvailability.OCCUPIED,
+        issue="Destination contains unrelated user files.",
+    )
+    app = ProofAssistantApp(service)
+
+    async with app.run_test(size=(120, 45)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        await pilot.click("#new-project")
+        await wait_for(pilot, lambda: isinstance(app.screen, NewProjectScreen))
+        app.screen.query_one("#project-name", Input).value = "Conflict Paper"
+        app.screen.query_one("#source-path", Input).value = "/source/paper"
+        app.screen.query_one("#project-path", Input).value = str(conflict_path)
+        await pilot.click("#continue")
+        await wait_for(
+            pilot, lambda: isinstance(app.screen, ProjectDestinationConflictScreen)
+        )
+
+        detail = str(app.screen.query_one("#destination-conflict", Static).renderable)
+        assert str(conflict_path) in detail
+        assert "OCCUPIED" in detail
+        assert "unrelated user files" in detail
+        assert service.inspected_destinations == [("Conflict Paper", conflict_path)]
+        assert service.inspected == []
+        assert service.created == []
+        await pilot.click("#back")
+        await wait_for(pilot, lambda: isinstance(app.screen, NewProjectScreen))
+        assert app.screen.query_one("#project-name", Input).value == "Conflict Paper"
+        assert app.screen.query_one("#source-path", Input).value == "/source/paper"
+        assert app.screen.query_one("#project-path", Input).value == str(conflict_path)
+        assert service.created == []
+        await pilot.click("#cancel")
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
         await settle_screen(pilot)
 
 
@@ -612,7 +795,7 @@ async def test_resume_clarification_exact_source_and_no_change() -> None:
         }
     )
     service.project = waiting_project
-    service.projects = (waiting_project,)
+    service.projects = (catalog_entry(waiting_project),)
     service.resume_result = WorkflowSnapshot(
         WorkflowState.AWAITING_CLARIFICATION,
         waiting_project,
@@ -697,6 +880,7 @@ async def test_change_impact_requires_explicit_confirmation() -> None:
         assert "q-1" in text
         assert "candidate-main.tex" in text
         assert "sections/new-input.tex" in text
+        assert "Main file changed: yes" in text
         assert service.verified == []
 
         await pilot.click("#confirm")
@@ -720,7 +904,7 @@ async def test_busy_project_opens_recovery_screen() -> None:
     busy = ProjectSummary(
         **{**service.project.__dict__, "workflow_state": WorkflowState.BUSY_EXTERNAL}
     )
-    service.projects = (busy,)
+    service.projects = (catalog_entry(busy),)
     service.resume_result = WorkflowSnapshot(
         WorkflowState.BUSY_EXTERNAL,
         busy,

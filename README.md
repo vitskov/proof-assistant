@@ -47,6 +47,11 @@ defaults to:
 $HOME/proof-assistant/<project-name>
 ```
 
+The project list is reconciled by the backend. Resumable projects have a
+**Resume** action; older projects without an unambiguous manuscript root have a
+**Select main file** action; incomplete projects and occupied directories remain
+visible with their diagnostic instead of being silently omitted.
+
 Select an existing folder containing the LaTeX source, then choose **Continue:
 inspect source**. Proof Assistant establishes one explicit manuscript root
 before it creates anything. With one LaTeX file it shows that file as the

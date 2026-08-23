@@ -58,9 +58,19 @@ is intentionally excluded.
 Projects created before the mandatory-main-file contract can resume
 automatically when their source has one LaTeX file or one uniquely identifiable
 document root. If several roots remain possible, resume enters recovery instead
-of guessing. Create a new managed project for the same source in the TUI, or use
-`manuscript init --main-file PATH` with a new project destination. The legacy
-project and its evidence remain untouched.
+of guessing. The welcome screen keeps the project visible as
+**NEEDS_MAIN_FILE**; choose **Select main file** and make the explicit choice.
+The backend records it and presents a change-impact review before verification.
+The legacy project and its existing evidence remain intact.
+
+## A project destination says it must be new or empty
+
+The welcome screen and new-project preflight use the same backend classifier.
+An existing valid project appears with **Resume**, an ambiguous legacy project
+with **Select main file**, and incomplete or unrelated occupied directories with
+their diagnostic and **Open folder**. Proof Assistant never deletes or adopts
+an occupied directory automatically. Return to the preserved setup form and
+choose another managed-project path if the directory is unrelated.
 
 ## Clarification returns after resume
 
