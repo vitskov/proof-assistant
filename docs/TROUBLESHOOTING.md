@@ -33,9 +33,10 @@ entire pane). Advanced status remains readable during an active writer:
 proof-assistant manuscript status --project "$PROJECT"
 ```
 
-`mutation in progress: yes` with a `RUNNING` row means another process owns the
-project lock. A second TUI should enter read-only progress instead of mutating
-the project.
+`mutation in progress: yes` with a `RUNNING` row means the detached backend
+worker currently holds the project's mutation lease. Any TUI can attach to the
+durable job and show its progress; closing a TUI does not release or cancel that
+backend work.
 
 For diagnosis only:
 
@@ -161,6 +162,6 @@ project and its evidence remain intact.
 
 The TUI task editor creates the project-owned task during setup. For an existing
 project, do not introduce a separate user-supplied task file or edit task state
-while verification owns the project lock. Any future task edit must update the
+while a backend verification is active. Any future task edit must update the
 managed `$PROJECT/VERIFY.yaml` through a workflow-aware interface so task impact
 is reviewed before the next iteration.

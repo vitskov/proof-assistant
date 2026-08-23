@@ -13,6 +13,7 @@ license-files = ["LICENSE"]
 authors = [{name = "Vladimir Itskov"}]
 dependencies = [
     "networkx>=3.4,<4",
+    "psutil>=7,<8",
     "pylatexenc>=2.10,<3",
     "PyYAML>=6,<7",
     "rich>=13,<15",

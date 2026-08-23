@@ -16,8 +16,12 @@ attention.
   editor.
 - Distinguish verified, ambiguous, unresolved, suspected-false, technical
   failure, and kernel-checked counterexample outcomes.
+- Explain an incomplete check with its first deterministic blocking reason and
+  an interactive, copyable proof-dependency map.
 - Preserve independently checked Lean certificates between manuscript edits.
 - Show how one changed statement affects its dependent lemmas and theorems.
+- Auto-tune Codex turns, Lean checks, and Lake builds independently for the
+  machine, with effective limits and pressure visible in the TUI.
 - Keep source snapshots, reports, questions, Lean code, and history together in
   one durable project.
 
@@ -48,9 +52,13 @@ $HOME/proof-assistant/<project-name>
 ```
 
 The project list is reconciled by the backend. Resumable projects have a
-**Resume** action; older projects without an unambiguous manuscript root have a
-**Select main file** action; incomplete projects and occupied directories remain
-visible with their diagnostic instead of being silently omitted.
+**Resume** action and a guarded **Delete project** action; older projects
+without an unambiguous manuscript root have a **Select main file** action;
+incomplete projects and occupied directories remain visible with their
+diagnostic instead of being silently omitted. Deletion requires the exact
+project name, is refused while a backend verification is active, and moves only
+the managed project to a recoverable location. The authoritative manuscript
+source is never moved or changed.
 
 Select an existing folder containing the LaTeX source, then choose **Continue:
 inspect source**. Proof Assistant establishes one explicit manuscript root
@@ -87,7 +95,13 @@ If no author action is needed, the TUI finishes with a human-readable findings
 screen and tells you where the full evidence is stored. **View report in
 terminal** opens a scrollable, rendered Markdown viewer with a table of contents
 and a separate selectable source tab, so it works over SSH without a graphical
-file opener. If clarification is needed, the TUI identifies the actual input
+file opener. For an incomplete or technically failed check, **Inspect failure
+dependencies** opens a terminal-native proof tree: direct failures are red,
+blocked dependents are yellow, certified nodes are green, and selecting a node
+shows its exact persisted reason and supporting log paths. A copyable text
+outline is always available. The uncommon case of an actual dependency cycle
+uses a cycle-safe component/edge view instead of pretending that the graph is a
+tree. If clarification is needed, the TUI identifies the actual input
 file and source lines, explains the question, and waits while you edit the
 original source folder. It then detects all stable changes, previews their
 proof-graph impact, and starts the next iteration only after your explicit
@@ -96,7 +110,10 @@ confirmation.
 While verification runs, the progress screen names the selected main file and
 every resolved input, explains the current preparation/proof/certification
 stage, and keeps read-only source, stage, and event panes whose text can be
-selected and copied.
+selected and copied. Verification runs in a detached backend worker: closing
+the TUI closes only that client view. Reopening Proof Assistant attaches to the
+same job and replays its durable progress; cooperative cancellation is also a
+backend request, not a TUI-process signal.
 
 Informational values throughout the TUI—including paths, candidate files,
 commands, progress, findings, warnings, and errors—are exposed in selectable
@@ -111,6 +128,7 @@ source representation.
 | start, resume, clarify, and review | [Usage guide](docs/USAGE.md) |
 | understand the project-owned verification task | [Task and scope](docs/TASK_FILES.md) |
 | understand snapshots, graphs, and certificates | [Incremental verification](docs/INCREMENTAL_VERIFICATION.md) |
+| tune Codex, Lean, and build resources | [Concurrency and resources](docs/CONCURRENCY.md) |
 | use advanced command-line operations | [Command reference](docs/COMMAND_REFERENCE.md) |
 | diagnose a quiet or failed run | [Troubleshooting](docs/TROUBLESHOOTING.md) |
 | understand disk use and cleanup | [Cache and storage](docs/CACHE_AND_STORAGE.md) |

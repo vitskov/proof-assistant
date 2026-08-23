@@ -67,7 +67,22 @@ Resume routing is based on persistent backend state:
 - completed run -> findings;
 - interrupted run -> recovery;
 - provider/Lean failure -> diagnostics; and
-- active external writer -> read-only progress.
+- active detached verification worker -> attached replayable progress;
+- legacy session-lock-only verifier -> attached coarse read-only progress.
+
+The TUI is never the verification worker. It submits, observes by durable event
+cursor, and requests cooperative cancellation through the workflow contract.
+The detached backend worker holds the lifetime and project-mutation leases, so
+a TUI exit or SSH disconnect does not stop a run. The bounded default is two
+independent proof-batch agents; `jobs=1` remains the explicit sequential
+override.
+
+Project removal is also backend-owned. The welcome-screen TUI may request
+`inspect_project_deletion` and, after exact-name confirmation, `delete_project`;
+it must never move or remove directories itself. Deletion applies only to a
+validated resumable managed project, is refused under an active writer lock,
+and moves the project atomically to the platform recovery area before catalog
+reconciliation. The authoritative manuscript source remains untouched.
 
 ## Architectural boundary
 
@@ -93,6 +108,34 @@ Codex may improve clarification wording under a validated schema, but the host
 owns the claim, source path/span, quotation, diagnostics, affected graph, and
 possible-resolution facts. Invalid output falls back deterministically.
 
+## Concurrency contract
+
+- AI turns, Lean work, and Lake builds use three independent machine-global
+  admission namespaces backed by expiring, heartbeat-renewed SQLite leases.
+- Machine policy lives in `$HOME/.config/proof-assistant/settings.yaml` (or the
+  XDG equivalent). The service accepts a future project overlay, but no
+  project-specific concurrency settings are currently enabled.
+- The TUI is a client of the workflow settings API. **Concurrency / Resources**
+  exposes configured and effective values, telemetry, warnings, calibration,
+  and reset actions; **Legacy settings** contains logical batch fan-out and
+  other compatibility knobs.
+- Manual reductions drain safely without killing admitted work. Detached jobs
+  reload machine settings during the run, and stale refresh failures cannot
+  restore old limits.
+- Automatic Lean capacity is CPU- and RAM-bounded. Project import/RSS profiles
+  are exact provenance, while the shared limit uses the most conservative fresh
+  p95 across profiles for the same machine allocation and never drops below the
+  uncalibrated memory fallback.
+- Yellow memory pressure allows at most one full build machine-wide so it
+  cannot create either build storms or a permanent no-progress state. Red and
+  emergency pressure block new builds.
+- Every managed Codex turn—including reviewers and diagnostics—shares the AI
+  controller. Every dynamic `lean_check` and recognized `lake build`, plus host
+  bootstrap, extraction, merge, and certification work, passes through its
+  corresponding controller.
+- `jobs=2` is the default logical multi-agent fan-out. Logical agents never
+  override the current AI, Lean, or build admission limits.
+
 ## Verification invariants
 
 - The author-facing source and managed project cannot contain one another.
@@ -109,6 +152,12 @@ possible-resolution facts. Invalid output falls back deterministically.
   kernel-checked counterexample remain distinct states.
 - Questions and completed evidence survive process interruption without model
   conversation state.
+- Failure incidents, run scope, end states, and dependency edges are immutable
+  per-run evidence. The backend chooses deterministic blocker paths and emits a
+  tree for acyclic graphs; only actual cycles use the component-graph fallback.
+- A TUI may color failure states, but it must also show textual status tags and
+  a selectable exact-reason/copyable-outline twin. It never reconstructs the
+  failure graph from SQLite.
 
 ## Validation before handoff/publication
 

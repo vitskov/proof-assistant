@@ -6,38 +6,51 @@ All long-running work crosses ``WorkflowServiceContract`` on a worker thread.
 
 from __future__ import annotations
 
-import threading
+import time
 import webbrowser
 from collections.abc import Callable
 from pathlib import Path
 
 from textual.app import App
+from textual.worker import Worker, get_current_worker
 
 from proof_assistant.tui.screens import (
     ChangeReviewScreen,
     ClarificationScreen,
     DashboardScreen,
     ExistingProjectMainFileSelectionScreen,
+    FailureDependencyScreen,
     FindingsScreen,
     MainFileSelectionScreen,
     NewProjectDraft,
     NewProjectScreen,
     ProgressScreen,
+    ProjectDeletionConfirmationScreen,
+    ProjectDeletionOutcomeScreen,
     ProjectDestinationConflictScreen,
     ProjectReviewScreen,
     RecoveryScreen,
     ReportViewerScreen,
     WelcomeScreen,
 )
+from proof_assistant.tui.settings import (
+    ConcurrencyResourcesScreen,
+    LegacySettingsScreen,
+    SettingsHomeScreen,
+)
 from proof_assistant.workflow.contracts import (
     ChangeImpactPlan,
+    FailureDependencyReport,
+    MachineSettingsSnapshot,
     NewProjectRequest,
-    ProgressEvent,
     ProjectCatalogEntry,
+    ProjectDeletionInspection,
+    ProjectDeletionResult,
     ProjectDestinationInspection,
     ProjectSummary,
     ReportDocument,
     SourceInspection,
+    VerificationJobObservation,
     VerificationSettings,
     WorkflowServiceContract,
     WorkflowSnapshot,
@@ -45,24 +58,6 @@ from proof_assistant.workflow.contracts import (
 )
 
 LocationOpener = Callable[[Path], None]
-
-
-class ThreadCancellationToken:
-    """Small thread-safe implementation of the public cancellation contract."""
-
-    def __init__(self) -> None:
-        self._event = threading.Event()
-
-    @property
-    def cancelled(self) -> bool:
-        return self._event.is_set()
-
-    def cancel(self) -> None:
-        self._event.set()
-
-    def raise_if_cancelled(self) -> None:
-        if self.cancelled:
-            raise InterruptedError("verification cancelled by user")
 
 
 def _default_location_opener(path: Path) -> None:
@@ -105,6 +100,17 @@ class ProofAssistantApp(App[None]):
     #report-tabs { height: 1fr; min-height: 8; }
     #report-markdown { height: 1fr; border: round $panel; }
     #report-source { height: 1fr; border: round $accent; }
+    #failure-tabs { height: 1fr; min-height: 8; }
+    #failure-tree, #failure-components, #failure-detail, #failure-outline {
+        height: 1fr; min-height: 6; border: round $panel;
+    }
+    ProjectDeletionConfirmationScreen {
+        align: center middle; background: $background 70%;
+    }
+    #delete-project-dialog {
+        width: 92%; max-width: 76; height: 92%; max-height: 22;
+        border: round $error; background: $surface; padding: 1 2;
+    }
     .progress-warning { height: 5; }
     ProgressScreen #status-line { height: 3; border: none; }
     #source-excerpt {
@@ -113,6 +119,22 @@ class ProofAssistantApp(App[None]):
     #impact-detail { height: 1fr; border: round $panel; padding: 1; overflow: auto; }
     #findings-detail { height: 1fr; border: round $panel; padding: 1; overflow: auto; }
     #status-line { margin: 1 0; }
+    #settings-machine-summary { height: 7; border: round $panel; }
+    #concurrency-summary { height: 18; border: round $accent; }
+    #resource-telemetry { height: 10; border: round $panel; }
+    #settings-resolution { height: 12; border: round $panel; }
+    #benchmark-result { height: 8; border: round $panel; }
+    #legacy-settings-summary { height: 16; border: round $panel; }
+    .settings-benchmark-toolbar { height: auto; }
+    .settings-benchmark-toolbar Button { width: auto; margin-bottom: 1; }
+    SettingsWarningConfirmationScreen {
+        align: center middle; background: $background 70%;
+    }
+    #settings-warning-dialog {
+        width: 92%; max-width: 76; height: 92%; max-height: 22;
+        border: round $warning; background: $surface; padding: 1 2;
+    }
+    #settings-warning-detail { height: 1fr; min-height: 7; }
     """
 
     def __init__(
@@ -125,14 +147,55 @@ class ProofAssistantApp(App[None]):
         self.service = service
         self.location_opener = location_opener or _default_location_opener
         self.current_snapshot: WorkflowSnapshot | None = None
-        self.settings = VerificationSettings()
-        self._cancellation: ThreadCancellationToken | None = None
+        self._settings_return_snapshot: WorkflowSnapshot | None = None
+        self._active_observation: VerificationJobObservation | None = None
+        self._observer_worker: Worker[None] | None = None
+        self._progress_screen: ProgressScreen | None = None
 
     def on_mount(self) -> None:
         self.push_screen(WelcomeScreen())
 
     def show_welcome(self) -> None:
         self.switch_screen(WelcomeScreen())
+
+    def show_settings(
+        self,
+        snapshot: MachineSettingsSnapshot | None = None,
+        *,
+        project: Path | None = None,
+        return_to_project: bool | None = None,
+    ) -> None:
+        """Open machine settings with optional project calibration context."""
+
+        if return_to_project is not None:
+            self._settings_return_snapshot = (
+                self.current_snapshot if return_to_project else None
+            )
+        self.switch_screen(SettingsHomeScreen(snapshot, project=project))
+
+    def show_concurrency_settings(
+        self,
+        snapshot: MachineSettingsSnapshot,
+        *,
+        project: Path | None = None,
+    ) -> None:
+        self.switch_screen(ConcurrencyResourcesScreen(snapshot, project=project))
+
+    def show_legacy_settings(
+        self,
+        snapshot: MachineSettingsSnapshot,
+        *,
+        project: Path | None = None,
+    ) -> None:
+        self.switch_screen(LegacySettingsScreen(snapshot, project=project))
+
+    def close_settings(self) -> None:
+        if self._settings_return_snapshot is not None:
+            snapshot = self._settings_return_snapshot
+            self._settings_return_snapshot = None
+            self.show_snapshot(snapshot)
+        else:
+            self.show_welcome()
 
     def show_new_project(self, draft: NewProjectDraft | None = None) -> None:
         self.switch_screen(NewProjectScreen(draft))
@@ -176,6 +239,107 @@ class ProofAssistantApp(App[None]):
     def show_existing_project_main_selection(self, entry: ProjectCatalogEntry) -> None:
         self.switch_screen(ExistingProjectMainFileSelectionScreen(entry))
 
+    def request_project_deletion(self, project: ProjectSummary) -> None:
+        """Ask the backend to preflight deletion before showing confirmation."""
+
+        screen = self.screen
+        if hasattr(screen, "show_notice"):
+            screen.show_notice(
+                "Checking whether managed project can move to recoverable deletion "
+                "storage: "
+                f"{project.project_path}"
+            )
+
+        def inspect() -> None:
+            try:
+                inspection = self.service.inspect_project_deletion(project.project_path)
+            except Exception as exc:
+                self.call_from_thread(
+                    self._show_project_deletion_outcome,
+                    project,
+                    None,
+                    None,
+                    str(exc),
+                )
+                return
+            self.call_from_thread(
+                self._confirm_project_deletion,
+                project,
+                inspection,
+            )
+
+        self.run_worker(inspect, thread=True, exclusive=True, group="catalog")
+
+    def _confirm_project_deletion(
+        self,
+        project: ProjectSummary,
+        inspection: ProjectDeletionInspection,
+    ) -> None:
+        dialog = ProjectDeletionConfirmationScreen(project, inspection)
+
+        def after_confirmation(confirmed: bool | None) -> None:
+            if confirmed:
+                self._delete_project(project, inspection)
+            else:
+                screen = self.screen
+                if hasattr(screen, "show_notice"):
+                    screen.show_notice(
+                        f"Deletion canceled; managed project remains at "
+                        f"{inspection.project_path}."
+                    )
+
+        self.push_screen(dialog, callback=after_confirmation)
+
+    def _delete_project(
+        self,
+        project: ProjectSummary,
+        inspection: ProjectDeletionInspection,
+    ) -> None:
+        self.switch_screen(
+            ProgressScreen(
+                "Moving managed project to recoverable deletion storage",
+                project=inspection.project_path,
+            )
+        )
+
+        def delete() -> None:
+            try:
+                result = self.service.delete_project(project.project_path)
+            except Exception as exc:
+                self.call_from_thread(
+                    self._show_project_deletion_outcome,
+                    project,
+                    inspection,
+                    None,
+                    str(exc),
+                )
+                return
+            self.call_from_thread(
+                self._show_project_deletion_outcome,
+                project,
+                inspection,
+                result,
+                None,
+            )
+
+        self.run_worker(delete, thread=True, exclusive=True, group="catalog")
+
+    def _show_project_deletion_outcome(
+        self,
+        project: ProjectSummary,
+        inspection: ProjectDeletionInspection | None,
+        result: ProjectDeletionResult | None,
+        error: str | None,
+    ) -> None:
+        self.switch_screen(
+            ProjectDeletionOutcomeScreen(
+                project,
+                inspection=inspection,
+                result=result,
+                error=error,
+            )
+        )
+
     def open_location(self, path: Path) -> None:
         try:
             self.location_opener(path)
@@ -218,6 +382,49 @@ class ProofAssistantApp(App[None]):
         error: str | None,
     ) -> None:
         self.switch_screen(ReportViewerScreen(snapshot, document=document, error=error))
+
+    def view_failure_report(self, snapshot: WorkflowSnapshot) -> None:
+        """Load backend-owned failure evidence for an SSH-safe terminal view."""
+
+        embedded = snapshot.findings.failure_report if snapshot.findings else None
+        if embedded is not None:
+            self.switch_screen(FailureDependencyScreen(snapshot, report=embedded))
+            return
+
+        project = snapshot.project.project_path
+        progress = ProgressScreen("Loading failure dependency report", project=project)
+        self.switch_screen(progress)
+
+        def load() -> None:
+            try:
+                report = self.service.load_failure_report(project, run_id=None)
+            except Exception as exc:
+                self.call_from_thread(
+                    self._show_failure_report,
+                    snapshot,
+                    None,
+                    str(exc),
+                )
+                return
+            error = None if report is not None else "No failure report is available."
+            self.call_from_thread(
+                self._show_failure_report,
+                snapshot,
+                report,
+                error,
+            )
+
+        self.run_worker(load, thread=True, exclusive=True, group="workflow")
+
+    def _show_failure_report(
+        self,
+        snapshot: WorkflowSnapshot,
+        report: FailureDependencyReport | None,
+        error: str | None,
+    ) -> None:
+        self.switch_screen(
+            FailureDependencyScreen(snapshot, report=report, error=error)
+        )
 
     def inspect_source_for_project(self, draft: NewProjectDraft) -> None:
         """Preflight destination and source through backend-owned contracts."""
@@ -317,7 +524,6 @@ class ProofAssistantApp(App[None]):
     def create_project(self, request: NewProjectRequest) -> None:
         """Create and then immediately begin the first verification pass."""
 
-        self.settings = request.settings
         progress = ProgressScreen(
             "Creating project",
             project=request.project_path,
@@ -346,20 +552,73 @@ class ProofAssistantApp(App[None]):
             WorkflowState.PROJECT_READY,
             WorkflowState.OBSERVING_SOURCE,
         }:
-            self.start_verification(snapshot.project, None, self.settings)
+            self.start_verification(snapshot.project, None)
             return
         self.show_snapshot(snapshot)
 
-    def resume_project(self, project: Path) -> None:
-        progress = ProgressScreen("Resuming project", project=project)
+    def resume_project(self, project: ProjectSummary | Path) -> None:
+        """Attach to active backend work before loading a canonical snapshot."""
+
+        project_path = (
+            project.project_path if isinstance(project, ProjectSummary) else project
+        )
+        progress = ProgressScreen("Inspecting project activity", project=project_path)
         self.switch_screen(progress)
 
         def resume() -> None:
             try:
-                snapshot = self.service.resume_project(project)
+                observation = self.service.observe_verification(
+                    project_path, after_sequence=0
+                )
             except Exception as exc:
                 self.call_from_thread(
-                    self.show_error, "Could not resume project", str(exc), project
+                    self.show_error,
+                    "Could not inspect active verification",
+                    str(exc),
+                    project_path,
+                )
+                return
+            if observation is not None:
+                if observation.job.state.terminal:
+                    try:
+                        snapshot = self.service.resume_project(project_path)
+                    except Exception as exc:
+                        self.call_from_thread(
+                            self.show_error,
+                            "Could not load completed verification result",
+                            str(exc),
+                            project_path,
+                        )
+                        return
+                    self.call_from_thread(self.show_snapshot, snapshot)
+                    return
+                if isinstance(project, ProjectSummary):
+                    summary = project
+                else:
+                    try:
+                        summary = self.service.resume_project(project_path).project
+                    except Exception as exc:
+                        self.call_from_thread(
+                            self.show_error,
+                            "Could not load project metadata",
+                            str(exc),
+                            project_path,
+                        )
+                        return
+                self.call_from_thread(
+                    self._attach_to_verification,
+                    summary,
+                    observation,
+                )
+                return
+            try:
+                snapshot = self.service.resume_project(project_path)
+            except Exception as exc:
+                self.call_from_thread(
+                    self.show_error,
+                    "Could not resume project",
+                    str(exc),
+                    project_path,
                 )
                 return
             self.call_from_thread(self.show_snapshot, snapshot)
@@ -427,57 +686,250 @@ class ProofAssistantApp(App[None]):
         main_file: str | None = None,
         input_files: tuple[str, ...] | None = None,
     ) -> None:
-        """Run verification on a thread and stream typed progress events."""
+        """Submit a detached backend job, then observe its durable event stream."""
 
-        chosen_settings = settings or self.settings
-        self.settings = chosen_settings
-        token = ThreadCancellationToken()
-        self._cancellation = token
+        chosen_settings = settings or self.service.default_verification_settings()
         progress_screen = ProgressScreen(
-            "Verifying manuscript",
+            "Submitting detached verification",
             project=project.project_path,
             cancellable=True,
             source_in_dropbox=project.source_in_dropbox,
             main_file=main_file or project.main_file,
             input_files=(project.input_files if input_files is None else input_files),
+            detached_job=True,
         )
         self.switch_screen(progress_screen)
+        self._progress_screen = progress_screen
 
-        def progress(event: ProgressEvent) -> None:
-            self.call_from_thread(progress_screen.record_progress, event)
-
-        def verify() -> None:
+        def submit() -> None:
             try:
-                snapshot = self.service.confirm_and_verify(
+                observation = self.service.start_verification(
                     project.project_path,
                     plan_id,
                     chosen_settings,
-                    progress=progress,
-                    cancellation=token,
                 )
-            except InterruptedError as exc:
-                self.call_from_thread(
-                    self.show_error,
-                    "Verification interrupted",
-                    str(exc),
-                    project.project_path,
-                )
-                return
             except Exception as exc:
+                observation = getattr(exc, "observation", None)
+                if isinstance(observation, VerificationJobObservation):
+                    self.call_from_thread(
+                        self._activate_observation,
+                        progress_screen,
+                        observation,
+                        "An active job has different requested settings; attached "
+                        "to the backend-owned job without replacing it.",
+                    )
+                    self._poll_verification(project, progress_screen, observation)
+                    return
                 self.call_from_thread(
-                    self.show_error,
-                    "Verification failed",
-                    str(exc),
-                    project.project_path,
+                    self._record_polling_error,
+                    progress_screen,
+                    f"Detached verification could not be submitted: {exc}",
+                    True,
                 )
                 return
-            self.call_from_thread(self.show_snapshot, snapshot)
+            self.call_from_thread(
+                self._activate_observation,
+                progress_screen,
+                observation,
+                None,
+            )
+            self._poll_verification(project, progress_screen, observation)
 
-        self.run_worker(verify, thread=True, exclusive=True, group="workflow")
+        self._observer_worker = self.run_worker(
+            submit,
+            thread=True,
+            exclusive=True,
+            group="verification-observer",
+        )
 
     def cancel_verification(self) -> None:
-        if self._cancellation is not None:
-            self._cancellation.cancel()
+        """Persist a cancellation request; the observer remains replaceable."""
+
+        observation = self._active_observation
+        screen = self._progress_screen
+        if observation is None or screen is None:
+            return
+        screen.record_cancellation_pending()
+
+        def request() -> None:
+            try:
+                updated = self.service.request_verification_cancel(
+                    observation.job.project_path,
+                    observation.job.job_id,
+                )
+            except Exception as exc:
+                self.call_from_thread(
+                    self._record_polling_error,
+                    screen,
+                    f"Cancellation request failed: {exc}",
+                    True,
+                )
+                return
+            self.call_from_thread(
+                self._activate_observation,
+                screen,
+                updated,
+                "Persistent cancellation request recorded by the backend.",
+            )
+
+        self.run_worker(
+            request,
+            thread=True,
+            exclusive=True,
+            group="verification-cancel",
+        )
+
+    def detach_verification_observer(self) -> None:
+        """Stop this client's polling without changing the detached job."""
+
+        if self._observer_worker is not None:
+            self._observer_worker.cancel()
+        self._observer_worker = None
+        self._active_observation = None
+        self._progress_screen = None
+        self.show_welcome()
+
+    def _attach_to_verification(
+        self,
+        project: ProjectSummary,
+        observation: VerificationJobObservation,
+    ) -> None:
+        progress_screen = ProgressScreen(
+            "Observing detached verification",
+            project=project.project_path,
+            cancellable=observation.job.cancellable,
+            source_in_dropbox=project.source_in_dropbox,
+            main_file=project.main_file,
+            input_files=project.input_files,
+            detached_job=True,
+        )
+        self.switch_screen(progress_screen)
+        self._progress_screen = progress_screen
+        self._activate_observation(
+            progress_screen,
+            observation,
+            (
+                "Attached to coarse legacy activity; durable per-stage events are "
+                "not available."
+                if observation.job.attached_legacy
+                else "Attached to the backend-owned job and replayed durable progress."
+            ),
+        )
+
+        def observe() -> None:
+            self._poll_verification(project, progress_screen, observation)
+
+        self._observer_worker = self.run_worker(
+            observe,
+            thread=True,
+            exclusive=True,
+            group="verification-observer",
+        )
+
+    def _activate_observation(
+        self,
+        screen: ProgressScreen,
+        observation: VerificationJobObservation,
+        note: str | None,
+    ) -> None:
+        if self._progress_screen is not screen:
+            return
+        self._active_observation = observation
+        if not self._progress_content_ready(screen):
+            self.set_timer(
+                0.01,
+                lambda: self._activate_observation(screen, observation, note),
+            )
+            return
+        screen.record_observation(observation)
+        if note:
+            screen.record_observer_note(note)
+
+    def _progress_content_ready(self, screen: ProgressScreen) -> bool:
+        return screen.is_mounted and bool(screen.query("#status-line").nodes)
+
+    def _record_polling_error(
+        self,
+        screen: ProgressScreen,
+        message: str,
+        job_may_continue: bool,
+    ) -> None:
+        if self._progress_screen is not screen:
+            return
+        if not self._progress_content_ready(screen):
+            self.set_timer(
+                0.01,
+                lambda: self._record_polling_error(screen, message, job_may_continue),
+            )
+            return
+        screen.record_polling_error(message, job_may_continue)
+
+    def _poll_verification(
+        self,
+        project: ProjectSummary,
+        screen: ProgressScreen,
+        initial: VerificationJobObservation,
+    ) -> None:
+        worker = get_current_worker()
+        observation = initial
+        cursor = observation.next_sequence
+        while not worker.is_cancelled:
+            if observation.job.state.terminal:
+                try:
+                    snapshot = self.service.resume_project(project.project_path)
+                except Exception as exc:
+                    self.call_from_thread(
+                        self._record_polling_error,
+                        screen,
+                        f"Job reached {observation.job.state.value}, but the "
+                        f"canonical project result could not be loaded: {exc}",
+                        False,
+                    )
+                    return
+                if not worker.is_cancelled:
+                    self.call_from_thread(self._finish_observed_job, snapshot)
+                return
+
+            delay = max(0.01, min(5.0, observation.poll_after_seconds))
+            time.sleep(delay)
+            if worker.is_cancelled:
+                return
+            try:
+                updated = self.service.observe_verification(
+                    project.project_path,
+                    after_sequence=cursor,
+                )
+            except Exception as exc:
+                self.call_from_thread(
+                    self._record_polling_error,
+                    screen,
+                    f"Progress polling failed: {exc}",
+                    True,
+                )
+                return
+            if updated is None:
+                self.call_from_thread(
+                    self._record_polling_error,
+                    screen,
+                    "Progress polling returned no observation for detached job "
+                    f"{observation.job.job_id} at {project.project_path}.",
+                    True,
+                )
+                return
+            observation = updated
+            cursor = observation.next_sequence
+            self.call_from_thread(
+                self._activate_observation,
+                screen,
+                observation,
+                None,
+            )
+
+    def _finish_observed_job(self, snapshot: WorkflowSnapshot) -> None:
+        self._active_observation = None
+        self._observer_worker = None
+        self._progress_screen = None
+        self.show_snapshot(snapshot)
 
     def show_snapshot(self, snapshot: WorkflowSnapshot) -> None:
         self.current_snapshot = snapshot
@@ -486,16 +938,94 @@ class ProofAssistantApp(App[None]):
             self.switch_screen(ChangeReviewScreen(snapshot))
         elif state == WorkflowState.AWAITING_CLARIFICATION and snapshot.clarifications:
             self.switch_screen(ClarificationScreen(snapshot))
-        elif state == WorkflowState.COMPLETED and snapshot.findings is not None:
+        elif (
+            state == WorkflowState.FAILED
+            and snapshot.findings is not None
+            and snapshot.findings.failure_report is not None
+        ):
+            self.switch_screen(
+                FailureDependencyScreen(
+                    snapshot, report=snapshot.findings.failure_report
+                )
+            )
+        elif state in {WorkflowState.COMPLETED, WorkflowState.FAILED} and (
+            snapshot.findings is not None
+        ):
             self.switch_screen(FindingsScreen(snapshot))
+        elif state in {WorkflowState.VERIFYING, WorkflowState.BUSY_EXTERNAL}:
+            self._discover_snapshot_activity(snapshot)
         elif state in {
             WorkflowState.FAILED,
             WorkflowState.INTERRUPTED,
-            WorkflowState.BUSY_EXTERNAL,
         }:
             self.switch_screen(RecoveryScreen(snapshot))
         else:
             self.switch_screen(DashboardScreen(snapshot))
+
+    def _discover_snapshot_activity(self, snapshot: WorkflowSnapshot) -> None:
+        project = snapshot.project
+        progress = ProgressScreen(
+            "Attaching to backend verification activity",
+            project=project.project_path,
+            main_file=project.main_file,
+            input_files=project.input_files,
+        )
+        self.switch_screen(progress)
+
+        def discover() -> None:
+            try:
+                observation = self.service.observe_verification(
+                    project.project_path,
+                    after_sequence=0,
+                )
+            except Exception as exc:
+                self.call_from_thread(
+                    self.show_error,
+                    "Could not observe backend verification activity",
+                    str(exc),
+                    project.project_path,
+                )
+                return
+            if observation is not None:
+                if observation.job.state.terminal:
+                    try:
+                        terminal_snapshot = self.service.resume_project(
+                            project.project_path
+                        )
+                    except Exception as exc:
+                        self.call_from_thread(
+                            self.show_error,
+                            "Could not load completed verification result",
+                            str(exc),
+                            project.project_path,
+                        )
+                        return
+                    self.call_from_thread(self.show_snapshot, terminal_snapshot)
+                    return
+                self.call_from_thread(
+                    self._attach_to_verification,
+                    project,
+                    observation,
+                )
+                return
+            self.call_from_thread(
+                self.switch_screen,
+                RecoveryScreen(
+                    snapshot,
+                    detail=(
+                        "The backend reports project activity, but no attachable "
+                        "verification observation is currently available. This TUI "
+                        "owns neither the verification nor its lock."
+                    ),
+                ),
+            )
+
+        self.run_worker(
+            discover,
+            thread=True,
+            exclusive=True,
+            group="verification-discovery",
+        )
 
     def show_error(self, title: str, detail: str, project: Path | None) -> None:
         self.switch_screen(RecoveryScreen.from_error(title, detail, project))

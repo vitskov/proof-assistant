@@ -104,15 +104,47 @@ def test_manuscript_init_requires_explicit_main_file():
         )
 
 
-def test_parallelism_is_bounded_and_batches_are_deterministic():
+def test_logical_parallelism_is_bounded_and_batches_are_deterministic():
     assert _partition(("A", "B", "C", "D", "E"), 2) == [
         ("A", "B"),
         ("C", "D"),
         ("E",),
     ]
     VerifyOptions(model="model", jobs=2).validate()
-    with pytest.raises(ValueError, match="1 or 2"):
-        VerifyOptions(model="model", jobs=3).validate()
+    VerifyOptions(model="model", jobs=3).validate()
+    with pytest.raises(ValueError, match="between 1 and 128"):
+        VerifyOptions(model="model", jobs=129).validate()
+
+
+def test_cli_exposes_independent_concurrency_overrides():
+    args = build_parser().parse_args(
+        [
+            "manuscript",
+            "verify",
+            "--project",
+            "p",
+            "--model",
+            "gpt-5.6-sol",
+            "--concurrency",
+            "fixed",
+            "--ai-concurrency",
+            "3",
+            "--lean-pool",
+            "2",
+            "--max-builds",
+            "1",
+            "--agents-per-target",
+            "2",
+            "--codex-plan",
+            "pro-5x",
+            "--resource-profile",
+            "server",
+        ]
+    )
+    assert args.ai_concurrency == 3
+    assert args.lean_pool == 2
+    assert args.max_builds == 1
+    assert args.agents_per_target == 2
 
 
 def _commit(worktree: Path, relative: Path, contents: str, message: str) -> str:

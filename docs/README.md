@@ -19,6 +19,9 @@ This index separates ordinary use from implementation and maintenance details.
   non-interactive operations.
 - [Incremental verification model](INCREMENTAL_VERIFICATION.md) — snapshots,
   graphs, invalidation, scheduling, questions, and certificates.
+- [Concurrency and resource management](CONCURRENCY.md) — independent Codex,
+  Lean, and build admission, automatic tuning, machine settings, telemetry, and
+  legacy migration boundaries.
 - [Cache and storage](CACHE_AND_STORAGE.md) — sharing, reservations, bounded
   garbage collection, and recovery.
 - [Architecture and security](ARCHITECTURE.md) — Codex/RepoProver boundary,

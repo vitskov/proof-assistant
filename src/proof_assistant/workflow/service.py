@@ -1,13 +1,53 @@
 from __future__ import annotations
 
+import fcntl
+import hashlib
 import json
+import os
+import subprocess
+import sys
 import tempfile
 import threading
+import time
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from ..backend import CodexConfig
+from ..backend import CodexBackend, CodexConfig
+from ..cache import CacheLayout
+from ..concurrency import (
+    AIConcurrencyPatch,
+    AITaskClass,
+    AutoValue,
+    BudgetPolicy,
+    BuildConcurrencyPatch,
+    CalibrationKey,
+    CalibrationProfile,
+    CalibrationStore,
+    CodexPlan,
+    ConcurrencyConfigPatch,
+    ConcurrencyMode,
+    ConcurrencyRuntime,
+    ConcurrencyRuntimeSpec,
+    LeanCalibrationError,
+    LeanConcurrencyPatch,
+    LegacyVerificationPatch,
+    MachineConcurrencySettings,
+    MachineConfigStore,
+    PressureState,
+    QueueDepths,
+    ResourceProfile,
+    SchedulerConcurrencyPatch,
+    TelemetryCollector,
+    derive_auto_limits,
+    detect_hardware,
+    measure_lean_repl_memory,
+    patch_to_mapping,
+    project_calibration_key,
+    resolve_concurrency_config,
+)
+from ..incremental.failures import build_failure_report
 from ..incremental.graph import (
     affected_claims,
     dependency_closure,
@@ -20,6 +60,14 @@ from ..incremental.latex import (
     explicit_reference_graph,
     index_manuscript,
     resolve_latex_closure,
+)
+from ..incremental.locking import (
+    ProjectLockedError,
+    acquire_worker_lease,
+    project_session_active,
+    release_worker_lease,
+    worker_lease_active,
+    worker_lock_path,
 )
 from ..incremental.models import (
     ClaimState,
@@ -49,6 +97,9 @@ from ..presentation.clarifications import (
 )
 from ..workspace.catalog import ProjectCatalog
 from ..workspace.management import (
+    ManagedDeletionInspection,
+    ManagedDeletionKind,
+    ManagedProjectDeletionError,
     ManagedProjectKind,
     ManagedProjectRecord,
     ProjectConfigurationError,
@@ -61,28 +112,50 @@ from ..workspace.paths import (
 )
 from ..workspace.source import compare_inventories, stable_source_copy
 from .contracts import (
+    AdaptiveHistoryResetResult,
+    BenchmarkKind,
+    BenchmarkResult,
+    CalibrationResetResult,
     CancellationReport,
     ChangeImpactPlan,
     ClaimChangeKind,
     ClaimImpact,
+    ConcurrencySettingsView,
+    EffectiveConcurrencyView,
+    FailureDependencyReport,
     FileChange,
     FileChangeKind,
     FindingSummary,
     LatexSourceCandidate,
+    LegacySettingsView,
+    MachineSettingsSnapshot,
+    MachineSettingsUpdateRequest,
     NewProjectRequest,
     ProgressEvent,
     ProgressPhase,
     ProgressSink,
     ProjectAvailability,
     ProjectCatalogEntry,
+    ProjectDeletionAvailability,
+    ProjectDeletionInspection,
+    ProjectDeletionResult,
     ProjectDestinationInspection,
     ProjectSummary,
     ReportDocument,
+    ResourceTelemetryView,
+    SettingResolution,
+    SettingsChangePreview,
+    SettingsScopeKind,
+    SettingsWarning,
     SourceInspection,
+    VerificationJob,
+    VerificationJobObservation,
+    VerificationJobState,
     VerificationSettings,
     WorkflowSnapshot,
     WorkflowState,
 )
+from .jobs import VerificationJobStore, request_fingerprint
 
 
 class StaleChangePlanError(RuntimeError):
@@ -90,6 +163,30 @@ class StaleChangePlanError(RuntimeError):
 
 
 class WorkflowCancelled(RuntimeError):
+    pass
+
+
+class VerificationJobConflictError(RuntimeError):
+    """A different active verification request already holds the mutation lease."""
+
+    def __init__(self, observation: VerificationJobObservation) -> None:
+        self.observation = observation
+        super().__init__(
+            "A different backend verification request is already active for "
+            f"{observation.job.project_path}"
+        )
+
+
+class VerificationJobNotCancellableError(RuntimeError):
+    def __init__(self, observation: VerificationJobObservation) -> None:
+        self.observation = observation
+        super().__init__(
+            "This attached verification predates persistent job control and "
+            "cannot be cancelled through this client"
+        )
+
+
+class VerificationJobNotFoundError(RuntimeError):
     pass
 
 
@@ -101,6 +198,14 @@ class ProjectDestinationError(RuntimeError):
         super().__init__(
             inspection.issue or "Managed project destination is unavailable"
         )
+
+
+class ProjectDeletionError(RuntimeError):
+    """A recoverable deletion refusal carrying backend-owned preflight facts."""
+
+    def __init__(self, inspection: ProjectDeletionInspection) -> None:
+        self.inspection = inspection
+        super().__init__(inspection.issue or "Managed project deletion was refused")
 
 
 class ReportUnavailableError(RuntimeError):
@@ -123,6 +228,20 @@ class CancellationFlag:
     def raise_if_cancelled(self) -> None:
         if self.cancelled:
             raise WorkflowCancelled("Verification was cancelled")
+
+
+class _JobCancellationFlag:
+    def __init__(self, store: VerificationJobStore, job_id: str) -> None:
+        self.store = store
+        self.job_id = job_id
+
+    @property
+    def cancelled(self) -> bool:
+        return self.store.cancellation_requested(self.job_id)
+
+    def raise_if_cancelled(self) -> None:
+        if self.cancelled:
+            raise WorkflowCancelled("Detached verification cancellation requested")
 
 
 def _now() -> str:
@@ -167,6 +286,7 @@ class ProofAssistantWorkflow:
         clarification_narrator: ClarificationNarrator | None = None,
         use_codex_clarification: bool = True,
         codex_model: str = "gpt-5.6-sol",
+        machine_config_path: Path | None = None,
     ) -> None:
         catalog_path = None
         if catalog_root is not None:
@@ -183,10 +303,744 @@ class ProofAssistantWorkflow:
         self.use_codex_clarification = use_codex_clarification
         self.codex_model = codex_model
         self._sequence = 0
+        self._machine_config_store = MachineConfigStore(machine_config_path)
+        self._telemetry = TelemetryCollector()
+        self._concurrency_runtime: ConcurrencyRuntime | None = None
+        self._settings_previews: dict[
+            str, tuple[SettingsChangePreview, ConcurrencyConfigPatch]
+        ] = {}
+        self._settings_lock = threading.RLock()
 
     def default_task_text(self) -> str:
         """Return the validated instructions seeded into the TUI task editor."""
         return DEFAULT_TASK_INSTRUCTIONS
+
+    def default_verification_settings(self) -> VerificationSettings:
+        """Return run defaults resolved from the machine-scoped legacy section."""
+
+        resolved = self._resolved_concurrency()
+        legacy = resolved.config.legacy
+        return VerificationSettings(
+            jobs=legacy.jobs,
+            batch_size=legacy.batch_size,
+            lean_pool_size=legacy.lean_pool_size,
+        )
+
+    def _concurrency_spec(
+        self,
+        *,
+        cli_patch: ConcurrencyConfigPatch | None = None,
+        project: Path | None = None,
+    ) -> ConcurrencyRuntimeSpec:
+        return ConcurrencyRuntimeSpec(
+            cache_home=self.cache_home,
+            machine_config_path=str(self._machine_config_store.path),
+            cli_patch=cli_patch,
+            project_path=str(project.resolve()) if project is not None else None,
+        )
+
+    def _resolved_concurrency(self):
+        return self._concurrency_spec().resolve()
+
+    def _runtime(self) -> ConcurrencyRuntime:
+        """Return this client's handle to the machine-global controllers."""
+
+        resolved = self._resolved_concurrency()
+        if self._concurrency_runtime is None:
+            self._concurrency_runtime = self._concurrency_spec().create()
+        elif (
+            self._concurrency_runtime.resolved.machine_revision
+            != resolved.machine_revision
+            or self._concurrency_runtime.resolved.config != resolved.config
+        ):
+            # Runtime applies are non-destructive: lower limits stop new
+            # admissions and leave every in-flight lease alive.
+            self._concurrency_runtime.apply_resolved(resolved)
+        return self._concurrency_runtime
+
+    def _runtime_for_settings(self, project: Path | None) -> ConcurrencyRuntime:
+        """Return a project-aware view over the same machine-global controllers."""
+
+        if project is None:
+            return self._runtime()
+        project = project.expanduser().resolve()
+        if not project.is_dir():
+            raise ValueError(f"Managed project directory does not exist: {project}")
+        machine_runtime = self._runtime()
+        return self._concurrency_spec(project=project).create(
+            resources=machine_runtime.resources
+        )
+
+    @staticmethod
+    def _auto_view(value: object) -> int | None:
+        return None if value == AutoValue.AUTO else int(value)
+
+    @classmethod
+    def _configured_view(cls, config) -> ConcurrencySettingsView:
+        return ConcurrencySettingsView(
+            mode=config.mode.value,
+            resource_profile=config.resource_profile.value,
+            codex_plan=config.ai.plan.value,
+            budget_policy=config.ai.budget_policy.value,
+            ai_initial=cls._auto_view(config.ai.initial),
+            ai_hard_max=cls._auto_view(config.ai.hard_max),
+            ai_minimum=config.ai.minimum,
+            ai_increase_after_successes=cls._auto_view(
+                config.ai.increase_after_successes
+            ),
+            lean_pool=cls._auto_view(config.lean.pool_size),
+            lean_max=cls._auto_view(config.lean.max_pool),
+            lean_minimum=config.lean.min_pool,
+            lean_memory_calibration=config.lean.memory_calibration,
+            fallback_memory_per_repl_gib=config.lean.fallback_memory_per_repl_gib,
+            max_builds=cls._auto_view(config.build.max_concurrent),
+            build_hard_max=config.build.hard_max,
+            agents_per_target_initial=(config.scheduler.agents_per_target_initial),
+            agents_per_target_max=config.scheduler.agents_per_target_max,
+            duplicate_agent_escalation=(config.scheduler.duplicate_agent_escalation),
+            dependency_priority=config.scheduler.dependency_priority,
+            adaptive_controller=config.mode == ConcurrencyMode.ADAPTIVE,
+            hardware_telemetry=config.telemetry_enabled,
+        )
+
+    @staticmethod
+    def _legacy_view(config) -> LegacySettingsView:
+        return LegacySettingsView(
+            proof_jobs=config.legacy.jobs,
+            batch_size=config.legacy.batch_size,
+            per_worker_lean_pool=config.legacy.lean_pool_size,
+        )
+
+    @staticmethod
+    def _effective_view(runtime: ConcurrencyRuntime) -> EffectiveConcurrencyView:
+        ai = runtime.ai.status()
+        lean = runtime.lean.status()
+        build = runtime.build.status()
+        return EffectiveConcurrencyView(
+            ai_limit=ai.current_limit,
+            ai_ceiling=ai.ceiling,
+            lean_pool=lean.current_limit,
+            lean_max=lean.maximum,
+            build_limit=build.current_limit,
+            build_ceiling=build.hard_maximum,
+            agents_per_target_current=(
+                runtime.resolved.config.scheduler.agents_per_target_initial
+            ),
+            agents_per_target_max=(
+                runtime.resolved.config.scheduler.agents_per_target_max
+            ),
+        )
+
+    def _telemetry_view(self, runtime: ConcurrencyRuntime) -> ResourceTelemetryView:
+        ai = runtime.ai.status()
+        lean = runtime.lean.status()
+        build = runtime.build.status()
+        sample = self._telemetry.sample(
+            queues=QueueDepths(ai=ai.queued, lean=lean.queued, build=build.queued)
+        )
+        allocation = detect_hardware()
+        total = min(sample.total_memory_bytes, allocation.total_memory_bytes)
+        available = min(
+            sample.available_memory_bytes,
+            allocation.available_memory_bytes,
+            total,
+        )
+        ratio = available / max(1, total)
+        pressure = sample.pressure
+        if ratio < 0.08:
+            pressure = PressureState.EMERGENCY
+        elif ratio < 0.15:
+            pressure = PressureState.RED
+        elif ratio <= 0.30 and pressure == PressureState.GREEN:
+            pressure = PressureState.YELLOW
+        sample = replace(
+            sample,
+            total_memory_bytes=total,
+            available_memory_bytes=available,
+            available_memory_ratio=ratio,
+            pressure=pressure,
+        )
+        if runtime.resolved.config.telemetry_enabled:
+            runtime.observe_telemetry(sample)
+            # Adaptation may have changed the displayed limits, but active and
+            # queued facts in this immutable sample remain the same instant.
+            ai = runtime.ai.status()
+            lean = runtime.lean.status()
+            build = runtime.build.status()
+        resources = runtime.resources
+        backoff = (
+            datetime.fromtimestamp(ai.backoff_until, tz=UTC).isoformat()
+            if ai.backoff_until > time.time()
+            else None
+        )
+        return ResourceTelemetryView(
+            os_name=resources.os_name,
+            architecture=resources.architecture,
+            resource_profile=runtime.auto_limits.resource_profile.value,
+            physical_cpus=resources.usable_physical_cpus,
+            logical_cpus=resources.usable_logical_cpus,
+            cpu_percent=sample.cpu_percent,
+            total_memory_gib=resources.total_memory_gib,
+            available_memory_gib=min(
+                resources.total_memory_gib,
+                sample.available_memory_bytes / (1024**3),
+            ),
+            memory_percent_available=100.0 * sample.available_memory_ratio,
+            swap_used_gib=sample.swap_used_bytes / (1024**3),
+            swap_delta_gib=sample.swap_delta_bytes / (1024**3),
+            memory_pressure=sample.pressure.value,
+            load_average=sample.load_average,
+            io_wait_percent=sample.disk_iowait_percent,
+            ai_active=ai.active,
+            ai_queued=ai.queued,
+            ai_throttles=ai.throttles,
+            ai_backoff_until=backoff,
+            lean_active=lean.active,
+            lean_queued=lean.queued,
+            lean_p95_rss_gib=(
+                runtime.calibration_profile.repl.p95_working_rss_gib
+                if runtime.calibration_profile is not None
+                and runtime.calibration_profile.repl is not None
+                else None
+            ),
+            build_active=build.active,
+            build_queued=build.queued,
+            sampled_at=_now(),
+        )
+
+    @staticmethod
+    def _configured_text(value: object) -> str:
+        if value == AutoValue.AUTO:
+            return "Auto"
+        return str(getattr(value, "value", value))
+
+    def _resolution(self, runtime: ConcurrencyRuntime) -> tuple[SettingResolution, ...]:
+        config = runtime.resolved.config
+        effective = self._effective_view(runtime)
+        rows = (
+            ("ai.initial", config.ai.initial, effective.ai_limit),
+            ("ai.hard_max", config.ai.hard_max, effective.ai_ceiling),
+            (
+                "ai.increase_after_successes",
+                config.ai.increase_after_successes,
+                runtime.ai.success_threshold,
+            ),
+            ("lean.pool_size", config.lean.pool_size, effective.lean_pool),
+            ("lean.max_pool", config.lean.max_pool, effective.lean_max),
+            (
+                "build.max_concurrent",
+                config.build.max_concurrent,
+                effective.build_limit,
+            ),
+            (
+                "scheduler.agents_per_target_max",
+                config.scheduler.agents_per_target_max,
+                effective.agents_per_target_max,
+            ),
+            ("legacy.jobs", config.legacy.jobs, config.legacy.jobs),
+            ("legacy.batch_size", config.legacy.batch_size, config.legacy.batch_size),
+        )
+        return tuple(
+            SettingResolution(
+                field=field,
+                configured=self._configured_text(configured),
+                effective=str(effective_value),
+                source=runtime.resolved.source_for(field).value,
+            )
+            for field, configured, effective_value in rows
+        )
+
+    def get_machine_settings(
+        self, *, project: Path | None = None
+    ) -> MachineSettingsSnapshot:
+        """Return one backend-owned, UI-neutral machine settings snapshot."""
+
+        with self._settings_lock:
+            runtime = self._runtime_for_settings(project)
+            resources = runtime.resources
+            identity = (
+                f"{resources.os_name}|{resources.architecture}|"
+                f"{resources.host_logical_cpus}|{resources.host_total_memory_bytes}"
+            )
+            layout = CacheLayout.discover(self.cache_home)
+            reasons = list(runtime.auto_limits.reasons)
+            if not runtime.resolved.config.telemetry_enabled:
+                reasons.append("live adaptive hardware telemetry is disabled")
+            return MachineSettingsSnapshot(
+                scope=SettingsScopeKind.MACHINE,
+                machine_id=hashlib.sha256(identity.encode()).hexdigest()[:16],
+                config_path=self._machine_config_store.path,
+                cache_path=layout.root / "concurrency",
+                revision=runtime.resolved.machine_revision,
+                configured=self._configured_view(runtime.resolved.config),
+                effective=self._effective_view(runtime),
+                telemetry=self._telemetry_view(runtime),
+                legacy=self._legacy_view(runtime.resolved.config),
+                resolution=self._resolution(runtime),
+                reasons=tuple(reasons),
+                updated_at=_now(),
+            )
+
+    @staticmethod
+    def _enum_value(enum_type, value: str):
+        normalized = value.casefold().replace("-", "_").replace(" ", "_")
+        return enum_type(normalized)
+
+    def _request_patch(
+        self, request: MachineSettingsUpdateRequest
+    ) -> ConcurrencyConfigPatch:
+        if request.scope != SettingsScopeKind.MACHINE:
+            raise ValueError(
+                "Project concurrency overlays are reserved but not implemented; "
+                "save these settings at machine scope"
+            )
+        view = request.configured
+        mode = self._enum_value(ConcurrencyMode, view.mode)
+        if view.adaptive_controller != (mode == ConcurrencyMode.ADAPTIVE):
+            raise ValueError(
+                "Adaptive controller and concurrency mode disagree; choose "
+                "Adaptive/Auto or Fixed/Manual consistently"
+            )
+
+        def automatic(value: int | None):
+            return AutoValue.AUTO if value is None else value
+
+        return ConcurrencyConfigPatch(
+            mode=mode,
+            resource_profile=self._enum_value(ResourceProfile, view.resource_profile),
+            telemetry_enabled=view.hardware_telemetry,
+            ai=AIConcurrencyPatch(
+                plan=self._enum_value(CodexPlan, view.codex_plan),
+                initial=automatic(view.ai_initial),
+                hard_max=automatic(view.ai_hard_max),
+                minimum=view.ai_minimum,
+                budget_policy=self._enum_value(BudgetPolicy, view.budget_policy),
+                increase_after_successes=automatic(view.ai_increase_after_successes),
+            ),
+            lean=LeanConcurrencyPatch(
+                pool_size=automatic(view.lean_pool),
+                min_pool=view.lean_minimum,
+                max_pool=automatic(view.lean_max),
+                memory_calibration=view.lean_memory_calibration,
+                fallback_memory_per_repl_gib=(view.fallback_memory_per_repl_gib),
+            ),
+            build=BuildConcurrencyPatch(
+                max_concurrent=automatic(view.max_builds),
+                hard_max=view.build_hard_max,
+            ),
+            scheduler=SchedulerConcurrencyPatch(
+                agents_per_target_initial=view.agents_per_target_initial,
+                agents_per_target_max=view.agents_per_target_max,
+                dependency_priority=view.dependency_priority,
+                duplicate_agent_escalation=view.duplicate_agent_escalation,
+            ),
+            legacy=LegacyVerificationPatch(
+                jobs=request.legacy.proof_jobs,
+                batch_size=request.legacy.batch_size,
+                lean_pool_size=request.legacy.per_worker_lean_pool,
+            ),
+        )
+
+    def preview_machine_settings(
+        self, request: MachineSettingsUpdateRequest
+    ) -> SettingsChangePreview:
+        with self._settings_lock:
+            current = self._machine_config_store.load()
+            if current.revision != request.expected_revision:
+                raise ValueError(
+                    "Machine settings changed in another client; reload Settings"
+                )
+            patch = self._request_patch(request)
+            # Resolve validates every cross-field invariant without writing.
+            resolved = resolve_concurrency_config(
+                machine=MachineConcurrencySettings(
+                    revision=current.revision,
+                    patch=patch,
+                )
+            )
+            hardware = detect_hardware()
+            tuned = derive_auto_limits(hardware, resolved.config)
+            lean_max = (
+                tuned.lean_pool
+                if resolved.config.lean.max_pool == AutoValue.AUTO
+                else int(resolved.config.lean.max_pool)
+            )
+            effective = EffectiveConcurrencyView(
+                ai_limit=tuned.ai_initial,
+                ai_ceiling=tuned.ai_ceiling,
+                lean_pool=tuned.lean_pool,
+                lean_max=lean_max,
+                build_limit=tuned.build_concurrency,
+                build_ceiling=resolved.config.build.hard_max,
+                agents_per_target_current=(
+                    resolved.config.scheduler.agents_per_target_initial
+                ),
+                agents_per_target_max=(resolved.config.scheduler.agents_per_target_max),
+            )
+            warnings: list[SettingsWarning] = []
+            if request.configured.lean_pool is not None and (
+                request.configured.lean_pool > max(2, tuned.lean_cpu_cap)
+                or request.configured.lean_pool > max(2, tuned.lean_memory_cap)
+            ):
+                warnings.append(
+                    SettingsWarning(
+                        "unsafe-lean-pool",
+                        "The manual Lean pool exceeds the detected CPU or RAM "
+                        "recommendation and may cause swapping or OOM.",
+                        str(
+                            min(
+                                tuned.lean_cpu_cap,
+                                tuned.lean_memory_cap,
+                                resolved.config.lean.initial_auto_cap,
+                            )
+                        ),
+                    )
+                )
+            plan_policy_config = replace(
+                resolved.config,
+                ai=replace(
+                    resolved.config.ai,
+                    initial=AutoValue.AUTO,
+                    hard_max=AutoValue.AUTO,
+                ),
+            )
+            plan_policy_ceiling = derive_auto_limits(
+                hardware, plan_policy_config
+            ).ai_ceiling
+            manual_ai_values = tuple(
+                value
+                for value in (
+                    request.configured.ai_initial,
+                    request.configured.ai_hard_max,
+                )
+                if value is not None
+            )
+            if manual_ai_values and max(manual_ai_values) > plan_policy_ceiling:
+                warnings.append(
+                    SettingsWarning(
+                        "quota-burn",
+                        "The manual AI concurrency exceeds the configured plan "
+                        "policy ceiling and may consume quota rapidly.",
+                        str(plan_policy_ceiling),
+                    )
+                )
+            automatic_builds = derive_auto_limits(
+                hardware,
+                resolve_concurrency_config(
+                    machine=ConcurrencyConfigPatch(
+                        resource_profile=resolved.config.resource_profile,
+                        build=BuildConcurrencyPatch(
+                            hard_max=resolved.config.build.hard_max
+                        ),
+                    ),
+                    environ={},
+                ).config,
+            ).build_concurrency
+            if request.configured.max_builds is not None and (
+                request.configured.max_builds > automatic_builds
+            ):
+                warnings.append(
+                    SettingsWarning(
+                        "build-pressure",
+                        "The manual full-build limit exceeds the conservative "
+                        "hardware recommendation.",
+                        str(automatic_builds),
+                    )
+                )
+            token = canonical_hash(
+                {
+                    "request": repr(request),
+                    "patch": patch_to_mapping(patch),
+                    "nonce": os.urandom(16).hex(),
+                }
+            )
+            preview = SettingsChangePreview(
+                preview_token=token,
+                requested=request,
+                effective_if_applied=effective,
+                warnings=tuple(warnings),
+                live_fields=(
+                    "mode",
+                    "ai concurrency",
+                    "Lean admission",
+                    "build admission",
+                    "budget policy",
+                    "hardware telemetry",
+                ),
+                next_run_fields=(
+                    "resource profile",
+                    "Codex plan",
+                    "agents per target",
+                    "legacy proof jobs",
+                    "legacy batch size",
+                    "legacy per-worker Lean pool",
+                ),
+            )
+            self._settings_previews[token] = (preview, patch)
+            return preview
+
+    def apply_machine_settings(
+        self,
+        preview_token: str,
+        accepted_warning_ids: tuple[str, ...] = (),
+    ) -> MachineSettingsSnapshot:
+        with self._settings_lock:
+            try:
+                preview, patch = self._settings_previews.pop(preview_token)
+            except KeyError as exc:
+                raise ValueError(
+                    "Settings preview is missing or already applied"
+                ) from exc
+            required = {warning.warning_id for warning in preview.warnings}
+            missing = required - set(accepted_warning_ids)
+            if missing:
+                raise ValueError(
+                    "Explicit confirmation is required for: "
+                    + ", ".join(sorted(missing))
+                )
+            self._machine_config_store.save(
+                patch, expected_revision=preview.requested.expected_revision
+            )
+            resolved = self._resolved_concurrency()
+            if self._concurrency_runtime is None:
+                self._concurrency_runtime = self._concurrency_spec().create()
+            else:
+                self._concurrency_runtime.apply_resolved(resolved)
+            return self.get_machine_settings()
+
+    def reset_machine_settings(self, expected_revision: int) -> MachineSettingsSnapshot:
+        with self._settings_lock:
+            self._machine_config_store.save(
+                ConcurrencyConfigPatch(), expected_revision=expected_revision
+            )
+            resolved = self._resolved_concurrency()
+            if self._concurrency_runtime is None:
+                self._concurrency_runtime = self._concurrency_spec().create()
+            else:
+                self._concurrency_runtime.apply_resolved(resolved)
+            return self.get_machine_settings()
+
+    def run_concurrency_benchmark(
+        self,
+        kind: BenchmarkKind,
+        *,
+        project: Path | None = None,
+        allow_codex_traffic: bool = False,
+    ) -> BenchmarkResult:
+        """Run the quota-safe calibration boundary used by CLI and TUI.
+
+        Codex traffic is never generated unless it is explicitly authorized.
+        A project-backed Lean benchmark starts disposable representative REPLs
+        and records real RSS measurements; no-project Lean/build actions retain
+        the conservative policy-only fallback.
+        """
+
+        runtime = self._runtime()
+        resources = runtime.resources
+        if project is not None:
+            project = project.expanduser().resolve()
+            key = project_calibration_key(
+                project,
+                resources=resources,
+                codex_plan=runtime.resolved.config.ai.plan.value,
+                codex_model=(self.codex_model if kind == BenchmarkKind.CODEX else ""),
+            )
+        else:
+            key = CalibrationKey(
+                os_name=resources.os_name,
+                architecture=resources.architecture,
+                usable_logical_cpus=resources.usable_logical_cpus,
+                total_memory_bytes=resources.total_memory_bytes,
+                lean_version="unknown",
+                mathlib_revision=None,
+                import_profile="machine-default",
+                codex_plan=runtime.resolved.config.ai.plan.value,
+                codex_model=(self.codex_model if kind == BenchmarkKind.CODEX else ""),
+            )
+        store = CalibrationStore.discover(self.cache_home)
+        current = store.load(key) or CalibrationProfile(key=key)
+        if kind == BenchmarkKind.CODEX:
+            recommendation = runtime.auto_limits.ai_initial
+            used_codex_traffic = False
+            if allow_codex_traffic:
+                status = runtime.ai.status()
+                if status.active or status.queued:
+                    raise RuntimeError(
+                        "Codex concurrency benchmarking requires an idle AI queue"
+                    )
+                from concurrent.futures import ThreadPoolExecutor
+
+                def harmless_probe(index: int) -> str:
+                    backend = CodexBackend(
+                        CodexConfig(
+                            executable=self.codex,
+                            model=self.codex_model,
+                            effort="low",
+                            sandbox="read-only",
+                            isolate_external_tools=True,
+                            concurrency=self._concurrency_spec(project=project),
+                            ai_task_class=AITaskClass.DIAGNOSTIC,
+                        )
+                    )
+                    try:
+                        result = backend.run(
+                            system_prompt=(
+                                "This is a harmless concurrency health probe. "
+                                "Return exactly OK and perform no other work."
+                            ),
+                            user_prompt=f"Probe {index}: return OK.",
+                            tools=[],
+                            tool_handler=lambda _name, _arguments: "Tools are disabled",
+                        )
+                    finally:
+                        backend.close()
+                    return result.final_text.strip()
+
+                maximum_probe = min(2, status.current_limit)
+                tested = tuple(range(1, maximum_probe + 1))
+                responses: list[str] = []
+                for width in tested:
+                    with ThreadPoolExecutor(max_workers=width) as executor:
+                        responses.extend(
+                            executor.map(
+                                harmless_probe,
+                                range(1, width + 1),
+                            )
+                        )
+                if not responses or any(item != "OK" for item in responses):
+                    raise RuntimeError(
+                        "Codex benchmark probe returned an unexpected response"
+                    )
+                used_codex_traffic = True
+                detail = (
+                    "Explicitly authorized tiny Codex probes completed at widths "
+                    + ", ".join(str(item) for item in tested)
+                    + "; adaptive throttle/latency history was updated."
+                )
+            else:
+                tested = (1,)
+                detail = "Quota-safe policy calibration; no Codex request was sent."
+            profile = CalibrationProfile(
+                key=key,
+                repl=current.repl,
+                recommended_lean_pool=current.recommended_lean_pool,
+                recommended_build_concurrency=current.recommended_build_concurrency,
+                recommended_ai_concurrency=recommendation,
+                tested_ai_ceiling=(max(tested) if used_codex_traffic else None),
+                revision=current.revision + (1 if current.measured_at else 0),
+            )
+        elif kind == BenchmarkKind.LEAN:
+            used_codex_traffic = False
+            repl = None
+            if project is not None:
+                try:
+                    owner = (
+                        "lean-calibration:"
+                        + hashlib.sha256(str(project).encode()).hexdigest()[:16]
+                    )
+                    with runtime.lean.exclusive_calibration_lease(owner):
+                        repl = measure_lean_repl_memory(project)
+                except LeanCalibrationError:
+                    raise
+                except Exception as exc:
+                    raise LeanCalibrationError(
+                        f"Lean REPL calibration failed: {exc}"
+                    ) from exc
+            recommendation = derive_auto_limits(
+                resources,
+                runtime.resolved.config,
+                calibrated_repl_p95_gib=(
+                    repl.p95_working_rss_gib if repl is not None else None
+                ),
+            ).lean_pool
+            tested = tuple(
+                value
+                for value in (1, 2, 4, 8, 16, 32)
+                if value <= max(1, recommendation)
+            ) or (1,)
+            detail = (
+                "Measured two sequential project REPLs without Codex traffic "
+                f"({repl.samples} working RSS samples; p95 "
+                f"{repl.p95_working_rss_gib:.3f} GiB). "
+                if repl is not None
+                else "No project was supplied; recorded the conservative "
+                "uncalibrated hardware policy. "
+            ) + "No proof state was modified."
+            profile = CalibrationProfile(
+                key=key,
+                repl=repl,
+                recommended_lean_pool=recommendation,
+                recommended_build_concurrency=current.recommended_build_concurrency,
+                recommended_ai_concurrency=current.recommended_ai_concurrency,
+                tested_ai_ceiling=current.tested_ai_ceiling,
+                revision=current.revision + (1 if current.measured_at else 0),
+            )
+        else:
+            used_codex_traffic = False
+            recommendation = runtime.auto_limits.build_concurrency
+            tested = tuple(range(1, recommendation + 1))
+            detail = "Conservative CPU/RAM build calibration; no concurrent build was started."
+            profile = CalibrationProfile(
+                key=key,
+                repl=current.repl,
+                recommended_lean_pool=current.recommended_lean_pool,
+                recommended_build_concurrency=recommendation,
+                recommended_ai_concurrency=current.recommended_ai_concurrency,
+                tested_ai_ceiling=current.tested_ai_ceiling,
+                revision=current.revision + (1 if current.measured_at else 0),
+            )
+        saved = store.save(profile)
+        # A newly saved profile may lower the machine-global Lean budget.  Any
+        # subsequent handle must re-resolve the conservative profile set.
+        self._concurrency_runtime = None
+        return BenchmarkResult(
+            kind=kind,
+            recommendation=recommendation,
+            tested_values=tested,
+            detail=detail,
+            used_codex_traffic=used_codex_traffic,
+            calibration_path=store.path_for(saved.key),
+        )
+
+    def reset_project_lean_calibration(self, project: Path) -> CalibrationResetResult:
+        """Delete the exact fresh/stale Lean calibration for one project key."""
+
+        project = project.expanduser().resolve()
+        if not project.is_dir():
+            raise ValueError(f"Managed project directory does not exist: {project}")
+        runtime = self._runtime()
+        key = project_calibration_key(
+            project,
+            resources=runtime.resources,
+            codex_plan=runtime.resolved.config.ai.plan.value,
+            codex_model="",
+        )
+        store = CalibrationStore.discover(self.cache_home)
+        path = store.path_for(key)
+        owner = f"lean-calibration-reset:{key.identifier}"
+        with runtime.lean.exclusive_calibration_lease(owner):
+            removed = store.reset(key)
+        self._concurrency_runtime = None
+        return CalibrationResetResult(
+            project_path=project,
+            profile_id=key.identifier,
+            calibration_path=path,
+            removed=removed,
+        )
+
+    def reset_adaptive_history(self) -> AdaptiveHistoryResetResult:
+        """Clear machine adaptive evidence without cancelling in-flight work."""
+
+        with self._settings_lock:
+            runtime = self._runtime()
+            runtime.reset_adaptive_history()
+            effective = self._effective_view(runtime)
+            return AdaptiveHistoryResetResult(
+                reset_at=_now(),
+                ai_limit=effective.ai_limit,
+                lean_pool=effective.lean_pool,
+                build_limit=effective.build_limit,
+            )
 
     def inspect_source(self, source: Path) -> SourceInspection:
         source = source.expanduser().resolve()
@@ -233,6 +1087,24 @@ class ProofAssistantWorkflow:
     ) -> ProjectDestinationInspection:
         resolved = self.projects.resolve_destination(name, project_path)
         return self._destination_inspection(self.projects.inspect(resolved))
+
+    def inspect_project_deletion(self, project: Path) -> ProjectDeletionInspection:
+        return self._deletion_inspection(self.projects.inspect_deletion(project))
+
+    def delete_project(self, project: Path) -> ProjectDeletionResult:
+        try:
+            result = self.projects.delete_project(project)
+        except ManagedProjectDeletionError as exc:
+            raise ProjectDeletionError(
+                self._deletion_inspection(exc.inspection)
+            ) from exc
+        return ProjectDeletionResult(
+            project_path=result.project_path,
+            source_path=result.source_path,
+            trash_path=result.trash_path,
+            deleted_at=result.deleted_at,
+            recoverable=True,
+        )
 
     def list_projects(self) -> tuple[ProjectCatalogEntry, ...]:
         entries: list[ProjectCatalogEntry] = []
@@ -308,10 +1180,31 @@ class ProofAssistantWorkflow:
             raise ProjectDestinationError(self._destination_inspection(managed))
         self._ensure_project_task(project)
         summary = self._summary(project)
+        job_observation = self.observe_verification(project, after_sequence=sys.maxsize)
+        if job_observation is not None:
+            job = job_observation.job
+            if not job.state.terminal:
+                return WorkflowSnapshot(WorkflowState.VERIFYING, summary)
+            workflow = self._read_workflow_state(project)
+            workflow_updated = str(workflow.get("updated_at") or "")
+            job_is_newer = bool(
+                job.completed_at and job.completed_at >= workflow_updated
+            )
+            if job_is_newer and job.state in {
+                VerificationJobState.FAILED,
+                VerificationJobState.INTERRUPTED,
+            }:
+                state = (
+                    WorkflowState.INTERRUPTED
+                    if job.state == VerificationJobState.INTERRUPTED
+                    else WorkflowState.FAILED
+                )
+                self._record_workflow_state(project, state, error=job.error)
+                return WorkflowSnapshot(state, self._summary(project), error=job.error)
         session = IncrementalSession(project)
         status = session.status()
         if status["mutation_in_progress"]:
-            return WorkflowSnapshot(WorkflowState.BUSY_EXTERNAL, summary)
+            return WorkflowSnapshot(WorkflowState.VERIFYING, summary)
         try:
             plan = self.plan_changes(project)
         except Exception as exc:
@@ -334,7 +1227,16 @@ class ProofAssistantWorkflow:
                 state, self._summary(project), clarifications=clarifications
             )
         latest = status["latest_run"] or {}
-        if latest.get("status") == "INTERRUPTED":
+        error: str | None = None
+        if latest.get("status") == "RUNNING":
+            state = WorkflowState.INTERRUPTED
+            error = (
+                "A legacy verification run was left RUNNING, but no backend "
+                "worker or project mutation lease remains. Its durable evidence "
+                "is preserved; retry will recover the interrupted run before "
+                "scheduling more work."
+            )
+        elif latest.get("status") == "INTERRUPTED":
             state = WorkflowState.INTERRUPTED
         elif latest.get("status") == "FAILED":
             state = WorkflowState.FAILED
@@ -348,11 +1250,13 @@ class ProofAssistantWorkflow:
             state = WorkflowState.PROJECT_READY
         findings = (
             self._findings_from_store(project)
-            if state == WorkflowState.COMPLETED
+            if state in {WorkflowState.COMPLETED, WorkflowState.FAILED}
             else None
         )
-        self._record_workflow_state(project, state)
-        return WorkflowSnapshot(state, self._summary(project), findings=findings)
+        self._record_workflow_state(project, state, error=error)
+        return WorkflowSnapshot(
+            state, self._summary(project), findings=findings, error=error
+        )
 
     def select_project_main_file(
         self, project: Path, main_file: str
@@ -418,6 +1322,19 @@ class ProofAssistantWorkflow:
                 f"Could not read verification report: {report_path}: {exc}"
             ) from exc
         return ReportDocument(resolved_report, markdown)
+
+    def load_failure_report(
+        self, project: Path, run_id: int | None = None
+    ) -> FailureDependencyReport | None:
+        """Load a backend-built immutable failure graph for one historical run."""
+
+        project = validate_managed_project_path(project)
+        managed = self.projects.inspect(project)
+        if managed.kind != ManagedProjectKind.RESUMABLE:
+            raise ProjectDestinationError(self._destination_inspection(managed))
+        session = IncrementalSession(project)
+        with StateStore(session.database_path) as store:
+            return build_failure_report(project, store, run_id)
 
     def plan_changes(self, project: Path) -> ChangeImpactPlan | None:
         """Compute a complete candidate plan without changing project authority."""
@@ -717,6 +1634,7 @@ class ProofAssistantWorkflow:
                     request_timeout=settings.request_timeout,
                     turn_timeout=settings.turn_timeout,
                     gc_timeout=settings.gc_timeout,
+                    concurrency=self._concurrency_spec(project=project),
                 ),
                 expected_inventory_sha256=(
                     current.candidate_inventory_sha256 if current else None
@@ -743,6 +1661,332 @@ class ProofAssistantWorkflow:
             project, result, clarification_model=settings.model
         )
 
+    def _job_store(self, project: Path) -> VerificationJobStore:
+        project = validate_managed_project_path(project)
+        managed = self.projects.inspect(project)
+        if managed.kind != ManagedProjectKind.RESUMABLE:
+            raise ProjectDestinationError(self._destination_inspection(managed))
+        return VerificationJobStore(project)
+
+    @staticmethod
+    def _legacy_job(project: Path, *, starting: bool = False) -> VerificationJob:
+        now = _now()
+        identity = canonical_hash({"legacy_project": str(project)})[:20]
+        return VerificationJob(
+            job_id=f"legacy-{identity}",
+            project_path=project,
+            state=(
+                VerificationJobState.STARTING
+                if starting
+                else VerificationJobState.RUNNING
+            ),
+            request_fingerprint="legacy-unavailable",
+            plan_id=None,
+            settings=None,
+            created_at=now,
+            started_at=None if starting else now,
+            updated_at=now,
+            completed_at=None,
+            heartbeat_at=None,
+            pid=None,
+            error=(
+                "An active backend verification predates durable job control; "
+                "only coarse attachment is available"
+            ),
+            cancellable=False,
+            attached_legacy=True,
+        )
+
+    @classmethod
+    def _legacy_observation(
+        cls, project: Path, *, starting: bool = False
+    ) -> VerificationJobObservation:
+        return VerificationJobObservation(
+            job=cls._legacy_job(project, starting=starting),
+            events=(),
+            after_sequence=0,
+            next_sequence=0,
+            started=False,
+            attached=True,
+        )
+
+    @staticmethod
+    def _assert_matching_request(
+        observation: VerificationJobObservation, fingerprint: str
+    ) -> VerificationJobObservation:
+        if (
+            not observation.job.attached_legacy
+            and observation.job.request_fingerprint != fingerprint
+        ):
+            raise VerificationJobConflictError(observation)
+        return observation
+
+    def observe_verification(
+        self, project: Path, after_sequence: int = 0
+    ) -> VerificationJobObservation | None:
+        """Replay durable progress without acquiring the worker's mutation lease."""
+
+        store = self._job_store(project)
+        project = store.project
+        active = store.active()
+        if active is not None:
+            # A worker is considered crashed only after both independent
+            # lifetime signals are free. This never guesses from PID/heartbeat.
+            if not worker_lease_active(project) and not project_session_active(project):
+                active = store.finish(
+                    active.job_id,
+                    VerificationJobState.INTERRUPTED,
+                    error=(
+                        "The detached verification worker exited without recording "
+                        "a terminal result; the project mutation lease is free"
+                    ),
+                )
+            return store.observe(active, after_sequence=after_sequence)
+        if project_session_active(project):
+            return self._legacy_observation(project)
+        if worker_lease_active(project):
+            return self._legacy_observation(project, starting=True)
+        latest = store.latest()
+        return (
+            store.observe(latest, after_sequence=after_sequence)
+            if latest is not None
+            else None
+        )
+
+    def start_verification(
+        self,
+        project: Path,
+        plan_id: str | None,
+        settings: VerificationSettings,
+    ) -> VerificationJobObservation:
+        """Start once or idempotently attach to an equivalent detached request."""
+
+        store = self._job_store(project)
+        project = store.project
+        fingerprint = request_fingerprint(
+            project,
+            plan_id,
+            settings,
+            codex=self.codex,
+            cache_home=self.cache_home,
+        )
+        existing = store.active()
+        if existing is not None and worker_lease_active(project):
+            return self._assert_matching_request(store.observe(existing), fingerprint)
+        try:
+            lease_fd = acquire_worker_lease(project)
+        except ProjectLockedError:
+            # The launcher transfers the lease before returning. Its durable row
+            # normally already exists; tolerate the very small pre-insert window.
+            for _attempt in range(20):
+                existing = store.active()
+                if existing is not None:
+                    return self._assert_matching_request(
+                        store.observe(existing), fingerprint
+                    )
+                if project_session_active(project):
+                    return self._legacy_observation(project)
+                time.sleep(0.05)
+            return self._legacy_observation(project, starting=True)
+
+        transferred = False
+        try:
+            existing = store.active()
+            if existing is not None:
+                if not project_session_active(project):
+                    existing = store.finish(
+                        existing.job_id,
+                        VerificationJobState.INTERRUPTED,
+                        error=(
+                            "A previous detached worker lost both lifecycle leases "
+                            "before recording a terminal result"
+                        ),
+                    )
+                else:
+                    return self._assert_matching_request(
+                        store.observe(existing), fingerprint
+                    )
+            if project_session_active(project):
+                return self._legacy_observation(project)
+
+            # Fail before persistence/spawn if the request is already stale.
+            current = self.plan_changes(project)
+            if plan_id is not None and (current is None or current.plan_id != plan_id):
+                raise StaleChangePlanError(
+                    "The manuscript or task changed after review; inspect the new "
+                    "impact plan"
+                )
+            if plan_id is None and current is not None:
+                raise StaleChangePlanError(
+                    "A manuscript or task change requires explicit review and "
+                    "confirmation"
+                )
+            VerifyOptions(
+                model=settings.model,
+                jobs=settings.jobs,
+                batch_size=settings.batch_size,
+                lean_pool_size=settings.lean_pool_size,
+            ).validate()
+            job = store.create(
+                request_fingerprint=fingerprint,
+                plan_id=plan_id,
+                settings=settings,
+            )
+            log_path = store.worker_log(job.job_id)
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with log_path.open("ab", buffering=0) as log:
+                command = [
+                    sys.executable,
+                    "-m",
+                    "proof_assistant",
+                    "--codex",
+                    self.codex,
+                ]
+                if self.cache_home is not None:
+                    command.extend(("--cache-home", self.cache_home))
+                command.extend(
+                    (
+                        "_project-worker",
+                        "--project",
+                        str(project),
+                        "--job-id",
+                        job.job_id,
+                        "--lease-fd",
+                        str(lease_fd),
+                    )
+                )
+                try:
+                    process = subprocess.Popen(
+                        command,
+                        stdin=subprocess.DEVNULL,
+                        stdout=log,
+                        stderr=subprocess.STDOUT,
+                        close_fds=True,
+                        pass_fds=(lease_fd,),
+                        start_new_session=True,
+                    )
+                except Exception as exc:
+                    store.finish(
+                        job.job_id,
+                        VerificationJobState.FAILED,
+                        error=f"Could not launch detached verification: {exc}",
+                    )
+                    raise
+            # Closing, rather than unlocking, the parent's copy transfers the
+            # open-file-description lease solely to the detached child.
+            os.close(lease_fd)
+            transferred = True
+            try:
+                started_job = store.record_spawn(
+                    job.job_id,
+                    pid=process.pid,
+                    command=tuple(command),
+                    worker_log_path=log_path,
+                )
+            except Exception:
+                # The worker already holds the lifetime lease and remains the
+                # authority. A transient provenance-write failure must never
+                # unlock or terminate it; the child will still record its PID,
+                # heartbeat, progress, and terminal state.
+                started_job = store.job(job.job_id)
+            assert started_job is not None
+            return store.observe(started_job, started=True, attached=False)
+        finally:
+            if not transferred:
+                release_worker_lease(lease_fd)
+
+    def request_verification_cancel(
+        self, project: Path, job_id: str
+    ) -> VerificationJobObservation:
+        store = self._job_store(project)
+        job = store.job(job_id)
+        if job is None:
+            observed = self.observe_verification(project)
+            if observed is not None and observed.job.job_id == job_id:
+                if observed.job.attached_legacy:
+                    raise VerificationJobNotCancellableError(observed)
+                return observed
+            raise VerificationJobNotFoundError(f"Unknown verification job: {job_id}")
+        if not job.state.terminal:
+            job = store.request_cancel(job_id)
+        return store.observe(job)
+
+    def _run_verification_job(self, project: Path, job_id: str, lease_fd: int) -> int:
+        """Hidden worker entrypoint; the inherited fd is its lifetime authority."""
+
+        store = self._job_store(project)
+        job = store.job(job_id)
+        if job is None or job.settings is None:
+            raise VerificationJobNotFoundError(f"Unknown verification job: {job_id}")
+        try:
+            inherited = os.fstat(lease_fd)
+            expected = worker_lock_path(store.project).stat()
+            if (inherited.st_dev, inherited.st_ino) != (
+                expected.st_dev,
+                expected.st_ino,
+            ):
+                raise OSError("descriptor does not identify this project's worker lock")
+            fcntl.flock(lease_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            store.finish(
+                job_id,
+                VerificationJobState.FAILED,
+                error=f"Inherited worker mutation lease is invalid: {exc}",
+            )
+            return 2
+
+        store.mark_running(job_id, pid=os.getpid())
+        stopped = threading.Event()
+
+        def heartbeat() -> None:
+            while not stopped.wait(2.0):
+                try:
+                    store.heartbeat(job_id)
+                except Exception:
+                    pass
+
+        heartbeat_thread = threading.Thread(
+            target=heartbeat, name=f"verification-heartbeat-{job_id[:8]}", daemon=True
+        )
+        heartbeat_thread.start()
+        try:
+            snapshot = self.confirm_and_verify(
+                store.project,
+                job.plan_id,
+                job.settings,
+                progress=lambda event: store.append_event(job_id, event),
+                cancellation=_JobCancellationFlag(store, job_id),
+            )
+            if snapshot.state == WorkflowState.INTERRUPTED:
+                terminal = VerificationJobState.INTERRUPTED
+                error = snapshot.error
+            elif snapshot.state == WorkflowState.FAILED:
+                terminal = VerificationJobState.FAILED
+                error = snapshot.error
+            else:
+                terminal = VerificationJobState.SUCCEEDED
+                error = None
+            store.finish(job_id, terminal, error=error)
+            return 0 if terminal == VerificationJobState.SUCCEEDED else 1
+        except BaseException as exc:
+            terminal = (
+                VerificationJobState.INTERRUPTED
+                if isinstance(exc, (KeyboardInterrupt, SystemExit))
+                else VerificationJobState.FAILED
+            )
+            try:
+                store.finish(job_id, terminal, error=f"{type(exc).__name__}: {exc}")
+            except Exception:
+                pass
+            return 1
+        finally:
+            stopped.set()
+            heartbeat_thread.join(timeout=3.0)
+            try:
+                os.close(lease_fd)
+            except OSError:
+                pass
+
     def _snapshot_for_result(
         self,
         project: Path,
@@ -760,6 +2004,7 @@ class ProofAssistantWorkflow:
             counterexamples=result.counterexamples,
             report_path=project / "VERIFICATION_REPORT.md",
             project_path=project,
+            failure_report=self.load_failure_report(project, result.run_id),
         )
         if result.outcome == "clarification_required":
             state = WorkflowState.AWAITING_CLARIFICATION
@@ -793,6 +2038,8 @@ class ProofAssistantWorkflow:
                     effort="low",
                     sandbox="read-only",
                     isolate_external_tools=True,
+                    concurrency=self._concurrency_spec(project=project),
+                    ai_task_class=AITaskClass.CLARIFICATION,
                 ),
                 cwd=project,
             )
@@ -805,12 +2052,17 @@ class ProofAssistantWorkflow:
         latest = status["latest_run"] or {}
         persisted = self._read_workflow_state(project)
         if status["mutation_in_progress"]:
-            state = WorkflowState.BUSY_EXTERNAL
+            state = WorkflowState.VERIFYING
         else:
             try:
                 state = WorkflowState(str(persisted.get("state", "PROJECT_READY")))
             except ValueError:
                 state = WorkflowState.PROJECT_READY
+            if state == WorkflowState.VERIFYING and latest.get("status") == "RUNNING":
+                # A current verifier would hold the project session lock above.
+                # Preserve the abandoned run for explicit recovery without
+                # misrepresenting a dead TUI-era worker as active ownership.
+                state = WorkflowState.INTERRUPTED
         return ProjectSummary(
             project_id=str(config.get("project_id") or project.resolve()),
             name=str(config.get("name") or project.name),
@@ -840,6 +2092,30 @@ class ProofAssistantWorkflow:
         )
 
     @staticmethod
+    def _deletion_inspection(
+        record: ManagedDeletionInspection,
+    ) -> ProjectDeletionInspection:
+        return ProjectDeletionInspection(
+            project_path=record.project_path,
+            source_path=record.source_path,
+            availability=ProjectDeletionAvailability(
+                ProjectDeletionAvailability.READY
+                if record.kind == ManagedDeletionKind.READY
+                else (
+                    ProjectDeletionAvailability.BUSY
+                    if record.kind == ManagedDeletionKind.BUSY
+                    else ProjectDeletionAvailability.REFUSED
+                )
+            ),
+            issue=record.issue,
+            source_in_dropbox=(
+                is_in_dropbox(record.source_path)
+                if record.source_path is not None
+                else False
+            ),
+        )
+
+    @staticmethod
     def _catalog_entry(
         record: ManagedProjectRecord, *, project: ProjectSummary | None = None
     ) -> ProjectCatalogEntry:
@@ -862,6 +2138,11 @@ class ProofAssistantWorkflow:
         with StateStore(session.database_path) as store:
             latest = store.latest_run()
             rows = store.current_claim_rows()
+            failure_report = (
+                build_failure_report(project, store, int(latest["run_id"]))
+                if latest is not None
+                else None
+            )
         states: dict[str, list[str]] = {}
         for row in rows:
             states.setdefault(str(row["status"]), []).append(str(row["claim_id"]))
@@ -876,6 +2157,7 @@ class ProofAssistantWorkflow:
             ),
             report_path=project / "VERIFICATION_REPORT.md",
             project_path=project,
+            failure_report=failure_report,
         )
 
     def _interrupted_snapshot(

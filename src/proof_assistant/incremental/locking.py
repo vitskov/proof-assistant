@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fcntl
+import os
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -8,6 +9,52 @@ from pathlib import Path
 
 class ProjectLockedError(RuntimeError):
     """Raised when a persistent verification project is already mutating."""
+
+
+def worker_lock_path(project: Path) -> Path:
+    return project / ".repoprover" / "jobs" / "worker.lock"
+
+
+def acquire_worker_lease(project: Path) -> int:
+    """Acquire the detached-worker lifetime lease and return its inheritable fd."""
+
+    path = worker_lock_path(project)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError as exc:
+        os.close(descriptor)
+        raise ProjectLockedError(
+            "An active backend verification worker holds this project's "
+            f"mutation lease: {project}"
+        ) from exc
+    os.set_inheritable(descriptor, True)
+    return descriptor
+
+
+def release_worker_lease(descriptor: int) -> None:
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+    finally:
+        os.close(descriptor)
+
+
+def worker_lease_active(project: Path) -> bool:
+    try:
+        descriptor = acquire_worker_lease(project)
+    except ProjectLockedError:
+        return True
+    release_worker_lease(descriptor)
+    return False
+
+
+def project_session_active(project: Path) -> bool:
+    try:
+        with project_lock(project, exclusive=True):
+            return False
+    except ProjectLockedError:
+        return True
 
 
 @contextmanager

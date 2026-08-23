@@ -4,51 +4,101 @@ import ast
 import asyncio
 import threading
 from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import replace
 from functools import wraps
 from pathlib import Path
 from typing import Any
 
 from textual.pilot import Pilot
-from textual.widgets import Button, Input, MarkdownViewer, TabbedContent, TextArea
+from textual.widgets import (
+    Button,
+    Checkbox,
+    DataTable,
+    Input,
+    MarkdownViewer,
+    Select,
+    TabbedContent,
+    TextArea,
+)
 
 import proof_assistant.tui.screens as tui_screens
 from proof_assistant.tui import ProofAssistantApp
 from proof_assistant.tui.screens import (
     ChangeReviewScreen,
     ClarificationScreen,
+    DashboardScreen,
     ExistingProjectMainFileSelectionScreen,
+    FailureDependencyScreen,
+    FailureTree,
     FindingsScreen,
     MainFileSelectionScreen,
     NewProjectScreen,
     ProgressScreen,
+    ProjectDeletionConfirmationScreen,
+    ProjectDeletionOutcomeScreen,
     ProjectDestinationConflictScreen,
     ProjectReviewScreen,
     RecoveryScreen,
     ReportViewerScreen,
     WelcomeScreen,
 )
+from proof_assistant.tui.settings import (
+    ConcurrencyResourcesScreen,
+    LegacySettingsScreen,
+    SettingsHomeScreen,
+    SettingsWarningConfirmationScreen,
+)
 from proof_assistant.workflow.contracts import (
+    AdaptiveHistoryResetResult,
+    BenchmarkKind,
+    BenchmarkResult,
+    CalibrationResetResult,
     CancellationReport,
-    CancellationToken,
     ChangeImpactPlan,
     ClaimChangeKind,
     ClaimImpact,
     ClarificationPresentation,
+    ConcurrencySettingsView,
+    EffectiveConcurrencyView,
+    FailureArtifact,
+    FailureComponent,
+    FailureComponentEdge,
+    FailureDependencyReport,
+    FailureGraphEdge,
+    FailureGraphNode,
+    FailureIncident,
+    FailureKind,
+    FailureOutlineNode,
+    FailurePath,
+    FailureScope,
     FileChange,
     FileChangeKind,
     FindingSummary,
     LatexSourceCandidate,
+    LegacySettingsView,
+    MachineSettingsSnapshot,
+    MachineSettingsUpdateRequest,
     NewProjectRequest,
     ProgressEvent,
     ProgressPhase,
-    ProgressSink,
     ProjectAvailability,
     ProjectCatalogEntry,
+    ProjectDeletionAvailability,
+    ProjectDeletionInspection,
+    ProjectDeletionResult,
     ProjectDestinationInspection,
     ProjectSummary,
     ReportDocument,
+    ResourceTelemetryView,
+    SettingResolution,
+    SettingsChangePreview,
+    SettingsScopeKind,
+    SettingsWarning,
     SourceInspection,
     SourceLocation,
+    VerificationJob,
+    VerificationJobObservation,
+    VerificationJobState,
     VerificationSettings,
     WorkflowSnapshot,
     WorkflowState,
@@ -78,6 +128,65 @@ def project(*, state: WorkflowState = WorkflowState.PROJECT_READY) -> ProjectSum
         last_opened_at="2026-08-23T12:00:00Z",
         workflow_state=state,
         source_in_dropbox=True,
+    )
+
+
+def machine_settings(*, revision: int = 3) -> MachineSettingsSnapshot:
+    configured = ConcurrencySettingsView()
+    return MachineSettingsSnapshot(
+        scope=SettingsScopeKind.MACHINE,
+        machine_id="machine-test-7",
+        config_path=Path("/Users/writer/.config/proof-assistant/machines/test.json"),
+        cache_path=Path("/Users/writer/.cache/proof-assistant/concurrency"),
+        revision=revision,
+        configured=configured,
+        effective=EffectiveConcurrencyView(
+            ai_limit=4,
+            ai_ceiling=8,
+            lean_pool=3,
+            lean_max=6,
+            build_limit=1,
+            build_ceiling=8,
+            agents_per_target_current=1,
+            agents_per_target_max=4,
+        ),
+        telemetry=ResourceTelemetryView(
+            os_name="macOS",
+            architecture="arm64",
+            resource_profile="interactive",
+            physical_cpus=10,
+            logical_cpus=10,
+            cpu_percent=41.5,
+            total_memory_gib=32.0,
+            available_memory_gib=19.25,
+            memory_percent_available=60.2,
+            swap_used_gib=0.0,
+            swap_delta_gib=0.0,
+            memory_pressure="GREEN",
+            load_average=(2.0, 1.8, 1.5),
+            io_wait_percent=None,
+            ai_active=2,
+            ai_queued=5,
+            ai_throttles=0,
+            ai_backoff_until=None,
+            lean_active=3,
+            lean_queued=1,
+            lean_p95_rss_gib=2.2,
+            build_active=1,
+            build_queued=0,
+            sampled_at="2026-08-23T20:00:00Z",
+        ),
+        legacy=LegacySettingsView(),
+        resolution=(
+            SettingResolution("ai.initial", "Auto", "4", "machine auto policy"),
+            SettingResolution("lean.pool", "Auto", "3", "CPU and RAM"),
+            SettingResolution("build.max", "Auto", "1", "hardware policy"),
+        ),
+        reasons=(
+            "Interactive profile reserves foreground CPU and memory.",
+            "Lean pool is RAM-bound at the conservative fallback footprint.",
+        ),
+        updated_at="2026-08-23T20:00:00Z",
     )
 
 
@@ -169,6 +278,191 @@ def findings(p: ProjectSummary) -> FindingSummary:
     )
 
 
+def failure_dependency_report(
+    p: ProjectSummary,
+    *,
+    cycles: bool = False,
+    synthetic_root: bool = False,
+) -> FailureDependencyReport:
+    artifact = FailureArtifact(
+        path=p.project_path / ".repoprover" / "runs" / "41" / "lean-build.log",
+        label="Lean build log",
+        sha256="a1b2c3",
+        command=("lake", "env", "lean", "Proofs/LemBroken.lean"),
+        exit_code=1,
+    )
+    incident = FailureIncident(
+        incident_id=41,
+        run_id=73,
+        scope=FailureScope.RUN if synthetic_root else FailureScope.CLAIM,
+        kind=(
+            FailureKind.INFRASTRUCTURE
+            if synthetic_root
+            else FailureKind.CLAIM_TECHNICAL
+        ),
+        phase="LEAN_BUILD",
+        category="lean_compile_error",
+        message="Lean rejected the generated proof.",
+        detail="unknown constant Spectral.bound",
+        provenance="lean-build",
+        claim_ids=() if synthetic_root else ("lem:broken",),
+        batch_index=2,
+        retryable=False,
+        artifacts=(artifact,),
+    )
+    extra_nodes = tuple(
+        FailureGraphNode(
+            claim_id=f"lem:ok-{index:02d}",
+            kind="lemma",
+            source_file=f"sections/part-{index:02d}.tex",
+            statement_start=10 + index,
+            statement_end=12 + index,
+            state="CERTIFIED",
+        )
+        for index in range(24)
+    )
+    graph_nodes = (
+        FailureGraphNode(
+            claim_id="thm:goal",
+            kind="theorem",
+            source_file="main.tex",
+            statement_start=80,
+            statement_end=92,
+            state="BLOCKED_DEPENDENCY",
+        ),
+        FailureGraphNode(
+            claim_id="lem:broken",
+            kind="lemma",
+            source_file="sections/failure.tex",
+            statement_start=42,
+            statement_end=49,
+            state="FAILED_TECHNICAL",
+            incident_ids=(41,),
+        ),
+        *extra_nodes,
+    )
+    ok_outline = tuple(
+        FailureOutlineNode(
+            claim_id=node.claim_id,
+            state=node.state,
+            blocker=False,
+            incident_ids=(),
+            shared_reference=index == 0,
+        )
+        for index, node in enumerate(extra_nodes)
+    )
+    goal_outline = FailureOutlineNode(
+        claim_id="thm:goal",
+        state="BLOCKED_DEPENDENCY",
+        blocker=False,
+        incident_ids=(),
+        shared_reference=False,
+        children=(
+            FailureOutlineNode(
+                claim_id="lem:broken",
+                state="FAILED_TECHNICAL",
+                blocker=True,
+                incident_ids=(41,),
+                shared_reference=False,
+            ),
+            *ok_outline,
+        ),
+    )
+    outline = (
+        (
+            FailureOutlineNode(
+                claim_id="incident:41",
+                state="RUN:INFRASTRUCTURE",
+                blocker=True,
+                incident_ids=(41,),
+                shared_reference=False,
+                children=(goal_outline,),
+            ),
+        )
+        if synthetic_root
+        else (goal_outline,)
+    )
+    components = (
+        FailureComponent(
+            component_id="component:cycle",
+            members=("lem:broken", "thm:goal"),
+            cyclic=True,
+            blocker=True,
+            incident_ids=(41,),
+        ),
+        FailureComponent(
+            component_id="component:stable",
+            members=(extra_nodes[0].claim_id,),
+            cyclic=False,
+            blocker=False,
+        ),
+    )
+    return FailureDependencyReport(
+        run_id=73,
+        snapshot="snapshot-73",
+        outcome="failed",
+        detail="A proof dependency could not be certified.",
+        targets=("thm:goal",),
+        selected=("thm:goal", "lem:broken"),
+        nodes=graph_nodes,
+        edges=(
+            FailureGraphEdge(
+                dependent="thm:goal",
+                dependency="lem:broken",
+                kinds=("explicit_ref",),
+                provenances=("manuscript",),
+            ),
+        ),
+        incidents=(incident,),
+        global_incident_ids=(41,) if synthetic_root else (),
+        primary_incident_id=41,
+        first_blocker=FailurePath(
+            target="thm:goal",
+            blocker="lem:broken",
+            claims=("thm:goal", "lem:broken"),
+        ),
+        paths=(
+            FailurePath(
+                target="thm:goal",
+                blocker="lem:broken",
+                claims=("thm:goal", "lem:broken"),
+            ),
+        ),
+        has_cycles=cycles,
+        outline=() if cycles else outline,
+        components=components if cycles else (),
+        component_edges=(
+            (
+                FailureComponentEdge(
+                    dependent_component="component:stable",
+                    dependency_component="component:cycle",
+                ),
+            )
+            if cycles
+            else ()
+        ),
+    )
+
+
+def failed_snapshot(
+    p: ProjectSummary, report: FailureDependencyReport | None
+) -> WorkflowSnapshot:
+    failed_project = replace(p, workflow_state=WorkflowState.FAILED)
+    failed_findings = replace(
+        findings(failed_project),
+        outcome="failed",
+        detail="Verification stopped with structured failure evidence.",
+        unresolved=("thm:goal",),
+        failure_report=report,
+    )
+    return WorkflowSnapshot(
+        WorkflowState.FAILED,
+        failed_project,
+        findings=failed_findings,
+        error="Lean compilation failed.",
+    )
+
+
 class FakeWorkflowService:
     """Contract-only fake: no filesystem, Git, or SQLite behavior."""
 
@@ -177,13 +471,36 @@ class FakeWorkflowService:
         self.projects: tuple[ProjectCatalogEntry, ...] = (catalog_entry(self.project),)
         self.inspected: list[Path] = []
         self.inspected_destinations: list[tuple[str, Path | None]] = []
+        self.inspected_deletions: list[Path] = []
+        self.deleted_projects: list[Path] = []
         self.selected_main_files: list[tuple[Path, str]] = []
         self.loaded_reports: list[Path] = []
+        self.loaded_failure_reports: list[tuple[Path, int | None]] = []
         self.created: list[NewProjectRequest] = []
         self.resumed: list[Path] = []
         self.planned: list[Path] = []
-        self.verified: list[tuple[Path, str | None, VerificationSettings]] = []
+        self.started_jobs: list[tuple[Path, str | None, VerificationSettings]] = []
+        self.observed_jobs: list[tuple[Path, int]] = []
+        self.cancel_requests: list[tuple[Path, str]] = []
+        self.synchronous_verifier_calls = 0
+        self.job_state: VerificationJobState | None = None
+        self.job_settings: VerificationSettings | None = None
+        self.job_attached_legacy = False
+        self.job_events: tuple[ProgressEvent, ...] = ()
+        self.observation_error: Exception | None = None
         self.plan_result: ChangeImpactPlan | None = None
+        self.default_settings = VerificationSettings()
+        self.machine_settings = machine_settings()
+        self.machine_settings_reads = 0
+        self.machine_settings_projects: list[Path | None] = []
+        self.settings_previews: list[MachineSettingsUpdateRequest] = []
+        self.settings_applications: list[tuple[str, tuple[str, ...]]] = []
+        self.settings_resets: list[int] = []
+        self.settings_warnings: tuple[SettingsWarning, ...] = ()
+        self._preview: SettingsChangePreview | None = None
+        self.benchmarks: list[tuple[BenchmarkKind, Path | None, bool]] = []
+        self.calibration_resets: list[Path] = []
+        self.adaptive_history_resets = 0
         self.inspection = SourceInspection(
             source_path=self.project.source_path,
             candidates=(LatexSourceCandidate("main.tex", True),),
@@ -194,6 +511,23 @@ class FakeWorkflowService:
             project_path=self.project.project_path,
             availability=ProjectAvailability.AVAILABLE,
         )
+        self.deletion_inspection_result = ProjectDeletionInspection(
+            project_path=self.project.project_path,
+            source_path=self.project.source_path,
+            availability=ProjectDeletionAvailability.READY,
+            source_in_dropbox=True,
+        )
+        self.deletion_result = ProjectDeletionResult(
+            project_path=self.project.project_path,
+            source_path=self.project.source_path,
+            trash_path=Path(
+                "/Users/writer/.local/share/proof-assistant/recoverable-trash/"
+                "Paper-One-proof-assistant"
+            ),
+            deleted_at="2026-08-23T19:30:00Z",
+        )
+        self.deletion_inspection_error: Exception | None = None
+        self.deletion_error: Exception | None = None
         self.creation_release: threading.Event | None = None
         self.verification_release: threading.Event | None = None
         self.create_result = WorkflowSnapshot(WorkflowState.PROJECT_READY, self.project)
@@ -206,6 +540,8 @@ class FakeWorkflowService:
             "# Verification report\n\n**Verified:** yes\n\n```lean\nexample : True := by trivial\n```\n",
         )
         self.report_error: Exception | None = None
+        self.failure_report_result: FailureDependencyReport | None = None
+        self.failure_report_error: Exception | None = None
         self.verify_result = WorkflowSnapshot(
             WorkflowState.COMPLETED,
             ProjectSummary(
@@ -216,6 +552,119 @@ class FakeWorkflowService:
 
     def default_task_text(self) -> str:
         return "Verify every claimed theorem without sorry or new axioms."
+
+    def default_verification_settings(self) -> VerificationSettings:
+        return self.default_settings
+
+    def get_machine_settings(
+        self, *, project: Path | None = None
+    ) -> MachineSettingsSnapshot:
+        self.machine_settings_projects.append(project)
+        self.machine_settings_reads += 1
+        return self.machine_settings
+
+    def preview_machine_settings(
+        self, request: MachineSettingsUpdateRequest
+    ) -> SettingsChangePreview:
+        if request.scope != SettingsScopeKind.MACHINE:
+            raise ValueError("only MACHINE settings are supported")
+        if request.expected_revision != self.machine_settings.revision:
+            raise ValueError("machine settings revision changed; refresh and retry")
+        self.settings_previews.append(request)
+        configured = request.configured
+        current = self.machine_settings.effective
+        effective = replace(
+            current,
+            ai_limit=configured.ai_initial or current.ai_limit,
+            ai_ceiling=configured.ai_hard_max or current.ai_ceiling,
+            lean_pool=configured.lean_pool or current.lean_pool,
+            lean_max=configured.lean_max or current.lean_max,
+            build_limit=configured.max_builds or current.build_limit,
+            agents_per_target_max=configured.agents_per_target_max,
+        )
+        self._preview = SettingsChangePreview(
+            preview_token=f"preview-{len(self.settings_previews)}",
+            requested=request,
+            effective_if_applied=effective,
+            warnings=self.settings_warnings,
+            live_fields=("ai.limit", "lean.pool", "build.limit"),
+            next_run_fields=("legacy.jobs", "legacy.batch_size"),
+        )
+        return self._preview
+
+    def apply_machine_settings(
+        self,
+        preview_token: str,
+        accepted_warning_ids: tuple[str, ...] = (),
+    ) -> MachineSettingsSnapshot:
+        if self._preview is None or self._preview.preview_token != preview_token:
+            raise ValueError("unknown or expired preview")
+        expected_warnings = {warning.warning_id for warning in self._preview.warnings}
+        if not expected_warnings.issubset(accepted_warning_ids):
+            raise ValueError("unsafe settings were not accepted")
+        self.settings_applications.append((preview_token, accepted_warning_ids))
+        self.machine_settings = replace(
+            self.machine_settings,
+            revision=self.machine_settings.revision + 1,
+            configured=self._preview.requested.configured,
+            effective=self._preview.effective_if_applied,
+            legacy=self._preview.requested.legacy,
+            updated_at="2026-08-23T20:01:00Z",
+        )
+        return self.machine_settings
+
+    def reset_machine_settings(self, expected_revision: int) -> MachineSettingsSnapshot:
+        if expected_revision != self.machine_settings.revision:
+            raise ValueError("machine settings revision changed; refresh and retry")
+        self.settings_resets.append(expected_revision)
+        defaults = machine_settings(revision=expected_revision + 1)
+        self.machine_settings = defaults
+        return defaults
+
+    def run_concurrency_benchmark(
+        self,
+        kind: BenchmarkKind,
+        *,
+        project: Path | None = None,
+        allow_codex_traffic: bool = False,
+    ) -> BenchmarkResult:
+        self.benchmarks.append((kind, project, allow_codex_traffic))
+        recommendation = {
+            BenchmarkKind.CODEX: 4,
+            BenchmarkKind.LEAN: 3,
+            BenchmarkKind.BUILD: 1,
+        }[kind]
+        return BenchmarkResult(
+            kind=kind,
+            recommendation=recommendation,
+            tested_values=(1, 2, recommendation),
+            detail="Synthetic backend calibration completed.",
+            used_codex_traffic=False,
+            calibration_path=Path(
+                f"/Users/writer/.cache/proof-assistant/concurrency/{kind.value}.json"
+            ),
+        )
+
+    def reset_project_lean_calibration(self, project: Path) -> CalibrationResetResult:
+        self.calibration_resets.append(project)
+        return CalibrationResetResult(
+            project_path=project,
+            profile_id="profile-test",
+            calibration_path=Path(
+                "/Users/writer/.cache/repoprover-codex/concurrency/"
+                "calibration/profile-test.json"
+            ),
+            removed=True,
+        )
+
+    def reset_adaptive_history(self) -> AdaptiveHistoryResetResult:
+        self.adaptive_history_resets += 1
+        return AdaptiveHistoryResetResult(
+            reset_at="2026-08-23T21:00:00Z",
+            ai_limit=4,
+            lean_pool=3,
+            build_limit=1,
+        )
 
     def list_projects(self) -> Sequence[ProjectCatalogEntry]:
         return self.projects
@@ -240,6 +689,12 @@ class FakeWorkflowService:
             source_in_dropbox=self.inspection.source_in_dropbox,
         )
 
+    def inspect_project_deletion(self, project_path: Path) -> ProjectDeletionInspection:
+        self.inspected_deletions.append(project_path)
+        if self.deletion_inspection_error is not None:
+            raise self.deletion_inspection_error
+        return self.deletion_inspection_result
+
     def create_project(self, request: NewProjectRequest) -> WorkflowSnapshot:
         self.created.append(request)
         if self.creation_release is not None:
@@ -258,34 +713,30 @@ class FakeWorkflowService:
             raise self.report_error
         return self.report_result
 
+    def load_failure_report(
+        self, project_path: Path, run_id: int | None = None
+    ) -> FailureDependencyReport | None:
+        self.loaded_failure_reports.append((project_path, run_id))
+        if self.failure_report_error is not None:
+            raise self.failure_report_error
+        return self.failure_report_result
+
+    def delete_project(self, project_path: Path) -> ProjectDeletionResult:
+        self.deleted_projects.append(project_path)
+        if self.deletion_error is not None:
+            raise self.deletion_error
+        self.projects = tuple(
+            entry for entry in self.projects if entry.project_path != project_path
+        )
+        return self.deletion_result
+
     def resume_project(self, project_path: Path) -> WorkflowSnapshot:
         self.resumed.append(project_path)
-        return self.resume_result
-
-    def plan_changes(self, project_path: Path) -> ChangeImpactPlan | None:
-        self.planned.append(project_path)
-        return self.plan_result
-
-    def confirm_and_verify(
-        self,
-        project_path: Path,
-        plan_id: str | None,
-        settings: VerificationSettings,
-        *,
-        progress: ProgressSink | None = None,
-        cancellation: CancellationToken | None = None,
-    ) -> WorkflowSnapshot:
-        self.verified.append((project_path, plan_id, settings))
-        if progress is not None:
-            progress(ProgressEvent(1, ProgressPhase.INDEXING, "Indexed sources", 1, 2))
-        if self.verification_release is not None:
-            self.verification_release.wait(timeout=3)
-        if cancellation is not None and cancellation.cancelled:
-            interrupted = ProjectSummary(
-                **{
-                    **self.project.__dict__,
-                    "workflow_state": WorkflowState.INTERRUPTED,
-                }
+        if self.job_state == VerificationJobState.SUCCEEDED:
+            return self.verify_result
+        if self.job_state == VerificationJobState.INTERRUPTED:
+            interrupted = replace(
+                self.project, workflow_state=WorkflowState.INTERRUPTED
             )
             return WorkflowSnapshot(
                 WorkflowState.INTERRUPTED,
@@ -298,9 +749,105 @@ class FakeWorkflowService:
                     temporary_worktrees_cleaned=True,
                 ),
             )
-        if progress is not None:
-            progress(ProgressEvent(2, ProgressPhase.COMPLETE, "Finished", 2, 2))
-        return self.verify_result
+        return self.resume_result
+
+    def plan_changes(self, project_path: Path) -> ChangeImpactPlan | None:
+        self.planned.append(project_path)
+        return self.plan_result
+
+    def _job(self) -> VerificationJob:
+        state = self.job_state or VerificationJobState.RUNNING
+        return VerificationJob(
+            job_id="job-73",
+            project_path=self.project.project_path,
+            state=state,
+            request_fingerprint="fingerprint-73",
+            plan_id=(self.started_jobs[-1][1] if self.started_jobs else None),
+            settings=None if self.job_attached_legacy else self.job_settings,
+            created_at="2026-08-23T19:00:00Z",
+            started_at="2026-08-23T19:00:01Z",
+            updated_at="2026-08-23T19:00:02Z",
+            completed_at=("2026-08-23T19:01:00Z" if state.terminal else None),
+            heartbeat_at="2026-08-23T19:00:02Z",
+            pid=7321,
+            error=None,
+            cancellable=not self.job_attached_legacy and not state.terminal,
+            attached_legacy=self.job_attached_legacy,
+        )
+
+    def _observation(
+        self,
+        after_sequence: int,
+        *,
+        started: bool = False,
+    ) -> VerificationJobObservation:
+        events = (
+            ()
+            if self.job_attached_legacy
+            else tuple(
+                event for event in self.job_events if event.sequence > after_sequence
+            )
+        )
+        next_sequence = max(
+            (event.sequence for event in self.job_events), default=after_sequence
+        )
+        return VerificationJobObservation(
+            job=self._job(),
+            events=events,
+            after_sequence=after_sequence,
+            next_sequence=next_sequence,
+            started=started,
+            attached=not started,
+            poll_after_seconds=0.01,
+        )
+
+    def start_verification(
+        self,
+        project_path: Path,
+        plan_id: str | None,
+        settings: VerificationSettings,
+    ) -> VerificationJobObservation:
+        self.started_jobs.append((project_path, plan_id, settings))
+        self.job_state = VerificationJobState.RUNNING
+        self.job_settings = settings
+        self.job_events = (
+            ProgressEvent(1, ProgressPhase.INDEXING, "Indexed sources", 1, 2),
+        )
+        return self._observation(0, started=True)
+
+    def observe_verification(
+        self, project_path: Path, after_sequence: int = 0
+    ) -> VerificationJobObservation | None:
+        self.observed_jobs.append((project_path, after_sequence))
+        if self.observation_error is not None:
+            raise self.observation_error
+        if self.job_state is None:
+            return None
+        should_finish = self.verification_release is None or (
+            self.verification_release.is_set()
+        )
+        if should_finish and not self.job_state.terminal:
+            self.job_state = (
+                VerificationJobState.INTERRUPTED
+                if self.job_state == VerificationJobState.CANCEL_REQUESTED
+                else VerificationJobState.SUCCEEDED
+            )
+            self.job_events = (
+                *self.job_events,
+                ProgressEvent(2, ProgressPhase.COMPLETE, "Finished", 2, 2),
+            )
+        return self._observation(after_sequence)
+
+    def request_verification_cancel(
+        self, project_path: Path, job_id: str
+    ) -> VerificationJobObservation:
+        self.cancel_requests.append((project_path, job_id))
+        self.job_state = VerificationJobState.CANCEL_REQUESTED
+        return self._observation(0)
+
+    def confirm_and_verify(self, *args: Any, **kwargs: Any) -> WorkflowSnapshot:
+        self.synchronous_verifier_calls += 1
+        raise AssertionError("TUI must never call the synchronous verifier")
 
 
 async def wait_for(
@@ -327,6 +874,45 @@ def progress_sources_contain(app: ProofAssistantApp, text: str) -> bool:
         return False
     nodes = app.screen.query("#progress-sources").nodes
     return bool(nodes) and isinstance(nodes[0], TextArea) and text in nodes[0].text
+
+
+def cancellation_report_is_ready(app: ProofAssistantApp) -> bool:
+    """Wait for both the recovery route and its asynchronously mounted content."""
+
+    if not isinstance(app.screen, RecoveryScreen):
+        return False
+    nodes = app.screen.query("#cancellation-report").nodes
+    return bool(nodes) and isinstance(nodes[0], TextArea)
+
+
+def button_is_ready(app: ProofAssistantApp, selector: str) -> bool:
+    button = app.screen.query(selector).first()
+    return button is not None and button.region.width > 0 and button.region.height > 0
+
+
+def settings_home_is_ready(app: ProofAssistantApp) -> bool:
+    if not isinstance(app.screen, SettingsHomeScreen):
+        return False
+    buttons = app.screen.query("#open-concurrency-settings").nodes
+    return bool(buttons) and isinstance(buttons[0], Button) and not buttons[0].disabled
+
+
+def settings_warning_is_ready(app: ProofAssistantApp) -> bool:
+    return isinstance(app.screen, SettingsWarningConfirmationScreen) and bool(
+        app.screen.query("#settings-warning-cancel").nodes
+    )
+
+
+async def activate_scrolled_button(
+    pilot: Pilot[None], app: ProofAssistantApp, selector: str
+) -> None:
+    """Use keyboard focus so a short terminal scrolls the action into view."""
+
+    button = app.screen.query_one(selector, Button)
+    button.focus()
+    await pilot.pause()
+    await wait_for(pilot, lambda: button_is_ready(app, selector))
+    await pilot.press("enter")
 
 
 async def settle_screen(pilot: Pilot[None]) -> None:
@@ -399,7 +985,8 @@ async def test_new_project_custom_task_starts_first_verification() -> None:
         assert request.project_path == Path("/Users/writer/proof-assistant/spectral")
         assert request.task_text == "Verify the main spectral theorem."
         assert service.inspected == [Path("/Users/writer/Dropbox/paper")]
-        assert service.verified[0][1] is None
+        assert service.started_jobs[0][1] is None
+        assert service.synchronous_verifier_calls == 0
         assert app.screen.query_one("#dropbox-warning", TextArea)
         assert "All selected claims" in str(
             app.screen.query_one("#findings-detail", TextArea).text
@@ -481,6 +1068,187 @@ async def test_report_read_error_is_copyable_and_stays_in_terminal() -> None:
         error.select_all()
         assert "Could not read verification report" in error.selected_text
         assert opened == []
+
+
+@async_test
+async def test_acyclic_failure_report_uses_tree_with_copyable_exact_evidence() -> None:
+    service = FakeWorkflowService()
+    report = failure_dependency_report(service.project)
+    snapshot = failed_snapshot(service.project, report)
+    app = ProofAssistantApp(service)
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        await settle_screen(pilot)
+        app.show_snapshot(snapshot)
+        await wait_for(pilot, lambda: isinstance(app.screen, FailureDependencyScreen))
+        await settle_screen(pilot)
+
+        tree = app.screen.query_one("#failure-tree", FailureTree)
+        assert not app.screen.query("#failure-components").nodes
+        assert tree.size.height >= 6
+        assert tree.virtual_size.height > tree.size.height
+        labels = [tree.root.label.plain]
+
+        def collect_labels(node) -> None:
+            for child in node.children:
+                labels.append(child.label.plain)
+                collect_labels(child)
+
+        collect_labels(tree.root)
+        assert any("[FAIL] lem:broken" in label for label in labels)
+        assert any("[BLOCKED] thm:goal" in label for label in labels)
+        assert any("[OK] lem:ok-00 (shared reference)" in label for label in labels)
+
+        tree.focus()
+        await pilot.press("pagedown")
+        assert tree.cursor_line > 0
+        assert tree.scroll_offset.y > 0
+
+        failed_node = tree.root.children[0].children[0]
+        tree.move_cursor(failed_node, animate=False)
+        await pilot.press("enter")
+        await wait_for(
+            pilot,
+            lambda: (
+                app.screen.query_one("#failure-tabs", TabbedContent).active
+                == "failure-detail-pane"
+            ),
+        )
+        detail = app.screen.query_one("#failure-detail", TextArea)
+        assert detail.read_only
+        assert "unknown constant Spectral.bound" in detail.text
+        assert "sections/failure.tex" in detail.text
+        assert "Statement lines: 42-49" in detail.text
+        assert "Lean build log" in detail.text
+        assert str(report.incidents[0].artifacts[0].path) in detail.text
+        assert "lake env lean Proofs/LemBroken.lean" in detail.text
+        detail.focus()
+        await pilot.press("ctrl+a")
+        assert "unknown constant Spectral.bound" in detail.selected_text
+
+        tabs = app.screen.query_one("#failure-tabs", TabbedContent)
+        tabs.active = "failure-outline-pane"
+        await pilot.pause()
+        outline = app.screen.query_one("#failure-outline", TextArea)
+        outline.focus()
+        await pilot.press("ctrl+a")
+        assert "[FAIL] lem:broken" in outline.selected_text
+        assert "[BLOCKED] thm:goal" in outline.selected_text
+        assert "[OK] lem:ok-00" in outline.selected_text
+        assert "shared reference" in outline.selected_text
+        assert str(report.incidents[0].artifacts[0].path) in outline.selected_text
+
+        app.screen.query_one("#failure-back", Button).press()
+        await wait_for(pilot, lambda: isinstance(app.screen, FindingsScreen))
+        await settle_screen(pilot)
+
+
+@async_test
+async def test_synthetic_global_failure_root_opens_exact_incident() -> None:
+    service = FakeWorkflowService()
+    report = failure_dependency_report(service.project, synthetic_root=True)
+    snapshot = failed_snapshot(service.project, report)
+    app = ProofAssistantApp(service)
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        await settle_screen(pilot)
+        app.show_snapshot(snapshot)
+        await wait_for(pilot, lambda: isinstance(app.screen, FailureDependencyScreen))
+        await settle_screen(pilot)
+
+        tree = app.screen.query_one("#failure-tree", FailureTree)
+        synthetic = tree.root.children[0]
+        assert "[FAIL] incident:41" in synthetic.label.plain
+        tree.move_cursor(synthetic, animate=False)
+        await pilot.press("enter")
+        detail = app.screen.query_one("#failure-detail", TextArea)
+        assert "Run/batch failure node: incident:41" in detail.text
+        assert "not owned by one manuscript claim" in detail.text
+        assert "Lean rejected the generated proof" in detail.text
+        assert "Verifier state: not available" not in detail.text
+        meta = app.screen.query_one("#failure-report-meta", TextArea)
+        assert "Incidents: 41" in meta.text
+
+
+@async_test
+async def test_cyclic_failure_report_uses_component_fallback_not_tree() -> None:
+    service = FakeWorkflowService()
+    report = failure_dependency_report(service.project, cycles=True)
+    snapshot = failed_snapshot(service.project, report)
+    app = ProofAssistantApp(service)
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        await settle_screen(pilot)
+        app.show_snapshot(snapshot)
+        await wait_for(pilot, lambda: isinstance(app.screen, FailureDependencyScreen))
+        await settle_screen(pilot)
+
+        assert not app.screen.query(FailureTree).nodes
+        table = app.screen.query_one("#failure-components", DataTable)
+        assert table.size.height >= 5
+        meta = app.screen.query_one("#failure-report-meta", TextArea)
+        assert meta.read_only
+        assert "[CYCLE] Flat components/edges; no inferred tree" in meta.text
+
+        table.focus()
+        table.move_cursor(row=1, column=0, animate=False)
+        await pilot.press("enter")
+        await wait_for(
+            pilot,
+            lambda: (
+                app.screen.query_one("#failure-tabs", TabbedContent).active
+                == "failure-detail-pane"
+            ),
+        )
+        detail = app.screen.query_one("#failure-detail", TextArea)
+        assert "Claim: lem:broken" in detail.text
+        assert "unknown constant Spectral.bound" in detail.text
+
+        tabs = app.screen.query_one("#failure-tabs", TabbedContent)
+        tabs.active = "failure-outline-pane"
+        await pilot.pause()
+        outline = app.screen.query_one("#failure-outline", TextArea)
+        outline.focus()
+        await pilot.press("ctrl+a")
+        assert "Cycle components (backend-computed)" in outline.selected_text
+        assert "component:stable -> component:cycle" in outline.selected_text
+        assert "[FAIL] component:cycle" in outline.selected_text
+
+
+@async_test
+async def test_failed_findings_without_embedded_report_do_not_route_to_recovery() -> (
+    None
+):
+    service = FakeWorkflowService()
+    snapshot = failed_snapshot(service.project, None)
+    app = ProofAssistantApp(service)
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        await settle_screen(pilot)
+        app.show_snapshot(snapshot)
+        await wait_for(pilot, lambda: isinstance(app.screen, FindingsScreen))
+        await settle_screen(pilot)
+        assert not isinstance(app.screen, RecoveryScreen)
+        button = app.screen.query_one("#open-failures", Button)
+        assert button.label.plain == "Load failure analysis"
+        button.press()
+        await wait_for(pilot, lambda: isinstance(app.screen, FailureDependencyScreen))
+        await wait_for(
+            pilot, lambda: bool(app.screen.query("#failure-report-error").nodes)
+        )
+        await settle_screen(pilot)
+        error = app.screen.query_one("#failure-report-error", TextArea)
+        assert error.read_only
+        assert str(service.project.project_path) in error.text
+        assert "No failure report is available" in error.text
+        error.focus()
+        await pilot.press("ctrl+a")
+        assert str(service.project.project_path) in error.selected_text
+        assert service.loaded_failure_reports == [(service.project.project_path, None)]
 
 
 @async_test
@@ -731,6 +1499,157 @@ async def test_occupied_and_incomplete_catalog_entries_remain_visible() -> None:
 
 
 @async_test
+async def test_project_deletion_is_cancel_first_typed_and_recoverable() -> None:
+    service = FakeWorkflowService()
+    app = ProofAssistantApp(service)
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        await wait_for(pilot, lambda: bool(app.screen.query("#delete-project-0").nodes))
+        delete_button = app.screen.query_one("#delete-project-0", Button)
+        assert delete_button.label.plain == "Delete project"
+        delete_button.press()
+        await wait_for(
+            pilot,
+            lambda: isinstance(app.screen, ProjectDeletionConfirmationScreen),
+        )
+
+        paths = app.screen.query_one("#delete-project-paths", TextArea)
+        assert paths.read_only
+        assert str(service.project.project_path) in paths.text
+        assert str(service.project.source_path) in paths.text
+        assert "untouched" in paths.text
+        safety = app.screen.query_one("#delete-project-safety", TextArea)
+        safety.select_all()
+        assert "recoverable deletion storage" in safety.selected_text
+        assert "until you manually remove" in safety.selected_text
+        assert "will not be changed, moved, or deleted" in safety.selected_text
+        cancel = app.screen.query_one("#delete-project-cancel", Button)
+        await wait_for(pilot, lambda: app.focused is cancel)
+        assert app.focused is cancel
+
+        # Enter activates the deliberately focused safe action.
+        await pilot.press("enter")
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        assert service.deleted_projects == []
+
+        app.screen.query_one("#delete-project-0", Button).press()
+        await wait_for(
+            pilot,
+            lambda: isinstance(app.screen, ProjectDeletionConfirmationScreen),
+        )
+        confirmation = app.screen.query_one("#delete-project-confirmation", Input)
+        destructive = app.screen.query_one("#delete-project-confirm", Button)
+        confirmation.value = "Paper"
+        await pilot.pause()
+        assert destructive.disabled
+        confirmation.focus()
+        await pilot.press("enter")
+        assert isinstance(app.screen, ProjectDeletionConfirmationScreen)
+        assert service.deleted_projects == []
+
+        confirmation.value = service.project.name
+        await pilot.pause()
+        assert not destructive.disabled
+        assert app.focused is confirmation
+        destructive.press()
+        await wait_for(
+            pilot, lambda: isinstance(app.screen, ProjectDeletionOutcomeScreen)
+        )
+        await wait_for(
+            pilot, lambda: bool(app.screen.query("#delete-project-result").nodes)
+        )
+        result = app.screen.query_one("#delete-project-result", TextArea)
+        assert result.read_only
+        result.select_all()
+        assert str(service.deletion_result.trash_path) in result.selected_text
+        assert str(service.project.source_path) in result.selected_text
+        assert "Recoverable deletion destination" in result.selected_text
+        assert "Recoverable: yes" in result.selected_text
+        assert service.deleted_projects == [service.project.project_path]
+
+        app.screen.query_one("#deletion-projects", Button).press()
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        await wait_for(
+            pilot,
+            lambda: (
+                bool(app.screen.query("#project-list TextArea").nodes)
+                and "No projects yet"
+                in "\n".join(
+                    widget.text for widget in app.screen.query("#project-list TextArea")
+                )
+            ),
+        )
+        assert all(
+            not (button.id or "").startswith("delete-project-")
+            for button in app.screen.query(Button)
+        )
+
+
+@async_test
+async def test_project_deletion_refusal_and_failure_are_copyable() -> None:
+    service = FakeWorkflowService()
+    service.deletion_inspection_result = ProjectDeletionInspection(
+        project_path=service.project.project_path,
+        source_path=service.project.source_path,
+        availability=ProjectDeletionAvailability.BUSY,
+        issue="A backend verification is currently active for this project.",
+        source_in_dropbox=True,
+    )
+    app = ProofAssistantApp(service)
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        await wait_for(pilot, lambda: bool(app.screen.query("#delete-project-0").nodes))
+        app.screen.query_one("#delete-project-0", Button).press()
+        await wait_for(
+            pilot,
+            lambda: isinstance(app.screen, ProjectDeletionConfirmationScreen),
+        )
+        issue = app.screen.query_one("#delete-project-issue", TextArea)
+        issue.select_all()
+        assert "backend verification is currently active" in issue.selected_text
+        assert app.screen.query_one("#delete-project-confirmation", Input).disabled
+        assert app.screen.query_one("#delete-project-confirm", Button).disabled
+        await pilot.press("escape")
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        assert service.deleted_projects == []
+
+        service.deletion_inspection_result = ProjectDeletionInspection(
+            project_path=service.project.project_path,
+            source_path=service.project.source_path,
+            availability=ProjectDeletionAvailability.READY,
+            source_in_dropbox=True,
+        )
+        service.deletion_error = RuntimeError(
+            "Delete-time preflight refused because the project became busy."
+        )
+        app.screen.query_one("#delete-project-0", Button).press()
+        await wait_for(
+            pilot,
+            lambda: isinstance(app.screen, ProjectDeletionConfirmationScreen),
+        )
+        app.screen.query_one(
+            "#delete-project-confirmation", Input
+        ).value = service.project.name
+        await pilot.pause()
+        app.screen.query_one("#delete-project-confirm", Button).press()
+        await wait_for(
+            pilot, lambda: isinstance(app.screen, ProjectDeletionOutcomeScreen)
+        )
+        await wait_for(
+            pilot, lambda: bool(app.screen.query("#delete-project-error").nodes)
+        )
+        error = app.screen.query_one("#delete-project-error", TextArea)
+        error.select_all()
+        assert "became busy" in error.selected_text
+        assert str(service.project.project_path) in error.selected_text
+        assert str(service.project.source_path) in error.selected_text
+        assert "untouched" in error.selected_text
+        assert app.screen.query_one("#deletion-retry", Button)
+
+
+@async_test
 async def test_destination_conflict_stops_before_source_inspection_or_creation() -> (
     None
 ):
@@ -898,11 +1817,18 @@ async def test_cooperative_cancellation_waits_for_backend_report() -> None:
         assert isinstance(app.screen, ProgressScreen)
         waiting = app.screen.query_one("#status-line", TextArea)
         assert waiting.read_only
-        assert "still running" in waiting.text
+        await wait_for(
+            pilot,
+            lambda: (
+                bool(service.cancel_requests)
+                and "Persistent cancellation request recorded" in waiting.text
+            ),
+        )
+        assert "survives all clients" in waiting.text
         assert "safely cancelled" not in waiting.text.lower()
 
         service.verification_release.set()
-        await wait_for(pilot, lambda: isinstance(app.screen, RecoveryScreen))
+        await wait_for(pilot, lambda: cancellation_report_is_ready(app))
         report = app.screen.query_one("#cancellation-report", TextArea)
         assert report.read_only
         assert "Run ID: 73" in report.text
@@ -982,7 +1908,7 @@ async def test_resume_clarification_exact_source_and_no_change() -> None:
         assert "No stable manuscript changes" in str(
             app.screen.query_one("#status-line", TextArea).text
         )
-        assert service.verified == []
+        assert service.started_jobs == []
 
 
 @async_test
@@ -1018,7 +1944,7 @@ async def test_change_impact_requires_explicit_confirmation() -> None:
         assert "candidate-main.tex" in text
         assert "sections/new-input.tex" in text
         assert "Main file changed: yes" in text
-        assert service.verified == []
+        assert service.started_jobs == []
 
         await pilot.click("#confirm")
         await wait_for(
@@ -1032,11 +1958,11 @@ async def test_change_impact_requires_explicit_confirmation() -> None:
         service.verification_release.set()
         await wait_for(pilot, lambda: isinstance(app.screen, FindingsScreen))
         await settle_screen(pilot)
-        assert service.verified[0][1] == "plan-1"
+        assert service.started_jobs[0][1] == "plan-1"
 
 
 @async_test
-async def test_busy_project_opens_recovery_screen() -> None:
+async def test_legacy_busy_project_attaches_coarse_read_only_progress() -> None:
     service = FakeWorkflowService()
     busy = ProjectSummary(
         **{**service.project.__dict__, "workflow_state": WorkflowState.BUSY_EXTERNAL}
@@ -1045,8 +1971,11 @@ async def test_busy_project_opens_recovery_screen() -> None:
     service.resume_result = WorkflowSnapshot(
         WorkflowState.BUSY_EXTERNAL,
         busy,
-        error="A separate verifier owns the project lock.",
+        error="A legacy backend verification is active for this project.",
     )
+    service.job_state = VerificationJobState.RUNNING
+    service.job_attached_legacy = True
+    service.verification_release = threading.Event()
     app = ProofAssistantApp(service)
 
     async with app.run_test(size=(110, 35)) as pilot:
@@ -1059,5 +1988,627 @@ async def test_busy_project_opens_recovery_screen() -> None:
             ),
         )
         await pilot.click("#resume-0")
-        await wait_for(pilot, lambda: isinstance(app.screen, RecoveryScreen))
-        assert "separate verifier" in str(app.screen.query_one(".error", TextArea).text)
+        await wait_for(pilot, lambda: isinstance(app.screen, ProgressScreen))
+        await wait_for(
+            pilot, lambda: progress_sources_contain(app, "legacy coarse read-only")
+        )
+        status = app.screen.query_one("#status-line", TextArea)
+        assert status.read_only
+        assert "owns neither the verification nor its lock" in status.text
+        assert "another process" not in status.text.lower()
+        assert app.screen.query_one("#cancel", Button).disabled
+        assert (
+            "durable per-stage events are not available"
+            in app.screen.query_one("#progress-log", TextArea).text
+        )
+        await activate_scrolled_button(pilot, app, "#detach-observer")
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+
+
+def test_production_tui_has_no_synchronous_verifier_or_local_token() -> None:
+    app_source = (
+        Path(tui_screens.__file__).with_name("app.py").read_text(encoding="utf-8")
+    )
+    assert "confirm_and_verify" not in app_source
+    assert "ThreadCancellationToken" not in app_source
+
+
+@async_test
+async def test_detached_job_defaults_to_two_workers_and_honors_one() -> None:
+    default_service = FakeWorkflowService()
+    default_service.verification_release = threading.Event()
+    default_app = ProofAssistantApp(default_service)
+
+    async with default_app.run_test(size=(80, 24)) as pilot:
+        await wait_for(pilot, lambda: isinstance(default_app.screen, WelcomeScreen))
+        default_app.start_verification(default_service.project, None)
+        await wait_for(pilot, lambda: bool(default_service.started_jobs))
+        assert default_service.started_jobs[0][2].jobs == 2
+        await wait_for(
+            pilot,
+            lambda: progress_sources_contain(default_app, "Parallel proof jobs: 2"),
+        )
+        await activate_scrolled_button(pilot, default_app, "#detach-observer")
+        await wait_for(pilot, lambda: isinstance(default_app.screen, WelcomeScreen))
+
+    single_service = FakeWorkflowService()
+    single_service.verification_release = threading.Event()
+    single_app = ProofAssistantApp(single_service)
+    async with single_app.run_test(size=(80, 24)) as pilot:
+        await wait_for(pilot, lambda: isinstance(single_app.screen, WelcomeScreen))
+        single_app.start_verification(
+            single_service.project,
+            None,
+            VerificationSettings(jobs=1),
+        )
+        await wait_for(pilot, lambda: bool(single_service.started_jobs))
+        assert single_service.started_jobs[0][2].jobs == 1
+        await wait_for(
+            pilot,
+            lambda: progress_sources_contain(single_app, "Parallel proof jobs: 1"),
+        )
+        await activate_scrolled_button(pilot, single_app, "#detach-observer")
+
+
+@async_test
+async def test_closing_tui_stops_observation_without_cancelling_job() -> None:
+    service = FakeWorkflowService()
+    service.verification_release = threading.Event()
+    app = ProofAssistantApp(service)
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        app.start_verification(service.project, None)
+        await wait_for(pilot, lambda: progress_log_contains(app, "INDEXING"))
+        status = app.screen.query_one("#status-line", TextArea)
+        assert "Closing or detaching stops polling only" in status.text
+        app.exit()
+
+    assert service.cancel_requests == []
+    assert service.job_state == VerificationJobState.RUNNING
+
+
+@async_test
+async def test_second_tui_attaches_and_replays_detached_progress() -> None:
+    service = FakeWorkflowService()
+    service.verification_release = threading.Event()
+    first_app = ProofAssistantApp(service)
+
+    async with first_app.run_test(size=(80, 24)) as pilot:
+        await wait_for(pilot, lambda: isinstance(first_app.screen, WelcomeScreen))
+        first_app.start_verification(service.project, None)
+        await wait_for(pilot, lambda: progress_log_contains(first_app, "INDEXING"))
+        await activate_scrolled_button(pilot, first_app, "#detach-observer")
+        await wait_for(pilot, lambda: isinstance(first_app.screen, WelcomeScreen))
+
+    second_app = ProofAssistantApp(service)
+    async with second_app.run_test(size=(80, 24)) as pilot:
+        await wait_for(pilot, lambda: isinstance(second_app.screen, WelcomeScreen))
+        await wait_for(pilot, lambda: button_is_ready(second_app, "#resume-0"))
+        await pilot.click("#resume-0")
+        await wait_for(pilot, lambda: progress_log_contains(second_app, "INDEXING"))
+        assert len(service.started_jobs) == 1
+        assert (service.project.project_path, 0) in service.observed_jobs
+        assert "Attached to the backend-owned job and replayed durable progress" in (
+            second_app.screen.query_one("#progress-log", TextArea).text
+        )
+        sources = second_app.screen.query_one("#progress-sources", TextArea)
+        sources.select_all()
+        assert "Job ID: job-73" in sources.selected_text
+        assert "Durable event cursor: 1" in sources.selected_text
+        await activate_scrolled_button(pilot, second_app, "#detach-observer")
+
+
+@async_test
+async def test_persistent_cancel_survives_client_and_terminal_routes_recovery() -> None:
+    service = FakeWorkflowService()
+    service.verification_release = threading.Event()
+    first_app = ProofAssistantApp(service)
+
+    async with first_app.run_test(size=(80, 24)) as pilot:
+        await wait_for(pilot, lambda: isinstance(first_app.screen, WelcomeScreen))
+        first_app.start_verification(service.project, None)
+        await wait_for(pilot, lambda: progress_log_contains(first_app, "INDEXING"))
+        await activate_scrolled_button(pilot, first_app, "#cancel")
+        await wait_for(pilot, lambda: bool(service.cancel_requests))
+        assert service.job_state == VerificationJobState.CANCEL_REQUESTED
+        await activate_scrolled_button(pilot, first_app, "#detach-observer")
+
+    second_app = ProofAssistantApp(service)
+    async with second_app.run_test(size=(80, 24)) as pilot:
+        await wait_for(pilot, lambda: isinstance(second_app.screen, WelcomeScreen))
+        await wait_for(pilot, lambda: button_is_ready(second_app, "#resume-0"))
+        await pilot.click("#resume-0")
+        await wait_for(
+            pilot,
+            lambda: progress_sources_contain(second_app, "CANCEL_REQUESTED"),
+        )
+        assert second_app.screen.query_one("#cancel", Button).disabled
+        service.verification_release.set()
+        await wait_for(pilot, lambda: cancellation_report_is_ready(second_app))
+        assert (
+            "Run ID: 73"
+            in second_app.screen.query_one("#cancellation-report", TextArea).text
+        )
+
+
+@async_test
+async def test_polling_error_is_copyable_and_detached_job_may_continue() -> None:
+    service = FakeWorkflowService()
+    service.verification_release = threading.Event()
+    service.observation_error = RuntimeError(
+        "cannot read /tmp/proof-assistant/paper-one/job-events.jsonl"
+    )
+    app = ProofAssistantApp(service)
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        app.start_verification(service.project, None)
+        await wait_for(
+            pilot,
+            lambda: (
+                isinstance(app.screen, ProgressScreen)
+                and bool(app.screen.query("#status-line").nodes)
+                and "Progress polling failed"
+                in app.screen.query_one("#status-line", TextArea).text
+            ),
+        )
+        status = app.screen.query_one("#status-line", TextArea)
+        status.select_all()
+        assert "job-events.jsonl" in status.selected_text
+        assert "may still be running" in status.selected_text
+        assert service.cancel_requests == []
+
+
+@async_test
+async def test_terminal_observation_resumes_canonical_result_without_attach_loop() -> (
+    None
+):
+    service = FakeWorkflowService()
+    service.job_state = VerificationJobState.SUCCEEDED
+    app = ProofAssistantApp(service)
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        await wait_for(pilot, lambda: button_is_ready(app, "#resume-0"))
+        await pilot.click("#resume-0")
+        await wait_for(pilot, lambda: isinstance(app.screen, FindingsScreen))
+        assert service.started_jobs == []
+        assert service.observed_jobs == [(service.project.project_path, 0)]
+        assert service.resumed == [service.project.project_path]
+
+
+@async_test
+async def test_machine_settings_navigation_and_copyable_live_status_at_80x24() -> None:
+    service = FakeWorkflowService()
+    app = ProofAssistantApp(service)
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        await settle_screen(pilot)
+        app.screen.query_one("#settings", Button).press()
+        await wait_for(pilot, lambda: isinstance(app.screen, SettingsHomeScreen))
+        await wait_for(pilot, lambda: settings_home_is_ready(app))
+
+        machine = app.screen.query_one("#settings-machine-summary", TextArea)
+        assert machine.read_only
+        assert "Settings scope: MACHINE" in machine.text
+        assert "machine-test-7" in machine.text
+        assert str(service.machine_settings.config_path) in machine.text
+        machine.select_all()
+        assert str(service.machine_settings.cache_path) in machine.selected_text
+
+        app.screen.query_one("#open-concurrency-settings", Button).press()
+        await wait_for(
+            pilot, lambda: isinstance(app.screen, ConcurrencyResourcesScreen)
+        )
+        await settle_screen(pilot)
+        assert app.screen.query_one("#benchmark-lean", Button).disabled
+        assert app.screen.query_one("#reset-lean-calibration", Button).disabled
+        summary = app.screen.query_one("#concurrency-summary", TextArea)
+        assert summary.read_only
+        assert "AI concurrency: Auto" in summary.text
+        assert "Effective now: 4" in summary.text
+        assert "Effective ceiling: 8" in summary.text
+        assert "Lean REPL pool: Auto" in summary.text
+        assert "Concurrent builds: Auto" in summary.text
+        summary.select_all()
+        assert "Agents per target" in summary.selected_text
+
+        telemetry = app.screen.query_one("#resource-telemetry", TextArea)
+        assert "10 physical / 10 usable logical" in telemetry.text
+        assert "pressure GREEN" in telemetry.text
+        assert "Codex: 2 active; 5 queued" in telemetry.text
+        assert "Lean: 3 active; 1 queued" in telemetry.text
+        resolution = app.screen.query_one("#settings-resolution", TextArea)
+        assert "source=machine auto policy" in resolution.text
+        assert "Why Auto chose these values" in resolution.text
+        app.screen.refresh_status()
+        await wait_for(pilot, lambda: service.machine_settings_reads >= 2)
+        assert service.machine_settings_reads >= 2
+
+
+@async_test
+async def test_dashboard_exposes_machine_settings_navigation() -> None:
+    service = FakeWorkflowService()
+    app = ProofAssistantApp(service)
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        await settle_screen(pilot)
+        app.show_snapshot(service.resume_result)
+        await wait_for(pilot, lambda: isinstance(app.screen, DashboardScreen))
+        await settle_screen(pilot)
+        app.screen.query_one("#settings", Button).press()
+        await wait_for(pilot, lambda: isinstance(app.screen, SettingsHomeScreen))
+        await settle_screen(pilot)
+        assert app.screen.project == service.project.project_path
+        app.screen.query_one("#open-concurrency-settings", Button).press()
+        await wait_for(
+            pilot, lambda: isinstance(app.screen, ConcurrencyResourcesScreen)
+        )
+        await settle_screen(pilot)
+        assert app.screen.project == service.project.project_path
+        assert not app.screen.query_one("#benchmark-lean", Button).disabled
+        app.screen.action_back()
+        await wait_for(pilot, lambda: isinstance(app.screen, SettingsHomeScreen))
+        await settle_screen(pilot)
+        app.screen.query_one("#settings-back", Button).press()
+        await wait_for(pilot, lambda: isinstance(app.screen, DashboardScreen))
+
+
+@async_test
+async def test_concurrency_settings_preview_apply_and_replacement_tui_persistence() -> (
+    None
+):
+    service = FakeWorkflowService()
+    first_app = ProofAssistantApp(service)
+
+    async with first_app.run_test(size=(80, 24)) as pilot:
+        await wait_for(pilot, lambda: isinstance(first_app.screen, WelcomeScreen))
+        first_app.show_concurrency_settings(service.machine_settings)
+        await wait_for(
+            pilot,
+            lambda: isinstance(first_app.screen, ConcurrencyResourcesScreen),
+        )
+        await settle_screen(pilot)
+        first_app.screen.query_one("#concurrency-mode", Select).value = "fixed"
+        first_app.screen.query_one("#resource-profile", Select).value = "server"
+        first_app.screen.query_one("#codex-plan", Select).value = "pro_20x"
+        first_app.screen.query_one("#budget-policy", Select).value = "economy"
+        first_app.screen.query_one("#ai-concurrency", Input).value = "6"
+        first_app.screen.query_one("#ai-hard-max", Input).value = "12"
+        first_app.screen.query_one("#lean-pool", Input).value = "4"
+        first_app.screen.query_one("#lean-max", Input).value = "6"
+        first_app.screen.query_one("#max-builds", Input).value = "2"
+        first_app.screen.query_one("#agents-per-target", Input).value = "3"
+        first_app.screen.query_one("#duplicate-escalation", Checkbox).value = False
+        first_app.screen.query_one("#save-concurrency", Button).press()
+        await wait_for(pilot, lambda: bool(service.settings_applications))
+        await wait_for(
+            pilot,
+            lambda: (
+                "Applied live"
+                in first_app.screen.query_one("#status-line", TextArea).text
+            ),
+        )
+
+        request = service.settings_previews[-1]
+        assert request.scope == SettingsScopeKind.MACHINE
+        assert request.expected_revision == 3
+        assert request.configured.mode == "fixed"
+        assert not request.configured.adaptive_controller
+        assert request.configured.resource_profile == "server"
+        assert request.configured.codex_plan == "pro_20x"
+        assert request.configured.budget_policy == "economy"
+        assert request.configured.ai_initial == 6
+        assert request.configured.ai_hard_max == 12
+        assert request.configured.lean_pool == 4
+        assert request.configured.max_builds == 2
+        assert request.configured.agents_per_target_max == 3
+        assert not request.configured.duplicate_agent_escalation
+        status = first_app.screen.query_one("#status-line", TextArea)
+        assert "Applied live" in status.text
+        assert "Takes effect next run" in status.text
+
+    second_app = ProofAssistantApp(service)
+    async with second_app.run_test(size=(80, 24)) as pilot:
+        await wait_for(pilot, lambda: isinstance(second_app.screen, WelcomeScreen))
+        second_app.show_settings()
+        await wait_for(
+            pilot,
+            lambda: settings_home_is_ready(second_app),
+        )
+        second_app.screen.query_one("#open-concurrency-settings", Button).press()
+        await wait_for(
+            pilot,
+            lambda: isinstance(second_app.screen, ConcurrencyResourcesScreen),
+        )
+        await settle_screen(pilot)
+        assert second_app.screen.query_one("#concurrency-mode", Select).value == "fixed"
+        assert second_app.screen.query_one("#ai-concurrency", Input).value == "6"
+        assert (
+            "Effective now: 6"
+            in second_app.screen.query_one("#concurrency-summary", TextArea).text
+        )
+        assert (
+            "Effective ceiling: 12"
+            in second_app.screen.query_one("#concurrency-summary", TextArea).text
+        )
+        assert (
+            "AI concurrency: 6 [Manual override]"
+            in second_app.screen.query_one("#concurrency-summary", TextArea).text
+        )
+
+
+@async_test
+async def test_settings_revision_change_is_not_silently_overwritten() -> None:
+    service = FakeWorkflowService()
+    app = ProofAssistantApp(service)
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        app.show_concurrency_settings(
+            service.machine_settings,
+            project=service.project.project_path,
+        )
+        await wait_for(
+            pilot, lambda: isinstance(app.screen, ConcurrencyResourcesScreen)
+        )
+        await settle_screen(pilot)
+        editor = app.screen
+        assert editor.snapshot.revision == 3
+
+        service.machine_settings = replace(service.machine_settings, revision=4)
+        editor.refresh_status()
+        await wait_for(
+            pilot,
+            lambda: (
+                "changed in another client"
+                in editor.query_one("#status-line", TextArea).text
+            ),
+        )
+        assert editor.snapshot.revision == 3
+        editor.query_one("#ai-concurrency", Input).value = "5"
+        editor.query_one("#save-concurrency", Button).press()
+        await wait_for(
+            pilot,
+            lambda: (
+                "revision changed" in editor.query_one("#status-line", TextArea).text
+            ),
+        )
+        assert service.settings_previews == []
+        assert service.settings_applications == []
+
+
+@async_test
+async def test_unsafe_setting_requires_copyable_cancel_first_confirmation() -> None:
+    service = FakeWorkflowService()
+    service.settings_warnings = (
+        SettingsWarning(
+            "lean-memory-risk",
+            "Lean pool 24 may cause severe swapping on this machine.",
+            "Use recommended value: 3",
+        ),
+    )
+    app = ProofAssistantApp(service)
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        app.show_concurrency_settings(service.machine_settings)
+        await wait_for(
+            pilot, lambda: isinstance(app.screen, ConcurrencyResourcesScreen)
+        )
+        await settle_screen(pilot)
+        app.screen.query_one("#lean-pool", Input).value = "24"
+        app.screen.query_one("#save-concurrency", Button).press()
+        await wait_for(
+            pilot,
+            lambda: settings_warning_is_ready(app),
+        )
+        detail = app.screen.query_one("#settings-warning-detail", TextArea)
+        assert detail.read_only
+        assert "severe swapping" in detail.text
+        assert "Use recommended value: 3" in detail.text
+        await wait_for(
+            pilot,
+            lambda: (
+                app.screen.focused
+                is app.screen.query("#settings-warning-cancel").first()
+            ),
+        )
+        assert app.screen.focused is app.screen.query_one(
+            "#settings-warning-cancel", Button
+        )
+        assert service.settings_applications == []
+        app.screen.query_one("#settings-warning-confirm", Button).press()
+        await wait_for(pilot, lambda: bool(service.settings_applications))
+        assert service.settings_applications == [("preview-1", ("lean-memory-risk",))]
+
+
+@async_test
+async def test_reset_to_auto_recalculates_and_updates_editors() -> None:
+    service = FakeWorkflowService()
+    service.machine_settings = replace(
+        service.machine_settings,
+        configured=replace(
+            service.machine_settings.configured,
+            mode="fixed",
+            ai_initial=7,
+            lean_pool=5,
+            max_builds=2,
+        ),
+    )
+    app = ProofAssistantApp(service)
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        app.show_concurrency_settings(service.machine_settings)
+        await wait_for(
+            pilot, lambda: isinstance(app.screen, ConcurrencyResourcesScreen)
+        )
+        await settle_screen(pilot)
+        app.screen.query_one("#reset-concurrency", Button).press()
+        await wait_for(pilot, lambda: bool(service.settings_resets))
+        await wait_for(
+            pilot,
+            lambda: app.screen.query_one("#ai-concurrency", Input).value == "Auto",
+        )
+        await wait_for(
+            pilot,
+            lambda: (
+                "reset to Auto" in app.screen.query_one("#status-line", TextArea).text
+            ),
+        )
+        assert app.screen.query_one("#concurrency-mode", Select).value == "adaptive"
+        assert app.screen.query_one("#ai-concurrency", Input).value == "Auto"
+        assert app.screen.query_one("#lean-pool", Input).value == "Auto"
+        assert app.screen.query_one("#max-builds", Input).value == "Auto"
+        assert "reset to Auto" in app.screen.query_one("#status-line", TextArea).text
+
+
+@async_test
+async def test_legacy_settings_are_distinct_editable_and_machine_persisted() -> None:
+    service = FakeWorkflowService()
+    app = ProofAssistantApp(service)
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        app.show_legacy_settings(service.machine_settings)
+        await wait_for(pilot, lambda: isinstance(app.screen, LegacySettingsScreen))
+        await settle_screen(pilot)
+        summary = app.screen.query_one("#legacy-settings-summary", TextArea)
+        assert summary.read_only
+        assert "Proof batch workers (jobs): 2" in summary.text
+        assert "Claims per batch: 8" in summary.text
+        assert "Lean REPLs per batch worker: 1" in summary.text
+        assert "superseded by machine AI admission" in summary.text
+        assert "superseded by machine build admission" in summary.text
+        summary.select_all()
+        assert "Legacy controls never form a separate" in summary.selected_text
+
+        app.screen.query_one("#legacy-proof-jobs", Input).value = "1"
+        app.screen.query_one("#legacy-batch-size", Input).value = "4"
+        app.screen.query_one("#legacy-lean-pool", Input).value = "2"
+        app.screen.query_one("#save-legacy", Button).press()
+        await wait_for(pilot, lambda: bool(service.settings_applications))
+        await wait_for(
+            pilot,
+            lambda: (
+                "Takes effect next run"
+                in app.screen.query_one("#status-line", TextArea).text
+            ),
+        )
+        persisted = service.machine_settings.legacy
+        assert persisted.proof_jobs == 1
+        assert persisted.batch_size == 4
+        assert persisted.per_worker_lean_pool == 2
+        assert (
+            "Takes effect next run"
+            in app.screen.query_one("#status-line", TextArea).text
+        )
+
+
+@async_test
+async def test_benchmark_actions_are_backend_owned_copyable_and_codex_safe() -> None:
+    service = FakeWorkflowService()
+    app = ProofAssistantApp(service)
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        app.show_concurrency_settings(
+            service.machine_settings,
+            project=service.project.project_path,
+        )
+        await wait_for(
+            pilot, lambda: isinstance(app.screen, ConcurrencyResourcesScreen)
+        )
+        await settle_screen(pilot)
+        app.screen.query_one("#benchmark-codex", Button).press()
+        await wait_for(pilot, lambda: len(service.benchmarks) == 1)
+        await wait_for(
+            pilot,
+            lambda: (
+                "Benchmark: codex-concurrency"
+                in app.screen.query_one("#benchmark-result", TextArea).text
+            ),
+        )
+        assert service.benchmarks[0] == (BenchmarkKind.CODEX, None, False)
+        result = app.screen.query_one("#benchmark-result", TextArea)
+        assert result.read_only
+        assert "Codex traffic used: no" in result.text
+        assert "Recommended value: 4" in result.text
+        result.select_all()
+        assert "Calibration record:" in result.selected_text
+
+        app.screen.query_one("#benchmark-lean", Button).press()
+        await wait_for(pilot, lambda: len(service.benchmarks) == 2)
+        await activate_scrolled_button(pilot, app, "#benchmark-build")
+        await wait_for(pilot, lambda: len(service.benchmarks) == 3)
+        assert [kind for kind, _project, _traffic in service.benchmarks] == [
+            BenchmarkKind.CODEX,
+            BenchmarkKind.LEAN,
+            BenchmarkKind.BUILD,
+        ]
+        assert all(not traffic for _kind, _project, traffic in service.benchmarks)
+        assert service.benchmarks[1] == (
+            BenchmarkKind.LEAN,
+            service.project.project_path,
+            False,
+        )
+
+
+@async_test
+async def test_concurrency_reset_actions_are_backend_owned_and_copyable() -> None:
+    service = FakeWorkflowService()
+    app = ProofAssistantApp(service)
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        app.show_concurrency_settings(
+            service.machine_settings,
+            project=service.project.project_path,
+        )
+        await wait_for(
+            pilot, lambda: isinstance(app.screen, ConcurrencyResourcesScreen)
+        )
+        await settle_screen(pilot)
+        await activate_scrolled_button(pilot, app, "#reset-lean-calibration")
+        await wait_for(pilot, lambda: bool(service.calibration_resets))
+        result = app.screen.query_one("#benchmark-result", TextArea)
+        await wait_for(pilot, lambda: "Lean calibration reset" in result.text)
+        assert service.calibration_resets == [service.project.project_path]
+        result.select_all()
+        assert "profile-test" in result.selected_text
+
+        await activate_scrolled_button(pilot, app, "#reset-adaptive-history")
+        await wait_for(pilot, lambda: service.adaptive_history_resets == 1)
+        await wait_for(pilot, lambda: "Adaptive history reset" in result.text)
+        result.select_all()
+        assert "In-flight work preserved: yes" in result.selected_text
+
+
+def test_settings_tui_has_no_hardware_or_configuration_implementation_imports() -> None:
+    settings_root = Path(tui_screens.__file__).parent / "settings"
+    forbidden = {
+        "psutil",
+        "proof_assistant.concurrency.hardware",
+        "proof_assistant.concurrency.config",
+        "proof_assistant.concurrency.manager",
+    }
+    violations: list[str] = []
+    for source_path in settings_root.rglob("*.py"):
+        tree = ast.parse(source_path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            module_names: list[str] = []
+            if isinstance(node, ast.Import):
+                module_names = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                module_names = [node.module]
+            if any(
+                name == prefix or name.startswith(prefix + ".")
+                for name in module_names
+                for prefix in forbidden
+            ):
+                violations.append(f"{source_path.name}: {module_names}")
+    assert violations == []

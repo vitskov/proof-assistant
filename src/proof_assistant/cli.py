@@ -31,6 +31,17 @@ from .cache import (
     initialize_cache,
     managed_project_session,
 )
+from .concurrency import (
+    AIConcurrencyPatch,
+    BuildConcurrencyPatch,
+    CodexPlan,
+    ConcurrencyConfigPatch,
+    ConcurrencyMode,
+    ConcurrencyRuntimeSpec,
+    LeanConcurrencyPatch,
+    ResourceProfile,
+    SchedulerConcurrencyPatch,
+)
 from .environment import (
     EnvironmentCheckError,
     configure_lean_runtime,
@@ -104,12 +115,70 @@ def _cache_layout(args) -> CacheLayout:
     return CacheLayout.discover(getattr(args, "cache_home", None))
 
 
+def _concurrency_patch(args) -> ConcurrencyConfigPatch | None:
+    raw_mode = getattr(args, "concurrency", None)
+    mode = None
+    if raw_mode is not None:
+        mode = (
+            ConcurrencyMode.ADAPTIVE
+            if raw_mode in {"auto", "adaptive"}
+            else ConcurrencyMode.FIXED
+        )
+    ai = getattr(args, "ai_concurrency", None)
+    lean = getattr(args, "lean_pool", None)
+    builds = getattr(args, "max_builds", None)
+    agents = getattr(args, "agents_per_target", None)
+    raw_plan = getattr(args, "codex_plan", None)
+    raw_profile = getattr(args, "resource_profile", None)
+    if not any(
+        value is not None
+        for value in (
+            mode,
+            ai,
+            lean,
+            builds,
+            agents,
+            raw_plan,
+            raw_profile,
+        )
+    ):
+        return None
+    plan = CodexPlan(raw_plan.replace("-", "_")) if raw_plan is not None else None
+    profile = ResourceProfile(raw_profile) if raw_profile is not None else None
+    return ConcurrencyConfigPatch(
+        mode=mode,
+        resource_profile=profile,
+        ai=AIConcurrencyPatch(
+            plan=plan,
+            initial=ai,
+            hard_max=ai,
+        ),
+        lean=LeanConcurrencyPatch(pool_size=lean, max_pool=lean),
+        build=BuildConcurrencyPatch(max_concurrent=builds, hard_max=builds),
+        scheduler=SchedulerConcurrencyPatch(agents_per_target_max=agents),
+    )
+
+
+def _concurrency_spec(
+    args, *, project: str | Path | None = None
+) -> ConcurrencyRuntimeSpec:
+    raw_project = project if project is not None else getattr(args, "project", None)
+    return ConcurrencyRuntimeSpec(
+        cache_home=getattr(args, "cache_home", None),
+        cli_patch=_concurrency_patch(args),
+        project_path=(
+            str(Path(raw_project).expanduser().resolve()) if raw_project else None
+        ),
+    )
+
+
 def _backend(args) -> CodexBackend:
     return CodexBackend(
         CodexConfig(
             executable=args.codex,
             model=getattr(args, "model", "") or "",
             effort=getattr(args, "effort", "high") or "high",
+            concurrency=_concurrency_spec(args),
         ),
         cwd=Path.cwd(),
     )
@@ -379,6 +448,7 @@ def cmd_cache_prepare(args) -> int:
         runtime_env = layout.runtime_environment(
             os.environ, lean_cc=compiler.executable
         )
+        concurrency = _concurrency_spec(args, project=project).create()
         key = dependency_cache_key(project, env=runtime_env)
         depot = dependency_depot_target(layout, key)
         reserve = (
@@ -401,12 +471,18 @@ def cmd_cache_prepare(args) -> int:
             project, layout, env=runtime_env, timeout=args.setup_timeout
         )
         was_ready = claim.ready
-        records = bootstrap_lean_workspace(
-            project,
-            env=runtime_env,
-            timeout=args.setup_timeout,
-            depot_claim=claim,
+        build_request = concurrency.build.request(
+            f"cache-prepare:{project}",
+            full_build=True,
+            ttl_seconds=max(120.0, min(args.setup_timeout, 900.0)),
         )
+        with concurrency.build.lease(build_request, timeout=args.setup_timeout):
+            records = bootstrap_lean_workspace(
+                project,
+                env=runtime_env,
+                timeout=args.setup_timeout,
+                depot_claim=claim,
+            )
         failed = next(
             (record for record in records if record.required and not record.succeeded),
             None,
@@ -607,6 +683,7 @@ def cmd_repoprover_prove(args) -> int:
                     request_timeout=args.request_timeout,
                     turn_timeout=args.turn_timeout,
                     sandbox="read-only",
+                    concurrency=_concurrency_spec(args, project=project),
                 ),
             )
         except Exception as exc:
@@ -718,6 +795,7 @@ def cmd_manuscript_run(args) -> int:
             os.environ,
             lean_cc=compiler.executable,
         )
+        concurrency = _concurrency_spec(args, project=paths.workspace).create()
         policy = cache_policy(cache_layout.load_config())
         dependency_key = dependency_cache_key(paths.workspace, env=runtime_env)
         dependency_target = dependency_depot_target(cache_layout, dependency_key)
@@ -763,12 +841,18 @@ def cmd_manuscript_run(args) -> int:
     record_phase("dependency_setup", "Preparing Lean dependencies and root build")
 
     try:
-        setup_records = bootstrap_lean_workspace(
-            paths.workspace,
-            env=runtime_env,
-            timeout=args.setup_timeout,
-            depot_claim=depot_claim,
+        setup_request = concurrency.build.request(
+            f"manuscript-run-bootstrap:{paths.workspace}",
+            full_build=True,
+            ttl_seconds=max(120.0, min(args.setup_timeout, 900.0)),
         )
+        with concurrency.build.lease(setup_request, timeout=args.setup_timeout):
+            setup_records = bootstrap_lean_workspace(
+                paths.workspace,
+                env=runtime_env,
+                timeout=args.setup_timeout,
+                depot_claim=depot_claim,
+            )
     except (CacheLocationError, OSError) as exc:
         return _write_manuscript_failure(
             paths,
@@ -845,6 +929,7 @@ def cmd_manuscript_run(args) -> int:
                     request_timeout=args.request_timeout,
                     turn_timeout=args.turn_timeout,
                     sandbox="read-only",
+                    concurrency=_concurrency_spec(args, project=paths.workspace),
                 ),
             )
         except Exception as exc:
@@ -867,12 +952,18 @@ def cmd_manuscript_run(args) -> int:
         [serialize_tool_call(call) for call in wrapped.codex.tool_calls],
     )
 
-    independent_build = run_command(
-        ("lake", "build"),
-        cwd=paths.workspace,
-        env=runtime_env,
-        timeout=args.setup_timeout,
+    final_build_request = concurrency.build.request(
+        f"manuscript-run-final:{paths.workspace}",
+        full_build=True,
+        ttl_seconds=max(120.0, min(args.setup_timeout, 900.0)),
     )
+    with concurrency.build.lease(final_build_request, timeout=args.setup_timeout):
+        independent_build = run_command(
+            ("lake", "build"),
+            cwd=paths.workspace,
+            env=runtime_env,
+            timeout=args.setup_timeout,
+        )
     (paths.artifacts / "verification-build.log").write_text(
         command_records_text([independent_build]), encoding="utf-8"
     )
@@ -936,6 +1027,7 @@ def cmd_manuscript_run(args) -> int:
             "turn_id": wrapped.codex.turn_id,
             "tool_calls": len(wrapped.codex.tool_calls),
         },
+        "concurrency": concurrency.provenance(),
         "lean": {
             "native_compiler": compiler.executable,
             "pool_size": args.lean_pool_size,
@@ -1012,6 +1104,7 @@ def cmd_manuscript_verify(args) -> int:
                 request_timeout=args.request_timeout,
                 turn_timeout=args.turn_timeout,
                 gc_timeout=args.gc_timeout,
+                concurrency=_concurrency_spec(args),
             ),
         )
     except Exception as exc:
@@ -1361,6 +1454,66 @@ def cmd_tui(args) -> int:
     return int(run_tui(service))
 
 
+def cmd_project_worker(args) -> int:
+    """Internal detached worker; public clients use the workflow job contract."""
+
+    from .workflow.service import ProofAssistantWorkflow
+
+    service = ProofAssistantWorkflow(cache_home=args.cache_home, codex=args.codex)
+    return service._run_verification_job(Path(args.project), args.job_id, args.lease_fd)
+
+
+def cmd_benchmark(args) -> int:
+    from .workflow import BenchmarkKind, ProofAssistantWorkflow
+
+    service = ProofAssistantWorkflow(
+        cache_home=args.cache_home,
+        codex=args.codex,
+        codex_model=args.model,
+        use_codex_clarification=False,
+    )
+    try:
+        result = service.run_concurrency_benchmark(
+            BenchmarkKind(args.benchmark_kind),
+            project=Path(args.project).expanduser().resolve() if args.project else None,
+            allow_codex_traffic=bool(args.allow_codex_traffic),
+        )
+    except Exception as exc:
+        print(f"ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
+    print(f"benchmark: {result.kind.value}")
+    print(f"recommendation: {result.recommendation}")
+    print("tested values: " + ", ".join(str(item) for item in result.tested_values))
+    print(f"Codex traffic used: {'yes' if result.used_codex_traffic else 'no'}")
+    print(f"calibration: {result.calibration_path}")
+    print(result.detail)
+    return 0
+
+
+def _add_concurrency_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--concurrency",
+        choices=("auto", "adaptive", "fixed"),
+        default=None,
+        help="Adaptive automatic admission or fixed reproducible limits",
+    )
+    parser.add_argument("--ai-concurrency", type=int, default=None)
+    parser.add_argument("--lean-pool", type=int, default=None)
+    parser.add_argument("--max-builds", type=int, default=None)
+    parser.add_argument("--agents-per-target", type=int, default=None)
+    parser.add_argument(
+        "--codex-plan",
+        choices=("plus", "pro-5x", "pro-20x", "unknown"),
+        default=None,
+        help="Proof Assistant policy profile; not an official service limit",
+    )
+    parser.add_argument(
+        "--resource-profile",
+        choices=("auto", "interactive", "server"),
+        default=None,
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="proof-assistant")
     p.add_argument(
@@ -1377,10 +1530,19 @@ def build_parser() -> argparse.ArgumentParser:
             "inside the user home, local, and outside Dropbox)"
         ),
     )
-    sub = p.add_subparsers(dest="command", required=False)
+    sub = p.add_subparsers(dest="command", required=False, metavar="COMMAND")
 
     tui = sub.add_parser("tui", help="Launch the interactive Proof Assistant")
     tui.set_defaults(func=cmd_tui)
+
+    worker = sub.add_parser("_project-worker", help=argparse.SUPPRESS)
+    worker.add_argument("--project", required=True)
+    worker.add_argument("--job-id", required=True)
+    worker.add_argument("--lease-fd", required=True, type=int)
+    worker.set_defaults(func=cmd_project_worker)
+    sub._choices_actions = [
+        action for action in sub._choices_actions if action.dest != "_project-worker"
+    ]
 
     d = sub.add_parser("doctor", help="Check Codex app-server connectivity")
     d.set_defaults(func=cmd_doctor)
@@ -1451,6 +1613,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("smoke", help="Run a real dynamic-tool smoke test")
     s.add_argument("--model", required=True)
     s.add_argument("--effort", default="high")
+    _add_concurrency_arguments(s)
     s.set_defaults(func=cmd_smoke)
 
     rp = sub.add_parser(
@@ -1479,7 +1642,28 @@ def build_parser() -> argparse.ArgumentParser:
     rp.add_argument("--request-timeout", type=float, default=120.0)
     rp.add_argument("--turn-timeout", type=float, default=1800.0)
     rp.add_argument("--gc-timeout", type=float, default=900.0)
+    _add_concurrency_arguments(rp)
     rp.set_defaults(func=cmd_repoprover_prove)
+
+    benchmark = sub.add_parser(
+        "benchmark", help="Calibrate machine concurrency recommendations"
+    )
+    benchmark.add_argument(
+        "benchmark_kind",
+        choices=(
+            "codex-concurrency",
+            "lean-concurrency",
+            "build-concurrency",
+        ),
+    )
+    benchmark.add_argument("--project", default=None)
+    benchmark.add_argument("--model", default="gpt-5.6-sol")
+    benchmark.add_argument(
+        "--allow-codex-traffic",
+        action="store_true",
+        help="Explicitly authorize tiny Codex probes for the Codex benchmark",
+    )
+    benchmark.set_defaults(func=cmd_benchmark)
 
     manuscript_group = sub.add_parser(
         "manuscript",
@@ -1510,8 +1694,11 @@ def build_parser() -> argparse.ArgumentParser:
     manuscript_verify.add_argument(
         "--jobs",
         type=int,
-        default=1,
-        help="Independent Codex proof batches to run concurrently (1-2; default: 1)",
+        default=2,
+        help=(
+            "Minimum logical proof-batch fan-out (1-128; legacy default: 2); "
+            "machine AI admission controls active Codex turns"
+        ),
     )
     manuscript_verify.add_argument(
         "--batch-size",
@@ -1525,6 +1712,7 @@ def build_parser() -> argparse.ArgumentParser:
     manuscript_verify.add_argument("--request-timeout", type=float, default=120.0)
     manuscript_verify.add_argument("--turn-timeout", type=float, default=3600.0)
     manuscript_verify.add_argument("--gc-timeout", type=float, default=900.0)
+    _add_concurrency_arguments(manuscript_verify)
     manuscript_verify.set_defaults(func=cmd_manuscript_verify)
 
     manuscript_status = manuscript_sub.add_parser(

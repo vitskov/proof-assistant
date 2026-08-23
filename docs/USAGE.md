@@ -157,6 +157,23 @@ the exact read-only Markdown; focus it and use `Ctrl+A`, then `Ctrl+C`. The
 report path and any load error are selectable as well. This is the supported
 viewer over SSH—no browser, Finder, or desktop file handler is required.
 
+For an incomplete or failed check, choose **Inspect failure dependencies**. The
+backend identifies a deterministic first blocking reason and preserves the
+exact run in which it was observed. The normal **Proof tree** tab is expandable
+and uses both text and color: `[FAIL]` is a direct failure, `[BLOCKED]` depends
+on unfinished or failed work, and `[OK]` has a certificate. Highlight a node to
+preview its reason; press Enter for its complete, copyable incident details,
+source location, path from the verification target, and artifact/log paths.
+The **Copyable full outline** tab contains the same information as selectable
+plain text for SSH sessions and issue reports.
+
+Several claims may share one prerequisite. The tree marks a repeated occurrence
+as a shared reference and does not expand it indefinitely. If the manuscript
+contains an actual dependency cycle, the map automatically changes to a finite
+**Cycle components** table plus the component edge list. This fallback is used
+only for a detected cycle; ordinary acyclic manuscripts retain the more natural
+tree presentation.
+
 Copyability is a TUI-wide rule. Paths, candidate main files, commands,
 progress values, findings, warnings, errors, and source excerpts appear in
 read-only selectable panes. When Rich or Markdown rendering is useful, an exact
@@ -215,12 +232,13 @@ The project database, not the TUI widget tree, is authoritative. On resume:
 
 | Persistent condition | Screen |
 |---|---|
+| active detached verification job | attached live progress |
 | open clarification, no external change | existing clarification |
 | open clarification, stable external change | change review |
 | completed run | findings |
 | interrupted run | recovery/retry |
 | provider or Lean failure | diagnostic/retry |
-| another process owns the project | read-only progress/status |
+| legacy verification worker still active | attached coarse progress/status |
 
 The welcome screen uses the same backend project classifier as creation. It
 shows resumable projects, legacy projects needing a main-file choice,
@@ -229,8 +247,42 @@ two are never deleted or adopted automatically; use **Open folder** to inspect
 them. A new-project destination is checked before source inspection, and a
 conflict returns to the preserved setup form without importing anything.
 
+### Delete a managed project
+
+A resumable row also has **Delete project**. This is a recoverable,
+backend-owned operation, not a recursive deletion performed by the TUI:
+
+1. the backend reclassifies the exact path and tests its project lock;
+2. the confirmation dialog shows selectable managed-project and external-source
+   paths;
+3. you must type the exact project name and activate the explicit deletion
+   button; and
+4. the backend tests the lock again, atomically moves only the managed project
+   into a collision-safe recovery area, then refreshes the catalog.
+
+The external manuscript folder is never moved or modified, including when it
+is in Dropbox. A running project is reported as **BUSY** and cannot be moved.
+Incomplete projects, unrelated occupied paths, overlapping source/project
+configurations, Dropbox-managed paths, and unsafe recovery locations are
+refused. On macOS the recovery area is the user's `~/.Trash`; on other systems
+it is the Proof Assistant-owned
+`$XDG_DATA_HOME/proof-assistant/recoverable-trash`. The result screen shows the
+exact recovery path. The project remains recoverable until that returned path
+is manually removed (or, on macOS, Trash is emptied).
+
 Proof Assistant does not regenerate a question or start another verification
 when the source has not changed.
+
+The TUI never owns a project or its verification lock. Starting verification
+submits a durable job to a detached backend worker. Its request, progress-event
+cursor, heartbeat, cancellation request, worker log, and terminal state live in
+the managed project. You may close the TUI or lose an SSH session without
+cancelling the job; another TUI attaches to the active job and replays events.
+Two simultaneous starts of the same request attach to one worker. A genuinely
+different request receives an explicit active-job conflict instead of creating
+a second writer. **Request cooperative cancellation** persists a backend
+request; it is reported as safely stopped only after the worker reaches a
+consistency boundary and records its cancellation report.
 
 The selected main file is persistent project identity. Resuming a current
 project never asks you to select it again; the backend loads it and resolves its
@@ -241,6 +293,28 @@ the project remains visible as **NEEDS_MAIN_FILE**. Choose **Select main file**,
 make a deliberate selection from the backend-provided candidates, and review
 the resulting proof-impact plan before starting another iteration. Existing
 evidence is preserved; the TUI never edits project metadata itself.
+
+## Concurrency and machine resources
+
+Open **Settings** from the welcome screen or a project dashboard, then choose
+**Concurrency / Resources**. Proof Assistant controls active Codex turns, Lean
+checks, and Lake builds with three independent machine-wide admission
+controllers. The page shows each configured value beside its effective value,
+the source of the setting, and live CPU, memory, swap, queue, and throttle
+information. Automatic/adaptive mode is the default.
+
+Changes are previewed before they are saved. Unsafe-looking manual values show
+a warning and recommendation. Lowering a live limit stops new admissions but
+allows already-running work to finish safely. **Reset all to Auto** returns the
+machine to automatic policy. The separate **Legacy settings** page contains
+logical proof-worker count, batch size, and the compatibility per-worker Lean
+pool; these do not replace the three resource controllers.
+
+Settings apply to every project on this machine. A project-overlay scope is
+reserved in the backend contracts but is not enabled. See [Concurrency and
+resource management](CONCURRENCY.md) for formulas, precedence, CLI/environment
+overrides, pressure behavior, benchmarks, provenance, and the upstream
+RepoProver migration map.
 
 ## Advanced status commands
 
@@ -264,8 +338,12 @@ proof-assistant manuscript verify \
   --turn-timeout 86400
 ```
 
-Use `--jobs 2` only when two independent ready claims should run concurrently.
-Merge order and final certification remain host-controlled and deterministic.
+Two logical proof-batch workers are the legacy default. `--jobs` controls batch
+process fan-out, not active Codex turns: the machine AI controller is
+authoritative across all workers, and the Lean and build controllers enforce
+their own separate limits. For fully reproducible resource limits, use
+`--concurrency fixed` with explicit AI, Lean, and build values. Merge order and
+final certification remain host-controlled and deterministic.
 
 ## Project results
 

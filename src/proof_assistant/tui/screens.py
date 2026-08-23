@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import shlex
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from rich.syntax import Syntax
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.screen import Screen
+from textual.screen import ModalScreen, Screen
 from textual.widgets import (
     Button,
+    DataTable,
     Footer,
     Header,
     Input,
@@ -24,21 +27,28 @@ from textual.widgets import (
     TabbedContent,
     TabPane,
     TextArea,
+    Tree,
 )
 
 from proof_assistant.workflow.contracts import (
     ChangeImpactPlan,
     ClarificationPresentation,
+    FailureComponent,
+    FailureDependencyReport,
+    FailureIncident,
     FileChange,
     NewProjectRequest,
     ProgressEvent,
     ProgressPhase,
     ProjectAvailability,
     ProjectCatalogEntry,
+    ProjectDeletionInspection,
+    ProjectDeletionResult,
     ProjectDestinationInspection,
     ProjectSummary,
     ReportDocument,
     SourceInspection,
+    VerificationJobObservation,
     VerificationSettings,
     WorkflowSnapshot,
     WorkflowState,
@@ -78,6 +88,8 @@ def _candidate_text(
 class CopyableText(TextArea):
     """Read-only selectable text for every externally useful displayed value."""
 
+    BINDINGS = [("ctrl+a", "select_all", "Select all")]
+
     def __init__(
         self,
         text: str,
@@ -105,6 +117,28 @@ class CopyableText(TextArea):
             )
             minimum = 3 if border_rows else 1
             self.styles.height = max(minimum, min(max_lines, line_count + border_rows))
+
+
+@dataclass(frozen=True)
+class _FailureSelection:
+    """Widget payload referring only to an immutable backend report entry."""
+
+    claim_id: str | None = None
+    component_id: str | None = None
+    incident_ids: tuple[int, ...] = ()
+    shared_reference: bool = False
+
+
+class FailureTree(Tree[_FailureSelection]):
+    """Textual 1.0 tree with complete small-terminal navigation bindings."""
+
+    BINDINGS = [
+        *Tree.BINDINGS,
+        ("pageup", "page_up", "Previous page"),
+        ("pagedown", "page_down", "Next page"),
+        ("home", "scroll_home", "First node"),
+        ("end", "scroll_end", "Last node"),
+    ]
 
 
 @dataclass(frozen=True)
@@ -177,7 +211,11 @@ class NoticeScreen(Screen[None]):
 class WelcomeScreen(NoticeScreen):
     """Choose a new project or resume a catalogued project."""
 
-    BINDINGS = [("n", "new_project", "New project"), ("q", "quit", "Quit")]
+    BINDINGS = [
+        ("n", "new_project", "New project"),
+        ("s", "settings", "Settings"),
+        ("q", "quit", "Quit"),
+    ]
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -190,6 +228,7 @@ class WelcomeScreen(NoticeScreen):
             with Horizontal(classes="toolbar"):
                 yield Button("New project", id="new-project", variant="primary")
                 yield Button("Refresh projects", id="refresh-projects")
+                yield Button("Settings", id="settings")
             yield CopyableText("Existing projects", classes="section")
             yield Vertical(id="project-list")
             yield CopyableText(
@@ -206,20 +245,29 @@ class WelcomeScreen(NoticeScreen):
     def action_quit(self) -> None:
         self.proof_app.exit()
 
+    def action_settings(self) -> None:
+        self.proof_app.show_settings(return_to_project=False)
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
         button_id = event.button.id or ""
         if button_id == "new-project":
             self.action_new_project()
         elif button_id == "refresh-projects":
             self.load_projects()
+        elif button_id == "settings":
+            self.action_settings()
         elif button_id.startswith("resume-"):
             project = event.button.data
-            if isinstance(project, Path):
+            if isinstance(project, ProjectSummary):
                 self.proof_app.resume_project(project)
         elif button_id.startswith("select-existing-main-"):
             entry = event.button.data
             if isinstance(entry, ProjectCatalogEntry):
                 self.proof_app.show_existing_project_main_selection(entry)
+        elif button_id.startswith("delete-project-"):
+            project = event.button.data
+            if isinstance(project, ProjectSummary):
+                self.proof_app.request_project_deletion(project)
         elif button_id.startswith("open-catalog-"):
             project = event.button.data
             if isinstance(project, Path):
@@ -264,8 +312,15 @@ class WelcomeScreen(NoticeScreen):
             controls: list[Button] = []
             if entry.resumable:
                 button = Button("Resume", id=f"resume-{index}")
-                button.data = entry.project_path
+                button.data = project
                 controls.append(button)
+                delete_button = Button(
+                    "Delete project",
+                    id=f"delete-project-{index}",
+                    variant="error",
+                )
+                delete_button.data = project
+                controls.append(delete_button)
             elif entry.availability == ProjectAvailability.NEEDS_MAIN_FILE:
                 button = Button("Select main file", id=f"select-existing-main-{index}")
                 button.data = entry
@@ -279,6 +334,210 @@ class WelcomeScreen(NoticeScreen):
                 controls.append(button)
             await container.mount(Horizontal(detail, *controls, classes="project-row"))
         self.show_notice(f"{len(projects)} project(s) available.")
+
+
+class ProjectDeletionConfirmationScreen(ModalScreen[bool]):
+    """Cancel-first, typed confirmation for backend-owned recoverable deletion."""
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(
+        self,
+        project: ProjectSummary,
+        inspection: ProjectDeletionInspection,
+    ) -> None:
+        super().__init__()
+        self.project = project
+        self.inspection = inspection
+
+    def compose(self) -> ComposeResult:
+        with VerticalScroll(id="delete-project-dialog"):
+            yield CopyableText("Delete managed project?", classes="title")
+            yield CopyableText(
+                f"Project name: {self.project.name}\n"
+                "Managed project selected for recoverable deletion: "
+                f"{self.inspection.project_path}\n"
+                "External manuscript source (untouched): "
+                f"{_path_text(self.inspection.source_path)}\n"
+                f"Backend preflight: {self.inspection.availability.value}",
+                id="delete-project-paths",
+                max_lines=6,
+            )
+            yield CopyableText(
+                "Only the managed project folder will be moved to Proof Assistant's "
+                "recoverable deletion storage. The external manuscript source will "
+                "not be changed, moved, or deleted. The managed project remains "
+                "recoverable until you manually remove the returned destination.",
+                classes="warning",
+                id="delete-project-safety",
+                max_lines=6,
+            )
+            if self.inspection.source_in_dropbox:
+                yield CopyableText(
+                    "The external manuscript source is in Dropbox; it remains "
+                    "completely untouched.",
+                    classes="warning",
+                    id="delete-project-dropbox",
+                )
+            if self.inspection.issue:
+                yield CopyableText(
+                    f"Backend preflight issue: {self.inspection.issue}",
+                    classes="error" if not self.inspection.can_delete else "warning",
+                    id="delete-project-issue",
+                    max_lines=5,
+                )
+            yield Label(
+                f"To enable deletion, type the exact project name: {self.project.name}"
+            )
+            yield Input(
+                placeholder=self.project.name,
+                id="delete-project-confirmation",
+                disabled=not self.inspection.can_delete,
+            )
+            with Horizontal(classes="toolbar"):
+                yield Button("Cancel", id="delete-project-cancel", variant="primary")
+                yield Button(
+                    "Confirm recoverable deletion",
+                    id="delete-project-confirm",
+                    variant="error",
+                    disabled=True,
+                )
+            yield CopyableText(
+                (
+                    "Deletion is refused by the backend preflight. Cancel and resolve "
+                    "the issue above."
+                    if not self.inspection.can_delete
+                    else "Cancel is focused by default. Pressing Enter now cancels; "
+                    "deletion requires the exact name and an explicit button action."
+                ),
+                id="delete-project-status",
+                classes="muted" if self.inspection.can_delete else "error",
+                max_lines=4,
+            )
+
+    def on_mount(self) -> None:
+        self.call_after_refresh(self._focus_cancel)
+
+    def _focus_cancel(self) -> None:
+        buttons = self.query("#delete-project-cancel")
+        if buttons.nodes:
+            self.query_one("#delete-project-cancel", Button).focus()
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id != "delete-project-confirmation":
+            return
+        exact = event.value == self.project.name
+        self.query_one("#delete-project-confirm", Button).disabled = not (
+            self.inspection.can_delete and exact
+        )
+        status = self.query_one("#delete-project-status", TextArea)
+        if exact and self.inspection.can_delete:
+            status.text = (
+                "Exact name matched. Deletion still requires activating the explicit "
+                "Confirm recoverable deletion button."
+            )
+        elif self.inspection.can_delete:
+            status.text = "The exact project name has not been entered."
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "delete-project-cancel":
+            self.action_cancel()
+        elif event.button.id == "delete-project-confirm":
+            typed = self.query_one("#delete-project-confirmation", Input).value
+            if self.inspection.can_delete and typed == self.project.name:
+                self.dismiss(True)
+
+
+class ProjectDeletionOutcomeScreen(NoticeScreen):
+    """Copyable success or failure result returned by the deletion contract."""
+
+    BINDINGS = [("escape", "projects", "Projects")]
+
+    def __init__(
+        self,
+        project: ProjectSummary,
+        *,
+        inspection: ProjectDeletionInspection | None = None,
+        result: ProjectDeletionResult | None = None,
+        error: str | None = None,
+    ) -> None:
+        super().__init__()
+        self.project = project
+        self.inspection = inspection
+        self.result = result
+        self.error = error
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        with VerticalScroll(id="page"):
+            if self.result is not None:
+                yield CopyableText(
+                    "Managed project moved to recoverable deletion storage",
+                    classes="title success",
+                )
+                yield CopyableText(
+                    f"Former managed project path: {self.result.project_path}\n"
+                    "Recoverable deletion destination: "
+                    f"{self.result.trash_path}\n"
+                    "External manuscript source (untouched): "
+                    f"{self.result.source_path}\n"
+                    f"Deleted at: {self.result.deleted_at}\n"
+                    f"Recoverable: {'yes' if self.result.recoverable else 'no'}",
+                    id="delete-project-result",
+                    classes="success",
+                    max_lines=8,
+                )
+                yield CopyableText(
+                    "The external manuscript source was not changed, moved, or "
+                    "deleted. The managed project can be recovered from the returned "
+                    "destination until you manually remove that destination.",
+                    id="delete-project-result-safety",
+                    max_lines=4,
+                )
+            else:
+                source = (
+                    self.inspection.source_path
+                    if self.inspection is not None
+                    else self.project.source_path
+                )
+                yield CopyableText("Project deletion failed", classes="title error")
+                yield CopyableText(
+                    f"Managed project: {self.project.project_path}\n"
+                    f"External manuscript source (untouched): {_path_text(source)}\n"
+                    f"Error: {self.error or 'Deletion was not completed.'}",
+                    id="delete-project-error",
+                    classes="error",
+                    max_lines=10,
+                )
+            with Horizontal(classes="toolbar"):
+                yield Button(
+                    "Return to refreshed projects",
+                    id="deletion-projects",
+                    variant="primary",
+                )
+                if self.result is None:
+                    yield Button("Retry preflight", id="deletion-retry")
+            yield CopyableText(
+                "Returning to projects reloads the backend-owned catalog.",
+                id="status-line",
+                classes="muted",
+            )
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.query_one("#deletion-projects", Button).focus()
+
+    def action_projects(self) -> None:
+        self.proof_app.show_welcome()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "deletion-projects":
+            self.action_projects()
+        elif event.button.id == "deletion-retry":
+            self.proof_app.request_project_deletion(self.project)
 
 
 class NewProjectScreen(NoticeScreen):
@@ -401,7 +660,7 @@ class NewProjectScreen(NoticeScreen):
             source_path=Path(source_text).expanduser(),
             project_path=project_path,
             task_text=task_text,
-            settings=VerificationSettings(),
+            settings=self.proof_app.service.default_verification_settings(),
         )
         self.proof_app.inspect_source_for_project(draft)
 
@@ -712,6 +971,11 @@ class ProjectDestinationConflictScreen(NoticeScreen):
 class DashboardScreen(NoticeScreen):
     """Project landing page between verification iterations."""
 
+    BINDINGS = [
+        ("s", "settings", "Settings"),
+        ("escape", "projects", "Projects"),
+    ]
+
     def __init__(self, snapshot: WorkflowSnapshot) -> None:
         super().__init__()
         self.snapshot = snapshot
@@ -737,7 +1001,9 @@ class DashboardScreen(NoticeScreen):
                 yield Button(
                     "Check for source changes", id="check-changes", variant="primary"
                 )
+            with Horizontal(classes="toolbar"):
                 yield Button("Open project folder", id="open-project")
+                yield Button("Settings", id="settings")
                 yield Button("Projects", id="projects")
             yield CopyableText("", id="status-line", classes="muted")
         yield Footer()
@@ -750,8 +1016,19 @@ class DashboardScreen(NoticeScreen):
             self.proof_app.check_for_changes(project)
         elif event.button.id == "open-project":
             self.proof_app.open_location(project.project_path)
+        elif event.button.id == "settings":
+            self.action_settings()
         elif event.button.id == "projects":
-            self.proof_app.show_welcome()
+            self.action_projects()
+
+    def action_settings(self) -> None:
+        self.proof_app.show_settings(
+            project=self.snapshot.project.project_path,
+            return_to_project=True,
+        )
+
+    def action_projects(self) -> None:
+        self.proof_app.show_welcome()
 
 
 class ProgressScreen(NoticeScreen):
@@ -766,6 +1043,7 @@ class ProgressScreen(NoticeScreen):
         source_in_dropbox: bool = False,
         main_file: str | None = None,
         input_files: tuple[str, ...] = (),
+        detached_job: bool = False,
     ) -> None:
         super().__init__()
         self.heading = title
@@ -774,7 +1052,11 @@ class ProgressScreen(NoticeScreen):
         self.source_in_dropbox = source_in_dropbox
         self.main_file = main_file
         self.input_files = input_files
+        self.detached_job = detached_job
         self._lines: list[str] = []
+        self._event_sequences: set[int] = set()
+        self._observation: VerificationJobObservation | None = None
+        self._observer_error: tuple[str, bool] | None = None
         self._current_phase: ProgressPhase | None = None
         self._seen_phases: set[ProgressPhase] = set()
         self._progress_percent = 0.0
@@ -819,16 +1101,16 @@ class ProgressScreen(NoticeScreen):
                     "Request cooperative cancellation",
                     id="cancel",
                     variant="warning",
-                    disabled=not self.cancellable,
+                    disabled=not self.cancellable or self.detached_job,
                 )
+                if self.detached_job:
+                    yield Button(
+                        "Detach to projects",
+                        id="detach-observer",
+                        variant="primary",
+                    )
             yield TextArea(
-                (
-                    "Work continues in a background thread. Cancellation is "
-                    "cooperative and is confirmed only when the backend returns a "
-                    "cancellation report."
-                    if self.cancellable
-                    else "Work continues in a background thread."
-                ),
+                self._observer_status(),
                 read_only=True,
                 soft_wrap=True,
                 id="status-line",
@@ -838,11 +1120,67 @@ class ProgressScreen(NoticeScreen):
 
     def _source_detail(self) -> str:
         inputs = "\n".join(f"  {path}" for path in self.input_files) or "  none"
-        return (
+        detail = (
             f"{self.heading}\n"
             f"Project: {_path_text(self.project)}\n"
             f"Main file: {self.main_file or 'not available'}\n"
             f"Resolved input files ({len(self.input_files)}):\n{inputs}"
+        )
+        if self._observation is None:
+            return detail
+        job = self._observation.job
+        settings = job.settings
+        attachment = (
+            "legacy coarse read-only" if job.attached_legacy else "durable detached job"
+        )
+        launch_command = (
+            shlex.join(job.launch_command) if job.launch_command else "not reported"
+        )
+        return (
+            f"{detail}\n"
+            f"Job ID: {job.job_id}\n"
+            f"Job state: {job.state.value}\n"
+            f"Attachment: {attachment}\n"
+            f"Worker PID: {job.pid if job.pid is not None else 'not available'}\n"
+            f"Worker log: {job.worker_log_path or 'not reported'}\n"
+            f"Launch command: {launch_command}\n"
+            f"Parallel proof jobs: {settings.jobs if settings is not None else 'not reported'}\n"
+            f"Last heartbeat: {job.heartbeat_at or 'not reported'}\n"
+            f"Job error: {job.error or 'none'}\n"
+            f"Durable event cursor: {self._observation.next_sequence}"
+        )
+
+    def _observer_status(self) -> str:
+        if not self.detached_job:
+            return "The backend operation continues while this screen is open."
+        if self._observer_error is not None:
+            message, job_may_continue = self._observer_error
+            continuation = (
+                " Detached verification may still be running; this client has "
+                "stopped polling only."
+                if job_may_continue
+                else " The detached job is terminal."
+            )
+            return f"Observer error: {message}.{continuation}"
+        if self._observation is not None and self._observation.job.attached_legacy:
+            return (
+                "Coarse read-only legacy attachment. This TUI owns neither the "
+                "verification nor its lock. Closing or detaching stops polling only; "
+                "backend verification continues."
+            )
+        if (
+            self._observation is not None
+            and self._observation.job.state.value == "CANCEL_REQUESTED"
+        ):
+            return (
+                "Persistent cancellation request recorded by the backend. The job "
+                "remains active until it reaches a cooperative stop boundary. The "
+                "request survives all clients; closing or detaching stops polling only."
+            )
+        return (
+            "This TUI only observes a detached backend job. Closing or detaching "
+            "stops polling only; verification continues. Cancellation requests are "
+            "persisted by the backend and survive clients."
         )
 
     def _stage_detail(self) -> str:
@@ -871,6 +1209,9 @@ class ProgressScreen(NoticeScreen):
         )
 
     def record_progress(self, event: ProgressEvent) -> None:
+        if event.sequence in self._event_sequences:
+            return
+        self._event_sequences.add(event.sequence)
         self._current_phase = event.phase
         self._seen_phases.add(event.phase)
         claim = f" [{event.claim_id}]" if event.claim_id else ""
@@ -885,6 +1226,55 @@ class ProgressScreen(NoticeScreen):
         self.query_one("#progress-bar", ProgressBar).update(
             progress=self._progress_percent
         )
+
+    def record_observation(self, observation: VerificationJobObservation) -> None:
+        self._observation = observation
+        self.heading = (
+            "Observing legacy backend verification"
+            if observation.job.attached_legacy
+            else "Observing detached verification"
+        )
+        self.query_one(".title", TextArea).text = self.heading
+        self.query_one("#progress-sources", TextArea).text = self._source_detail()
+        cancel = self.query_one("#cancel", Button)
+        cancel.disabled = (
+            not observation.job.cancellable
+            or observation.job.state.terminal
+            or observation.job.state.value == "CANCEL_REQUESTED"
+        )
+        for event in observation.events:
+            self.record_progress(event)
+        if observation.job.attached_legacy and not self._lines:
+            self.query_one("#progress-log", TextArea).text = (
+                "Legacy backend activity is running. Durable per-stage events are "
+                "not available; this client is polling coarse lifecycle state."
+            )
+        self.query_one("#status-line", TextArea).text = self._observer_status()
+
+    def record_observer_note(self, note: str) -> None:
+        self._lines.append(f"observer: {note}")
+        self._lines = self._lines[-200:]
+        self.query_one("#progress-log", TextArea).text = "\n".join(self._lines)
+        self.query_one(
+            "#status-line", TextArea
+        ).text = f"{note}\n{self._observer_status()}"
+
+    def record_cancellation_pending(self) -> None:
+        self.query_one("#cancel", Button).disabled = True
+        self.query_one("#status-line", TextArea).text = (
+            "Submitting a persistent cancellation request. The detached job remains "
+            "active until the backend records and reaches a cooperative stop boundary."
+        )
+
+    def record_polling_error(self, message: str, job_may_continue: bool) -> None:
+        self._observer_error = (message, job_may_continue)
+        self._lines.append(f"observer error: {message}")
+        self._lines = self._lines[-200:]
+        self.query_one("#progress-log", TextArea).text = "\n".join(self._lines)
+        status = self.query_one("#status-line", TextArea)
+        status.text = self._observer_status()
+        status.remove_class("muted")
+        status.add_class("error")
 
     def _event_progress_percent(self, event: ProgressEvent) -> float:
         """Map typed phases and optional phase-local counts to overall progress."""
@@ -903,11 +1293,8 @@ class ProgressScreen(NoticeScreen):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "cancel" and self.cancellable:
             self.proof_app.cancel_verification()
-            event.button.disabled = True
-            self.query_one("#status-line", TextArea).text = (
-                "Cooperative cancellation requested. Verification is still running "
-                "until the backend confirms a stop boundary."
-            )
+        elif event.button.id == "detach-observer" and self.detached_job:
+            self.proof_app.detach_verification_observer()
 
 
 class ClarificationScreen(NoticeScreen):
@@ -1098,7 +1485,6 @@ class ChangeReviewScreen(NoticeScreen):
             self.proof_app.start_verification(
                 self.snapshot.project,
                 self.plan.plan_id,
-                self.proof_app.settings,
                 main_file=self.plan.main_file,
                 input_files=self.plan.input_files,
             )
@@ -1146,6 +1532,7 @@ class FindingsScreen(NoticeScreen):
                     id="open-report",
                     disabled=self.findings.report_path is None,
                 )
+                yield Button("Load failure analysis", id="open-failures")
                 yield Button("Open project folder", id="open-project")
                 yield Button("Projects", id="projects")
             yield CopyableText(
@@ -1191,12 +1578,570 @@ class FindingsScreen(NoticeScreen):
             self.proof_app.check_for_changes(self.snapshot.project)
         elif event.button.id == "open-report" and self.findings.report_path is not None:
             self.proof_app.view_report(self.snapshot)
+        elif event.button.id == "open-failures":
+            self.proof_app.view_failure_report(self.snapshot)
         elif event.button.id == "open-project":
             self.proof_app.open_location(
                 self.findings.project_path or self.snapshot.project.project_path
             )
         elif event.button.id == "projects":
             self.proof_app.show_welcome()
+
+
+_FAILURE_STATES = frozenset(
+    {
+        "FAILED_TECHNICAL",
+        "FAILED_FORMALIZATION",
+        "UNRESOLVED",
+        "SUSPECT_FALSE",
+        "COUNTEREXAMPLE_FOUND",
+        "INVALIDATED",
+    }
+)
+_BLOCKED_STATES = frozenset(
+    {
+        "BLOCKED_DEPENDENCY",
+        "BLOCKED_BY_GLOBAL_INCIDENT",
+        "NEEDS_CLARIFICATION",
+        "DISCOVERED",
+        "STATEMENT_DRAFTED",
+        "STATEMENT_APPROVED",
+        "READY_TO_PROVE",
+        "PROVING",
+        "DIRTY_SOURCE",
+    }
+)
+
+
+def _failure_status(
+    state: str, *, blocker: bool = False, incident_ids: tuple[int, ...] = ()
+) -> tuple[str, str]:
+    """Return a redundant text-and-color presentation for a backend state."""
+
+    normalized = state.upper()
+    if blocker or incident_ids or normalized in _FAILURE_STATES:
+        return "FAIL", "bold red"
+    if normalized in _BLOCKED_STATES:
+        return "BLOCKED", "bold yellow"
+    if normalized == "CERTIFIED":
+        return "OK", "bold green"
+    return "BLOCKED", "bold yellow"
+
+
+def _status_label(
+    label: str,
+    state: str,
+    *,
+    blocker: bool = False,
+    incident_ids: tuple[int, ...] = (),
+) -> Text:
+    status, style = _failure_status(state, blocker=blocker, incident_ids=incident_ids)
+    return Text.assemble(Text(f"[{status}] ", style=style), Text(label))
+
+
+class FailureDependencyScreen(NoticeScreen):
+    """Interactive terminal explanation of one backend-owned failure report."""
+
+    BINDINGS = [("escape", "back", "Back"), ("q", "close", "Close")]
+
+    def __init__(
+        self,
+        snapshot: WorkflowSnapshot,
+        *,
+        report: FailureDependencyReport | None = None,
+        error: str | None = None,
+    ) -> None:
+        super().__init__()
+        self.snapshot = snapshot
+        self.report = report
+        self.error = error
+        self._graph_nodes = (
+            {node.claim_id: node for node in report.nodes} if report else {}
+        )
+        self._incidents = (
+            {incident.incident_id: incident for incident in report.incidents}
+            if report
+            else {}
+        )
+        self._components = (
+            {component.component_id: component for component in report.components}
+            if report
+            else {}
+        )
+        self._cycle_rows: dict[str, _FailureSelection] = {}
+        self._first_tree_node = None
+        self._tree = self._make_tree() if report and not report.has_cycles else None
+        self._component_table = (
+            self._make_component_table() if report and report.has_cycles else None
+        )
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        with Vertical(id="page"):
+            if self.report is None:
+                yield CopyableText("Failure dependency analysis", classes="title")
+                yield CopyableText(
+                    f"Project: {self.snapshot.project.project_path}\n"
+                    f"Failure-report error: {self.error or 'No failure report is available.'}",
+                    classes="error",
+                    id="failure-report-error",
+                    max_lines=10,
+                )
+            else:
+                yield CopyableText(
+                    self._compact_header(),
+                    id="failure-report-meta",
+                    max_lines=4 if self.report.has_cycles else 3,
+                )
+                with TabbedContent(initial="failure-map-pane", id="failure-tabs"):
+                    with TabPane(
+                        "Cycle components" if self.report.has_cycles else "Proof tree",
+                        id="failure-map-pane",
+                    ):
+                        if self.report.has_cycles:
+                            if self._component_table is not None:
+                                yield self._component_table
+                        elif self._tree is not None:
+                            yield self._tree
+                    with TabPane("Exact reason", id="failure-detail-pane"):
+                        yield CopyableText(
+                            self._initial_detail(),
+                            soft_wrap=True,
+                            id="failure-detail",
+                            expand=True,
+                        )
+                    with TabPane("Copyable full outline", id="failure-outline-pane"):
+                        yield CopyableText(
+                            self._full_outline(),
+                            soft_wrap=True,
+                            id="failure-outline",
+                            expand=True,
+                        )
+            with Horizontal(classes="toolbar"):
+                yield Button("Back", id="failure-back", variant="primary")
+                yield Button(
+                    "View verification report",
+                    id="failure-open-report",
+                    disabled=(
+                        self.snapshot.findings is None
+                        or self.snapshot.findings.report_path is None
+                    ),
+                )
+                yield Button("Close to projects", id="failure-close")
+            yield CopyableText(
+                "Map: Up/Down/Page keys move; Space toggles; Enter opens reason. "
+                "Text panes: Ctrl+A selects all; Ctrl+C copies. Color is optional.",
+                id="status-line",
+                classes="muted",
+                max_lines=2,
+            )
+        yield Footer()
+
+    def _make_tree(self) -> FailureTree:
+        assert self.report is not None
+        tree = FailureTree(
+            Text.assemble(
+                Text("[FAIL] ", style="bold red"),
+                Text(f"Verification run {self.report.run_id}"),
+            ),
+            data=_FailureSelection(
+                incident_ids=(
+                    (self.report.primary_incident_id,)
+                    if self.report.primary_incident_id is not None
+                    else ()
+                )
+            ),
+            id="failure-tree",
+        )
+        tree.auto_expand = False
+        tree.root.expand()
+
+        pending = [(tree.root, item, 0) for item in reversed(self.report.outline)]
+        while pending:
+            parent, item, depth = pending.pop()
+            suffix = " (shared reference)" if item.shared_reference else ""
+            selection = _FailureSelection(
+                claim_id=item.claim_id,
+                incident_ids=item.incident_ids,
+                shared_reference=item.shared_reference,
+            )
+            node = parent.add(
+                _status_label(
+                    f"{item.claim_id}{suffix}",
+                    item.state,
+                    blocker=item.blocker,
+                    incident_ids=item.incident_ids,
+                ),
+                data=selection,
+                expand=depth < 1,
+                allow_expand=bool(item.children),
+            )
+            if self._first_tree_node is None:
+                self._first_tree_node = node
+            pending.extend(
+                (node, child, depth + 1) for child in reversed(item.children)
+            )
+        return tree
+
+    def _make_component_table(self) -> DataTable:
+        assert self.report is not None
+        table = DataTable(
+            show_row_labels=False,
+            cursor_type="row",
+            zebra_stripes=True,
+            id="failure-components",
+        )
+        table.add_columns("Status", "Component / claim", "State / role")
+        for component in self.report.components:
+            component_key = f"component:{component.component_id}"
+            status, style = _failure_status(
+                "BLOCKED_DEPENDENCY",
+                blocker=component.blocker,
+                incident_ids=component.incident_ids,
+            )
+            table.add_row(
+                Text(f"[{status}]", style=style),
+                component.component_id,
+                "cyclic component" if component.cyclic else "component",
+                key=component_key,
+            )
+            self._cycle_rows[component_key] = _FailureSelection(
+                component_id=component.component_id,
+                incident_ids=component.incident_ids,
+            )
+            for member_index, claim_id in enumerate(component.members):
+                graph_node = self._graph_nodes.get(claim_id)
+                state = graph_node.state if graph_node is not None else "BLOCKED"
+                incidents = graph_node.incident_ids if graph_node is not None else ()
+                member_status, member_style = _failure_status(
+                    state,
+                    blocker=component.blocker and bool(incidents),
+                    incident_ids=incidents,
+                )
+                row_key = f"member:{component.component_id}:{member_index}:{claim_id}"
+                table.add_row(
+                    Text(f"[{member_status}]", style=member_style),
+                    f"  {claim_id}",
+                    state,
+                    key=row_key,
+                )
+                self._cycle_rows[row_key] = _FailureSelection(
+                    claim_id=claim_id,
+                    incident_ids=incidents,
+                )
+        return table
+
+    def _report_meta(self) -> str:
+        assert self.report is not None
+        first_blocker = self.report.first_blocker
+        blocker_text = (
+            " -> ".join(first_blocker.claims)
+            if first_blocker is not None
+            else "not available"
+        )
+        mode = "cycle component/edge fallback" if self.report.has_cycles else "tree"
+        global_incidents = (
+            ", ".join(str(value) for value in self.report.global_incident_ids) or "none"
+        )
+        return (
+            f"Project: {self.snapshot.project.project_path}\n"
+            f"Run ID: {self.report.run_id}\n"
+            f"Snapshot: {self.report.snapshot or 'not available'}\n"
+            f"Outcome: {self.report.outcome}\n"
+            f"Graph presentation: {mode}\n"
+            f"Run/batch incident IDs: {global_incidents}\n"
+            f"First blocker path: {blocker_text}\n"
+            f"Detail: {self.report.detail}"
+        )
+
+    def _compact_header(self) -> str:
+        assert self.report is not None
+        incidents = ",".join(str(value) for value in self.report.global_incident_ids)
+        incident_text = f" | Incidents: {incidents}" if incidents else ""
+        header = (
+            "Failure dependency analysis\n"
+            f"Project: {self.snapshot.project.project_path}\n"
+            f"Run: {self.report.run_id} | Outcome: {self.report.outcome}"
+            f"{incident_text}"
+        )
+        if self.report.has_cycles:
+            return header + "\n[CYCLE] Flat components/edges; no inferred tree."
+        return header + " | Mode: tree"
+
+    def _initial_detail(self) -> str:
+        assert self.report is not None
+        if self.report.primary_incident_id is not None:
+            incident = self._incidents.get(self.report.primary_incident_id)
+            if incident is not None:
+                return "Primary failure incident\n\n" + self._incident_text(incident)
+        return self._report_meta()
+
+    def _incident_text(self, incident: FailureIncident) -> str:
+        claims = ", ".join(incident.claim_ids) or "none"
+        parts = [
+            f"Incident ID: {incident.incident_id}",
+            f"Run ID: {incident.run_id}",
+            f"Scope: {incident.scope.value}",
+            f"Kind: {incident.kind.value}",
+            f"Phase: {incident.phase}",
+            f"Category: {incident.category}",
+            f"Message: {incident.message}",
+            f"Detail: {incident.detail or 'not available'}",
+            f"Provenance: {incident.provenance}",
+            f"Claim IDs: {claims}",
+            f"Batch index: {incident.batch_index if incident.batch_index is not None else 'not available'}",
+            f"Retryable: {'yes' if incident.retryable else 'no'}",
+        ]
+        if incident.artifacts:
+            parts.append("Artifacts / logs:")
+            for artifact in incident.artifacts:
+                command = shlex.join(artifact.command) if artifact.command else "none"
+                parts.extend(
+                    [
+                        f"  Label: {artifact.label}",
+                        f"  Path: {artifact.path}",
+                        f"  SHA-256: {artifact.sha256 or 'not available'}",
+                        f"  Command: {command}",
+                        f"  Exit code: {artifact.exit_code if artifact.exit_code is not None else 'not available'}",
+                        f"  Timed out: {'yes' if artifact.timed_out else 'no'}",
+                    ]
+                )
+        else:
+            parts.append("Artifacts / logs: none")
+        return "\n".join(parts)
+
+    def _selection_detail(self, selection: _FailureSelection) -> str:
+        if selection.component_id is not None:
+            component = self._components.get(selection.component_id)
+            if component is not None:
+                return self._component_detail(component)
+        if selection.claim_id is not None:
+            return self._claim_detail(selection)
+        incident_text = [
+            self._incident_text(self._incidents[incident_id])
+            for incident_id in selection.incident_ids
+            if incident_id in self._incidents
+        ]
+        return "\n\n".join(incident_text) or self._initial_detail()
+
+    def _claim_detail(self, selection: _FailureSelection) -> str:
+        assert self.report is not None
+        claim_id = selection.claim_id
+        graph_node = self._graph_nodes.get(claim_id) if claim_id is not None else None
+        incident_ids = (
+            graph_node.incident_ids
+            if graph_node is not None
+            else selection.incident_ids
+        )
+        status, _ = _failure_status(
+            graph_node.state if graph_node is not None else "BLOCKED",
+            incident_ids=incident_ids,
+        )
+        parts = [
+            f"Claim: {claim_id or 'not available'}",
+            f"Display status: [{status}]",
+            f"Verifier state: {graph_node.state if graph_node is not None else 'not available'}",
+            f"Kind: {graph_node.kind if graph_node is not None else 'not available'}",
+            f"Source file: {graph_node.source_file if graph_node is not None else 'not available'}",
+            (
+                "Statement lines: "
+                f"{graph_node.statement_start}-{graph_node.statement_end}"
+                if graph_node is not None
+                else "Statement lines: not available"
+            ),
+            f"Shared dependency reference: {'yes' if selection.shared_reference else 'no'}",
+        ]
+        relevant_paths = [
+            path
+            for path in self.report.paths
+            if claim_id is not None and claim_id in path.claims
+        ]
+        if relevant_paths:
+            parts.append("Backend-recorded target-to-blocker paths:")
+            parts.extend(f"  {' -> '.join(path.claims)}" for path in relevant_paths)
+        incidents = [
+            self._incidents[incident_id]
+            for incident_id in incident_ids
+            if incident_id in self._incidents
+        ]
+        if graph_node is None and incidents:
+            parts = [
+                f"Run/batch failure node: {claim_id or 'not available'}",
+                "Display status: [FAIL]",
+                "This synthetic root was supplied by the backend for a failure "
+                "that is not owned by one manuscript claim.",
+                "Exact reason / incidents:",
+            ]
+            parts.extend(self._incident_text(incident) for incident in incidents)
+            return "\n\n".join(parts)
+        if incidents:
+            parts.append("Exact reason / incidents:")
+            parts.extend(self._incident_text(incident) for incident in incidents)
+        else:
+            parts.append(
+                "Exact reason: no direct incident is attached to this node; use the "
+                "backend-recorded blocker path above."
+            )
+        return "\n\n".join(parts)
+
+    def _component_detail(self, component: FailureComponent) -> str:
+        members = "\n".join(f"  {member}" for member in component.members) or "  none"
+        parts = [
+            f"Component: {component.component_id}",
+            f"Cyclic: {'yes' if component.cyclic else 'no'}",
+            f"Contains a blocker: {'yes' if component.blocker else 'no'}",
+            f"Members ({len(component.members)}):\n{members}",
+        ]
+        incidents = [
+            self._incidents[incident_id]
+            for incident_id in component.incident_ids
+            if incident_id in self._incidents
+        ]
+        if incidents:
+            parts.append("Exact reason / incidents:")
+            parts.extend(self._incident_text(incident) for incident in incidents)
+        else:
+            parts.append("Exact reason: this component has no direct incident.")
+        return "\n\n".join(parts)
+
+    def _full_outline(self) -> str:
+        assert self.report is not None
+        lines = [self._report_meta(), "", "Targets:"]
+        lines.extend(f"  {claim_id}" for claim_id in self.report.targets)
+        if not self.report.targets:
+            lines.append("  none")
+        lines.append("Selected claims:")
+        lines.extend(f"  {claim_id}" for claim_id in self.report.selected)
+        if not self.report.selected:
+            lines.append("  none")
+
+        if self.report.has_cycles:
+            lines.extend(["", "Cycle components (backend-computed):"])
+            for component in self.report.components:
+                status, _ = _failure_status(
+                    "BLOCKED_DEPENDENCY",
+                    blocker=component.blocker,
+                    incident_ids=component.incident_ids,
+                )
+                cycle = "cyclic" if component.cyclic else "acyclic"
+                lines.append(
+                    f"  [{status}] {component.component_id} ({cycle}; "
+                    f"members: {', '.join(component.members) or 'none'})"
+                )
+            lines.append("Component edges (dependent -> dependency):")
+            lines.extend(
+                f"  {edge.dependent_component} -> {edge.dependency_component}"
+                for edge in self.report.component_edges
+            )
+            if not self.report.component_edges:
+                lines.append("  none")
+        else:
+            lines.extend(["", "Proof tree (backend-provided outline):"])
+
+            pending = [(item, 0) for item in reversed(self.report.outline)]
+            while pending:
+                item, depth = pending.pop()
+                status, _ = _failure_status(
+                    item.state,
+                    blocker=item.blocker,
+                    incident_ids=item.incident_ids,
+                )
+                shared = "; shared reference" if item.shared_reference else ""
+                incidents = (
+                    ",".join(str(value) for value in item.incident_ids) or "none"
+                )
+                lines.append(
+                    f"  {'  ' * depth}[{status}] {item.claim_id} "
+                    f"(state={item.state}; incidents={incidents}{shared})"
+                )
+                pending.extend((child, depth + 1) for child in reversed(item.children))
+
+        lines.extend(["", "Backend-recorded target-to-blocker paths:"])
+        lines.extend(
+            f"  {path.target} -> {path.blocker}: {' -> '.join(path.claims)}"
+            for path in self.report.paths
+        )
+        if not self.report.paths:
+            lines.append("  none")
+        lines.extend(["", "Exact incidents and artifacts:"])
+        for incident in self.report.incidents:
+            lines.extend([self._incident_text(incident), ""])
+        if not self.report.incidents:
+            lines.append("  none")
+        return "\n".join(lines).rstrip()
+
+    def _show_selection(
+        self, selection: _FailureSelection, *, open_detail: bool
+    ) -> None:
+        detail = self.query_one("#failure-detail", TextArea)
+        detail.text = self._selection_detail(selection)
+        detail.scroll_home(animate=False)
+        if open_detail:
+            self.query_one(
+                "#failure-tabs", TabbedContent
+            ).active = "failure-detail-pane"
+            detail.focus()
+
+    def on_mount(self) -> None:
+        if self.report is None:
+            self.query_one("#failure-back", Button).focus()
+        elif self.report.has_cycles and self._component_table is not None:
+            self._component_table.focus()
+            if self._cycle_rows:
+                self._component_table.move_cursor(row=0, column=0, animate=False)
+                first = next(iter(self._cycle_rows.values()))
+                self._show_selection(first, open_detail=False)
+        elif self._tree is not None:
+            self._tree.focus()
+            if self._first_tree_node is not None:
+                self._tree.move_cursor(self._first_tree_node, animate=False)
+
+    def on_tree_node_highlighted(
+        self, event: Tree.NodeHighlighted[_FailureSelection]
+    ) -> None:
+        if event.control is self._tree and event.node.data is not None:
+            self._show_selection(event.node.data, open_detail=False)
+
+    def on_tree_node_selected(
+        self, event: Tree.NodeSelected[_FailureSelection]
+    ) -> None:
+        if event.control is self._tree and event.node.data is not None:
+            self._show_selection(event.node.data, open_detail=True)
+
+    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        if (
+            event.data_table is self._component_table
+            and event.row_key.value is not None
+        ):
+            selection = self._cycle_rows.get(event.row_key.value)
+            if selection is not None:
+                self._show_selection(selection, open_detail=False)
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        if (
+            event.data_table is self._component_table
+            and event.row_key.value is not None
+        ):
+            selection = self._cycle_rows.get(event.row_key.value)
+            if selection is not None:
+                self._show_selection(selection, open_detail=True)
+
+    def action_back(self) -> None:
+        if self.snapshot.findings is not None:
+            self.proof_app.switch_screen(FindingsScreen(self.snapshot))
+        else:
+            self.proof_app.switch_screen(RecoveryScreen(self.snapshot))
+
+    def action_close(self) -> None:
+        self.proof_app.show_welcome()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "failure-back":
+            self.action_back()
+        elif event.button.id == "failure-open-report":
+            self.proof_app.view_report(self.snapshot)
+        elif event.button.id == "failure-close":
+            self.action_close()
 
 
 class ReportViewerScreen(NoticeScreen):
@@ -1290,11 +2235,21 @@ class RecoveryScreen(NoticeScreen):
         super().__init__()
         self.snapshot = snapshot
         self.heading = title or (snapshot.state.value if snapshot else "Error")
-        self.detail = (
-            detail
-            or (snapshot.error if snapshot else None)
-            or "No further detail available."
-        )
+        if (
+            detail is None
+            and snapshot is not None
+            and snapshot.state == WorkflowState.BUSY_EXTERNAL
+        ):
+            self.detail = (
+                "The backend reports project activity, but no attachable observation "
+                "is currently available. This TUI owns neither verification nor lock."
+            )
+        else:
+            self.detail = (
+                detail
+                or (snapshot.error if snapshot else None)
+                or "No further detail available."
+            )
         self.project = project or (snapshot.project.project_path if snapshot else None)
 
     @classmethod
@@ -1321,14 +2276,20 @@ class RecoveryScreen(NoticeScreen):
                 and self.snapshot.state == WorkflowState.BUSY_EXTERNAL
             ):
                 yield CopyableText(
-                    "Another process owns the project. This screen is read-only; "
-                    "retry after it finishes.",
+                    "Backend activity is present. This replaceable client is "
+                    "read-only and owns neither verification nor lock; Retry / "
+                    "recover attempts to attach again.",
                     classes="warning",
                 )
             yield CopyableText(f"Project: {_path_text(self.project)}")
             with Horizontal(classes="toolbar"):
                 yield Button(
                     "Retry / recover", id="retry", disabled=self.project is None
+                )
+                yield Button(
+                    "Load failure analysis",
+                    id="recovery-failures",
+                    disabled=self.snapshot is None or self.project is None,
                 )
                 yield Button(
                     "Open project folder",
@@ -1397,6 +2358,8 @@ class RecoveryScreen(NoticeScreen):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "retry" and self.project is not None:
             self.proof_app.resume_project(self.project)
+        elif event.button.id == "recovery-failures" and self.snapshot is not None:
+            self.proof_app.view_failure_report(self.snapshot)
         elif event.button.id == "open-project" and self.project is not None:
             self.proof_app.open_location(self.project)
         elif event.button.id == "projects":

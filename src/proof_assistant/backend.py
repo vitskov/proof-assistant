@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import queue
+import re
 import threading
+import time
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .concurrency import AITaskClass, ConcurrencyRuntimeSpec
 from .models import validate_model_effort
 from .protocol import (
     AppServerClient,
@@ -30,6 +34,8 @@ class CodexConfig:
     validate_model: bool = True
     isolate_external_tools: bool = True
     extra_app_server_args: tuple[str, ...] = field(default_factory=tuple)
+    concurrency: ConcurrencyRuntimeSpec | None = None
+    ai_task_class: AITaskClass = AITaskClass.PROOF
 
 
 @dataclass(frozen=True)
@@ -94,6 +100,7 @@ class CodexBackend:
         self._tool_names: set[str] = set()
         self._tool_calls: list[CodexToolCall] = []
         self._tool_lock = threading.Lock()
+        self._concurrency_runtime: Any | None = None
         self.client.register_request_handler("item/tool/call", self._on_tool_call)
 
         # Dynamic tools are authoritative. We fail closed on any unexpected
@@ -259,13 +266,59 @@ class CodexBackend:
                 f"Invalid arguments for {tool!r}: expected JSON object",
             )
         try:
-            result = self._tool_handler(tool, arguments)
+            result = self._run_tool_handler_with_admission(tool, arguments)
         except Exception as exc:
             return self._tool_failure(tool, arguments, f"Error: {exc}")
         text = result if isinstance(result, str) else str(result)
         success = not text.lstrip().startswith("Error:")
         self._record_tool_call(tool, arguments, text, success)
         return dynamic_tool_result(text, success=success)
+
+    def _run_tool_handler_with_admission(
+        self, tool: str, arguments: dict[str, Any]
+    ) -> str:
+        """Apply machine resource admission at the common dynamic-tool seam.
+
+        RepoProver-derived agents do not all share one Python mixin.  Gating
+        here ensures every managed ``lean_check`` and agent-requested Lake
+        build uses the same machine controllers, including compatibility CLI
+        paths.  The AI lease remains independent and active while its tool call
+        waits for local capacity.
+        """
+
+        assert self._tool_handler is not None
+        spec = self.config.concurrency
+        if spec is None:
+            return self._tool_handler(tool, arguments)
+        runtime = self._concurrency_runtime
+        if runtime is None:
+            runtime = spec.create()
+            self._concurrency_runtime = runtime
+        if tool == "lean_check":
+            request = runtime.lean.request(
+                f"lean-check:{uuid.uuid4().hex}",
+                ttl_seconds=max(120.0, min(self.config.turn_timeout, 600.0)),
+            )
+            with runtime.lean.lease(request, timeout=self.config.turn_timeout):
+                return self._tool_handler(tool, arguments)
+        if tool == "bash":
+            command = str(arguments.get("command") or "")
+            is_lake_build = bool(
+                re.search(r"(?m)(?:^|[;&|]\s*)lake\s+build(?:\s|$)", command)
+            )
+            if is_lake_build:
+                target_match = re.search(r"\blake\s+build\s+([^\s;&|]+)", command)
+                full_build = target_match is None or target_match.group(1).startswith(
+                    "-"
+                )
+                request = runtime.build.request(
+                    f"agent-build:{uuid.uuid4().hex}",
+                    full_build=full_build,
+                    ttl_seconds=max(120.0, min(self.config.turn_timeout, 900.0)),
+                )
+                with runtime.build.lease(request, timeout=self.config.turn_timeout):
+                    return self._tool_handler(tool, arguments)
+        return self._tool_handler(tool, arguments)
 
     def _record_tool_call(
         self,
@@ -347,6 +400,73 @@ class CodexBackend:
         tools: list[dict[str, Any]] | None,
         tool_handler: Callable[[str, dict[str, Any]], str],
     ) -> CodexResult:
+        if self.config.concurrency is None:
+            with _ACTIVE_TURNS:
+                return self._run_admitted(
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    tools=tools,
+                    tool_handler=tool_handler,
+                )
+
+        runtime = self._concurrency_runtime
+        if runtime is None:
+            runtime = self.config.concurrency.create()
+            self._concurrency_runtime = runtime
+        owner = f"codex:{self.config.ai_task_class.value}:{uuid.uuid4().hex}"
+        request = runtime.ai.request(
+            owner,
+            self.config.ai_task_class,
+            ttl_seconds=max(120.0, min(self.config.turn_timeout, 900.0)),
+        )
+        started = time.monotonic()
+        queued_before = runtime.ai.status().active >= runtime.ai.status().current_limit
+        admitted_at = started
+        try:
+            with runtime.ai.lease(request, timeout=self.config.turn_timeout):
+                admitted_at = time.monotonic()
+                result = self._run_admitted(
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    tools=tools,
+                    tool_handler=tool_handler,
+                )
+        except Exception as exc:
+            message = str(exc).casefold()
+            if any(
+                marker in message
+                for marker in ("rate limit", "rate-limit", "throttl", "429")
+            ):
+                retry_after = getattr(exc, "retry_after", None)
+                runtime.ai.record_throttle(retry_after=retry_after)
+            elif isinstance(exc, (TimeoutError, CodexServerExited)) or any(
+                marker in message
+                for marker in (
+                    "service unavailable",
+                    "temporarily unavailable",
+                    "connection reset",
+                    "connection refused",
+                    " 502",
+                    " 503",
+                    " 504",
+                )
+            ):
+                runtime.ai.record_transient_failure()
+            raise
+        runtime.ai.record_success(
+            time.monotonic() - started,
+            queued=queued_before or admitted_at - started > 0.2,
+        )
+        return result
+
+    def _run_admitted(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        tools: list[dict[str, Any]] | None,
+        tool_handler: Callable[[str, dict[str, Any]], str],
+    ) -> CodexResult:
         self.client.start()
         self.initialize()
 
@@ -377,79 +497,77 @@ class CodexBackend:
         }
         thread_params = {k: v for k, v in thread_params.items() if v is not None}
 
-        with _ACTIVE_TURNS:
-            thread_response = self.client.request(
-                "thread/start", thread_params, timeout=self.config.request_timeout
-            )
-            thread_id = self._extract_thread_id(thread_response)
+        thread_response = self.client.request(
+            "thread/start", thread_params, timeout=self.config.request_timeout
+        )
+        thread_id = self._extract_thread_id(thread_response)
 
-            turn_params: dict[str, Any] = {
-                "threadId": thread_id,
-                "input": [{"type": "text", "text": user_prompt}],
-                "model": self.config.model,
-                "effort": self.config.effort,
-            }
-            turn_response = self.client.request(
-                "turn/start", turn_params, timeout=self.config.request_timeout
-            )
-            turn_id = self._extract_turn_id(turn_response)
+        turn_params: dict[str, Any] = {
+            "threadId": thread_id,
+            "input": [{"type": "text", "text": user_prompt}],
+            "model": self.config.model,
+            "effort": self.config.effort,
+        }
+        turn_response = self.client.request(
+            "turn/start", turn_params, timeout=self.config.request_timeout
+        )
+        turn_id = self._extract_turn_id(turn_response)
 
-            events: list[dict[str, Any]] = []
-            final_chunks: list[str] = []
+        events: list[dict[str, Any]] = []
+        final_chunks: list[str] = []
 
-            while True:
-                try:
-                    notification = self.client.next_notification(
-                        timeout=self.config.turn_timeout
-                    )
-                except queue.Empty as exc:
-                    raise TimeoutError(
-                        "Codex turn did not complete within "
-                        f"{self.config.turn_timeout}s"
-                    ) from exc
+        while True:
+            try:
+                notification = self.client.next_notification(
+                    timeout=self.config.turn_timeout
+                )
+            except queue.Empty as exc:
+                raise TimeoutError(
+                    f"Codex turn did not complete within {self.config.turn_timeout}s"
+                ) from exc
 
-                events.append(notification)
-                method = str(notification.get("method") or "")
-                params = notification.get("params") or {}
+            events.append(notification)
+            method = str(notification.get("method") or "")
+            params = notification.get("params") or {}
 
-                if method == "_proof_assistant/server_exited":
-                    raise CodexServerExited(
-                        f"codex app-server exited during turn: {params!r}"
-                    )
+            if method == "_proof_assistant/server_exited":
+                raise CodexServerExited(
+                    f"codex app-server exited during turn: {params!r}"
+                )
 
-                if method == "item/completed":
-                    item = params.get("item") or {}
-                    if isinstance(item, dict) and item.get("type") in (
-                        "agentMessage",
-                        "assistantMessage",
-                        "message",
-                    ):
-                        text = self._text_from_item(item)
-                        if text:
-                            final_chunks.append(text)
+            if method == "item/completed":
+                item = params.get("item") or {}
+                if isinstance(item, dict) and item.get("type") in (
+                    "agentMessage",
+                    "assistantMessage",
+                    "message",
+                ):
+                    text = self._text_from_item(item)
+                    if text:
+                        final_chunks.append(text)
 
-                if method == "turn/completed":
-                    completed_turn = params.get("turn") or {}
-                    completed_id = (
-                        completed_turn.get("id")
+            if method == "turn/completed":
+                completed_turn = params.get("turn") or {}
+                completed_id = (
+                    completed_turn.get("id")
+                    if isinstance(completed_turn, dict)
+                    else None
+                )
+                if (
+                    turn_id is None
+                    or completed_id is None
+                    or str(completed_id) == turn_id
+                ):
+                    status = (
+                        completed_turn.get("status")
                         if isinstance(completed_turn, dict)
                         else None
                     )
-                    if (
-                        turn_id is None
-                        or completed_id is None
-                        or str(completed_id) == turn_id
-                    ):
-                        status = (
-                            completed_turn.get("status")
-                            if isinstance(completed_turn, dict)
-                            else None
+                    if status in ("failed", "cancelled", "interrupted"):
+                        raise CodexProtocolError(
+                            f"Codex turn ended with status {status!r}: {params!r}"
                         )
-                        if status in ("failed", "cancelled", "interrupted"):
-                            raise CodexProtocolError(
-                                f"Codex turn ended with status {status!r}: {params!r}"
-                            )
-                        break
+                    break
 
         return CodexResult(
             final_text="\n".join(x for x in final_chunks if x).strip(),

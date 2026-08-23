@@ -68,6 +68,36 @@ An explicit correspondence table maps manuscript IDs to Lean declarations.
 Dependency audits compare mapped nodes in both graphs and report formal proof
 dependencies that the manuscript graph does not mention.
 
+## Failure explanations and dependency maps
+
+A failed search is not explained by a bare terminal state. Each verification
+run records structured failure incidents with their scope (run, batch, claim,
+or dependency component), category, exact message/detail, affected claims,
+retryability, and available command/log artifacts. It also freezes the run's
+targets, selected claims, end states, source locations, and dependency edges.
+Those historical facts remain unchanged when a later manuscript edit or retry
+changes the live graph.
+
+For each target, the backend follows dependent-to-dependency edges and records a
+canonical target-to-blocker path. The report's “first blocking reason” is the
+first deterministic representative under stable target, shortest-path, graph,
+and incident ordering. It is deliberately not defined as whichever parallel
+worker happened to finish first. All independent blockers remain present even
+when one is selected for the headline.
+
+The ordinary presentation is a proof tree. Direct failure nodes carry exact
+incident references; claims that cannot run because of a failed prerequisite
+are shown separately as blocked. Shared prerequisites become finite shared
+references rather than recursively duplicating their descendants. Explicit
+LaTeX-reference cycles are possible but uncommon. When one occurs, the backend
+condenses strongly connected components and reports a component/edge view;
+neither the report nor a UI recursively unfolds a cyclic structure.
+
+Run-wide provider, compiler, workspace, or runtime-dependency incidents remain
+run/batch incidents instead of being misrepresented as independent mathematical
+failures in every affected claim. A later retry preserves the earlier incident
+and records new state rather than overwriting its explanation.
+
 ## Change detection and invalidation
 
 Every source object has exact statement/proof hashes and a whitespace/comment
@@ -87,8 +117,12 @@ and its dependent slice require new proof work.
 ## Scheduler and parallelism
 
 Only claims whose known dependencies are certified enter the ready frontier.
-Ready claims are placed in bounded batches. `--jobs 1` processes batches
-sequentially; `--jobs 2` may run two independent Codex processes concurrently.
+Ready claims are placed in bounded batches. The legacy `--jobs 2` default is a
+minimum logical worker fan-out, not an account-level Codex limit. When several
+batches are ready, the scheduler may instantiate additional logical workers up
+to the current machine AI limit, while the global AI admission controller
+independently caps active remote turns. Fixed mode plus explicit numeric limits
+provides reproducible single- or multi-worker debugging.
 Each batch uses a detached Git worktree and isolated root `.lake/build`, while
 sharing the compatible dependency depot.
 

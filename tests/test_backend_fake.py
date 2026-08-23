@@ -1,3 +1,6 @@
+from contextlib import contextmanager
+from types import SimpleNamespace
+
 from proof_assistant.backend import CodexBackend, CodexConfig
 
 
@@ -68,6 +71,36 @@ class FakeClient:
         return self.event_stream.pop(0)
 
 
+class RecordingResourceController:
+    def __init__(self):
+        self.requests = []
+        self.leases = []
+
+    def request(self, owner, **kwargs):
+        request = SimpleNamespace(owner=owner, **kwargs)
+        self.requests.append(request)
+        return request
+
+    @contextmanager
+    def lease(self, request, *, timeout):
+        self.leases.append((request, timeout, "entered"))
+        try:
+            yield SimpleNamespace(lease_id="test")
+        finally:
+            self.leases.append((request, timeout, "released"))
+
+
+class RecordingConcurrencySpec:
+    def __init__(self):
+        self.runtime = SimpleNamespace(
+            lean=RecordingResourceController(),
+            build=RecordingResourceController(),
+        )
+
+    def create(self):
+        return self.runtime
+
+
 def test_backend_full_fake_roundtrip_and_dynamic_tool():
     client = FakeClient()
     backend = CodexBackend(
@@ -114,3 +147,48 @@ def test_backend_full_fake_roundtrip_and_dynamic_tool():
     assert dynamic_result["success"] is True
     assert dynamic_result["contentItems"][0]["text"] == "Lean says OK"
     assert seen == [("lean_check", {"code": "example"})]
+
+
+def test_dynamic_lean_and_lake_tools_use_independent_machine_admission():
+    client = FakeClient()
+    spec = RecordingConcurrencySpec()
+    backend = CodexBackend(
+        CodexConfig(
+            model="gpt-test",
+            effort="high",
+            turn_timeout=321,
+            concurrency=spec,  # type: ignore[arg-type]
+        ),
+        client=client,
+    )
+    seen = []
+    backend._tool_handler = lambda name, args: seen.append((name, args)) or "OK"
+    backend._tool_names = {"lean_check", "bash"}
+
+    lean_result = backend._on_tool_call(
+        {"tool": "lean_check", "arguments": {"code": "example"}}
+    )
+    targeted_result = backend._on_tool_call(
+        {"tool": "bash", "arguments": {"command": "lake build ManuscriptVerification"}}
+    )
+    full_result = backend._on_tool_call(
+        {"tool": "bash", "arguments": {"command": "lake build"}}
+    )
+    ordinary_result = backend._on_tool_call(
+        {"tool": "bash", "arguments": {"command": "git status"}}
+    )
+
+    assert all(
+        result["success"]
+        for result in (lean_result, targeted_result, full_result, ordinary_result)
+    )
+    assert len(spec.runtime.lean.requests) == 1
+    assert len(spec.runtime.lean.leases) == 2
+    assert [item.full_build for item in spec.runtime.build.requests] == [False, True]
+    assert len(spec.runtime.build.leases) == 4
+    assert [name for name, _args in seen] == [
+        "lean_check",
+        "bash",
+        "bash",
+        "bash",
+    ]

@@ -82,6 +82,14 @@ implicit meaning or mutable UI objects.
   classifier and is tagged `RESUMABLE`, `NEEDS_MAIN_FILE`, `INCOMPLETE`, or
   `OCCUPIED`; impossible tag/payload combinations are rejected by the contract.
   Occupied paths remain visible and are never deleted to make creation succeed.
+- `ProjectDeletionInspection` is the backend's non-mutating, lock-aware
+  authorization for recoverably moving exactly one validated `RESUMABLE`
+  project. `delete_project` repeats that preflight while holding the exclusive
+  project lock, reserves a collision-safe recovery container, atomically moves
+  the managed project, and only then removes its catalog entry. Catalog failure
+  triggers an atomic rollback. Project/source/recovery overlap, Dropbox-managed
+  paths, active writers, and non-project paths fail closed. The TUI only invokes
+  these two methods; it has no filesystem-deletion authority.
 - `ProjectSummary` and `ChangeImpactPlan` expose the persisted main file and
   its ordered, resolved input closure. A UI therefore renders the exact backend
   interpretation rather than reconstructing inclusion topology.
@@ -101,6 +109,12 @@ implicit meaning or mutable UI objects.
   UTF-8 Markdown. `load_report` classifies the managed project without migration
   or mutation, rejects paths that escape the project root, and normalizes load
   errors. The TUI renders this document and never reads project files itself.
+- `FailureDependencyReport` is an immutable, run-scoped explanation containing
+  ordered targets, frozen claim nodes and dependency edges, structured failure
+  incidents, exact evidence artifacts, canonical blocker paths, and a
+  deterministic primary incident. `load_failure_report` constructs it inside
+  the backend. The TUI must not query SQLite, infer graph reachability, choose a
+  blocker, or recalculate strongly connected components.
 - `ClarificationView` binds an exact persisted question to source path/span,
   quoted text, diagnostics, possible resolutions, and blocked claims.
 - `ResumeDecision` is derived from project state, open questions, source
@@ -108,6 +122,25 @@ implicit meaning or mutable UI objects.
 
 These contracts make stale UI actions fail closed and let a future web or
 desktop front end reuse the backend unchanged.
+
+## Detached verification-job boundary
+
+The Textual application is only a client. It performs short typed
+`start_verification`, cursor-based `observe_verification`, and
+`request_verification_cancel` calls; it never executes the long verifier or
+holds the project mutation lease. The backend atomically creates or attaches to
+one durable job and transfers a lifetime worker lease to a detached Python 3.13
+process. That worker holds the project lock while verification mutates Git,
+SQLite, reports, or certificates.
+
+Job identity, request fingerprint, settings, state, heartbeat, replayable
+progress events, and cancellation intent are persisted under `.repoprover/jobs`.
+The lifetime lease and one-active-job transaction prevent two workers from
+mutating the same project. Closing a TUI only stops its observer. A replacement
+client resumes from its last event sequence; cancellation remains cooperative
+and durable. A legacy session-lock-only run is exposed as coarse,
+non-cancellable active verification rather than as a project owned by another
+TUI.
 
 ## Main-file and input-closure contract
 
@@ -193,6 +226,21 @@ transactions. A project POSIX lock serializes mutation; read-only status remains
 available through safe WAL reads. Canonical exports use atomic rename. Bare-Git
 source commits and ordinary Lean Git history remain recoverable after an
 interruption.
+
+Failure evidence is append-only and tied to one run. A run freezes its target
+and selected-claim scope, end-of-run claim metadata/state, and dependency edges
+alongside structured incidents and artifact references. Consequently, viewing
+an old failed run never substitutes the current claim state or a later version
+of the proof graph. Insertion/completion timing from parallel workers is not a
+causal ordering contract; the primary blocker is selected by deterministic
+target/path/incident ordering.
+
+The backend emits a tree outline whenever the frozen dependency graph is
+acyclic. A shared prerequisite may occur under more than one parent, but a
+repeated expansion terminates in an explicit shared-reference leaf. If and only
+if a cycle exists, the backend condenses strongly connected components and
+returns a finite component graph. Every UI uses that reported mode rather than
+attempting recursive graph traversal itself.
 
 Safe cancellation is observed only at host-controlled boundaries. Worker
 candidates are either discarded before merge or carried through the merged

@@ -8,7 +8,11 @@ merely occupied.  Callers must never delete an occupied path to make it fit.
 from __future__ import annotations
 
 import json
+import os
+import sys
+import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -20,9 +24,20 @@ from ..incremental.latex import (
     discover_latex_sources,
     resolve_latex_closure,
 )
+from ..incremental.locking import (
+    ProjectLockedError,
+    acquire_worker_lease,
+    project_lock,
+    release_worker_lease,
+)
 from ..incremental.store import StateStore
 from .catalog import ProjectCatalog
-from .paths import default_project_path, validate_managed_project_path
+from .paths import (
+    ManagedProjectPathError,
+    default_project_path,
+    is_in_dropbox,
+    validate_managed_project_path,
+)
 
 CURRENT_PROJECT_SCHEMA_VERSION = 2
 _PROJECT_MARKERS = frozenset(
@@ -45,6 +60,12 @@ class ManagedProjectKind(StrEnum):
     NEEDS_MAIN_FILE = "NEEDS_MAIN_FILE"
     INCOMPLETE = "INCOMPLETE"
     OCCUPIED = "OCCUPIED"
+
+
+class ManagedDeletionKind(StrEnum):
+    READY = "READY"
+    BUSY = "BUSY"
+    REFUSED = "REFUSED"
 
 
 class ProjectConfigurationError(RuntimeError):
@@ -82,6 +103,28 @@ class ManagedProjectRecord:
     candidates: tuple[tuple[str, bool], ...] = ()
     suggested_main_file: str | None = None
     config: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class ManagedDeletionInspection:
+    project_path: Path
+    source_path: Path | None
+    kind: ManagedDeletionKind
+    issue: str | None = None
+
+
+@dataclass(frozen=True)
+class ManagedDeletionResult:
+    project_path: Path
+    source_path: Path
+    trash_path: Path
+    deleted_at: str
+
+
+class ManagedProjectDeletionError(ProjectConfigurationError):
+    def __init__(self, inspection: ManagedDeletionInspection) -> None:
+        self.inspection = inspection
+        super().__init__(inspection.issue or "Managed project deletion was refused")
 
 
 def _suggest_main_file(candidates: tuple[tuple[str, bool], ...]) -> str:
@@ -211,8 +254,326 @@ def load_or_migrate_project_config(project: Path) -> dict[str, Any]:
 class ProjectManager:
     """Reconciles the catalog and enforces one non-destructive preflight."""
 
-    def __init__(self, catalog: ProjectCatalog) -> None:
+    def __init__(
+        self, catalog: ProjectCatalog, *, trash_root: Path | None = None
+    ) -> None:
         self.catalog = catalog
+        self.trash_root = (
+            trash_root.expanduser().resolve(strict=False)
+            if trash_root is not None
+            else self._default_trash_root()
+        )
+
+    @staticmethod
+    def _default_trash_root() -> Path:
+        """Return the platform's recoverable project-deletion area.
+
+        macOS has a native per-user Trash directory. On other platforms we
+        deliberately use a Proof Assistant-owned safe-home Trash instead of
+        pretending that a bare move into freedesktop ``Trash/files`` is a
+        desktop-trash operation: a conforming freedesktop deletion also needs
+        a paired ``.trashinfo`` record. The safe-home area keeps the complete
+        project indefinitely at the exact path returned by ``delete_project``
+        and can therefore be restored with a plain atomic rename.
+        """
+
+        if sys.platform == "darwin":
+            return (Path.home() / ".Trash").resolve(strict=False)
+        # This is intentionally not freedesktop Trash/files. See the docstring:
+        # without Trash/info metadata that location would not be recoverable by
+        # a conforming desktop Trash implementation.
+        xdg_data = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share"))
+        return (
+            (xdg_data / "proof-assistant" / "recoverable-trash")
+            .expanduser()
+            .resolve(strict=False)
+        )
+
+    @staticmethod
+    def _existing_parent(path: Path) -> Path:
+        candidate = path
+        while not candidate.exists() and candidate != candidate.parent:
+            candidate = candidate.parent
+        return candidate
+
+    def _deletion_inspection(
+        self, project_path: Path, *, check_lock: bool
+    ) -> ManagedDeletionInspection:
+        unresolved = Path(project_path).expanduser().resolve(strict=False)
+        try:
+            project = validate_managed_project_path(unresolved)
+        except ManagedProjectPathError as exc:
+            return ManagedDeletionInspection(
+                unresolved, None, ManagedDeletionKind.REFUSED, str(exc)
+            )
+        record = self.inspect(project)
+        if record.kind != ManagedProjectKind.RESUMABLE or record.source_path is None:
+            return ManagedDeletionInspection(
+                project,
+                record.source_path,
+                ManagedDeletionKind.REFUSED,
+                "Only a validated, resumable Proof Assistant project can be "
+                "moved to recoverable deletion storage; current classification "
+                f"is {record.kind}",
+            )
+        source = record.source_path.resolve(strict=False)
+        if (
+            source == project
+            or source.is_relative_to(project)
+            or project.is_relative_to(source)
+        ):
+            return ManagedDeletionInspection(
+                project,
+                source,
+                ManagedDeletionKind.REFUSED,
+                "The manuscript source and managed project overlap; deletion "
+                "was refused so the authoritative source cannot be moved",
+            )
+        trash = self.trash_root
+        if is_in_dropbox(trash):
+            return ManagedDeletionInspection(
+                project,
+                source,
+                ManagedDeletionKind.REFUSED,
+                f"The recoverable deletion location is inside Dropbox: {trash}",
+            )
+        if (
+            trash == source
+            or trash.is_relative_to(source)
+            or source.is_relative_to(trash)
+        ):
+            return ManagedDeletionInspection(
+                project,
+                source,
+                ManagedDeletionKind.REFUSED,
+                "The manuscript source and recoverable deletion area overlap; "
+                "deletion was refused so the authoritative source remains "
+                "completely untouched",
+            )
+        if (
+            trash == project
+            or trash.is_relative_to(project)
+            or project.is_relative_to(trash)
+        ):
+            return ManagedDeletionInspection(
+                project,
+                source,
+                ManagedDeletionKind.REFUSED,
+                "The managed project and recoverable deletion location overlap",
+            )
+        trash_parent = self._existing_parent(trash)
+        if not trash_parent.is_dir():
+            return ManagedDeletionInspection(
+                project,
+                source,
+                ManagedDeletionKind.REFUSED,
+                f"Recovery-location parent is not a directory: {trash_parent}",
+            )
+        try:
+            same_device = project.stat().st_dev == trash_parent.stat().st_dev
+        except OSError as exc:
+            return ManagedDeletionInspection(
+                project,
+                source,
+                ManagedDeletionKind.REFUSED,
+                f"Could not inspect project/recovery-location filesystems: {exc}",
+            )
+        if not same_device:
+            return ManagedDeletionInspection(
+                project,
+                source,
+                ManagedDeletionKind.REFUSED,
+                "The project and recoverable deletion location are on different "
+                "filesystems; an atomic recoverable move is not possible",
+            )
+        if check_lock:
+            try:
+                worker_lease = acquire_worker_lease(project)
+            except ProjectLockedError as exc:
+                return ManagedDeletionInspection(
+                    project, source, ManagedDeletionKind.BUSY, str(exc)
+                )
+            except OSError as exc:
+                return ManagedDeletionInspection(
+                    project,
+                    source,
+                    ManagedDeletionKind.REFUSED,
+                    f"Could not inspect the project lock: {exc}",
+                )
+            try:
+                try:
+                    with project_lock(project, exclusive=True):
+                        pass
+                except ProjectLockedError as exc:
+                    return ManagedDeletionInspection(
+                        project, source, ManagedDeletionKind.BUSY, str(exc)
+                    )
+                except OSError as exc:
+                    return ManagedDeletionInspection(
+                        project,
+                        source,
+                        ManagedDeletionKind.REFUSED,
+                        f"Could not inspect the project lock: {exc}",
+                    )
+            finally:
+                release_worker_lease(worker_lease)
+        return ManagedDeletionInspection(project, source, ManagedDeletionKind.READY)
+
+    def inspect_deletion(self, project_path: Path) -> ManagedDeletionInspection:
+        """Classify deletion without trusting catalog identity or stale UI state."""
+
+        return self._deletion_inspection(project_path, check_lock=True)
+
+    def _reserve_trash_destination(self, project: Path) -> tuple[Path, Path]:
+        """Atomically reserve a unique recovery container and nonexisting child."""
+
+        timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        while True:
+            token = uuid.uuid4().hex[:12]
+            reservation = (
+                self.trash_root
+                / f"{project.name}-{timestamp}-{token}.proof-assistant-trash"
+            )
+            try:
+                reservation.mkdir()
+            except FileExistsError:
+                continue
+            return reservation, reservation / project.name
+
+    def delete_project(self, project_path: Path) -> ManagedDeletionResult:
+        """Atomically move one validated project to recovery storage, then forget it."""
+
+        initial = self.inspect_deletion(project_path)
+        if initial.kind != ManagedDeletionKind.READY:
+            raise ManagedProjectDeletionError(initial)
+        project = initial.project_path
+        try:
+            worker_lease = acquire_worker_lease(project)
+        except ProjectLockedError as exc:
+            raise ManagedProjectDeletionError(
+                ManagedDeletionInspection(
+                    project,
+                    initial.source_path,
+                    ManagedDeletionKind.BUSY,
+                    str(exc),
+                )
+            ) from exc
+        session_entered = False
+        try:
+            try:
+                lock_context = project_lock(project, exclusive=True)
+                lock_context.__enter__()
+                session_entered = True
+            except ProjectLockedError as exc:
+                raise ManagedProjectDeletionError(
+                    ManagedDeletionInspection(
+                        project,
+                        initial.source_path,
+                        ManagedDeletionKind.BUSY,
+                        str(exc),
+                    )
+                ) from exc
+            current = self._deletion_inspection(project, check_lock=False)
+            if current.kind != ManagedDeletionKind.READY or current.source_path is None:
+                raise ManagedProjectDeletionError(current)
+            try:
+                self.trash_root.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                raise ManagedProjectDeletionError(
+                    ManagedDeletionInspection(
+                        project,
+                        current.source_path,
+                        ManagedDeletionKind.REFUSED,
+                        f"Could not create the recoverable deletion directory: {exc}",
+                    )
+                ) from exc
+            # Recheck the actual directory after creation. This closes the gap
+            # between a preflight against its parent and the atomic rename.
+            if project.stat().st_dev != self.trash_root.stat().st_dev:
+                raise ManagedProjectDeletionError(
+                    ManagedDeletionInspection(
+                        project,
+                        current.source_path,
+                        ManagedDeletionKind.REFUSED,
+                        "The project and recoverable deletion location are on "
+                        "different filesystems",
+                    )
+                )
+            try:
+                reservation, destination = self._reserve_trash_destination(project)
+            except OSError as exc:
+                raise ManagedProjectDeletionError(
+                    ManagedDeletionInspection(
+                        project,
+                        current.source_path,
+                        ManagedDeletionKind.REFUSED,
+                        f"Could not reserve a collision-safe recovery path: {exc}",
+                    )
+                ) from exc
+            try:
+                os.rename(project, destination)
+            except OSError as exc:
+                try:
+                    reservation.rmdir()
+                except OSError:
+                    pass
+                raise ManagedProjectDeletionError(
+                    ManagedDeletionInspection(
+                        project,
+                        current.source_path,
+                        ManagedDeletionKind.REFUSED,
+                        f"Atomic move to recovery storage failed: {exc}",
+                    )
+                ) from exc
+            try:
+                self.catalog.forget_path(project)
+            except Exception as exc:
+                try:
+                    if project.exists():
+                        raise OSError(
+                            "original project path became occupied before rollback"
+                        )
+                    os.rename(destination, project)
+                except OSError as rollback_exc:
+                    raise ManagedProjectDeletionError(
+                        ManagedDeletionInspection(
+                            project,
+                            current.source_path,
+                            ManagedDeletionKind.REFUSED,
+                            "The project reached recovery storage but catalog "
+                            "reconciliation and automatic rollback both failed. "
+                            f"Recover it manually from {destination}: catalog error={exc}; "
+                            f"rollback={rollback_exc}",
+                        )
+                    ) from rollback_exc
+                # The rename above is the authoritative rollback. Finder,
+                # indexers, or filesystem metadata may make removal of the now
+                # empty reservation fail; that does not make the restored
+                # project disappear and must not produce a false manual-
+                # recovery instruction naming a path that no longer exists.
+                try:
+                    reservation.rmdir()
+                except OSError:
+                    pass
+                raise ManagedProjectDeletionError(
+                    ManagedDeletionInspection(
+                        project,
+                        current.source_path,
+                        ManagedDeletionKind.REFUSED,
+                        "Catalog reconciliation failed; the project was restored "
+                        f"to {project}: {exc}",
+                    )
+                ) from exc
+            return ManagedDeletionResult(
+                project,
+                current.source_path,
+                destination,
+                datetime.now(UTC).isoformat(),
+            )
+        finally:
+            if session_entered:
+                lock_context.__exit__(None, None, None)
+            release_worker_lease(worker_lease)
 
     def resolve_destination(self, name: str, project_path: Path | None = None) -> Path:
         return validate_managed_project_path(

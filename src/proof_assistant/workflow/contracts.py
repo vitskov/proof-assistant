@@ -8,12 +8,12 @@ it never reaches into SQLite, Git snapshots, or Lean orchestration directly.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field, fields, is_dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Protocol
 
-CONTRACT_SCHEMA_VERSION = 3
+CONTRACT_SCHEMA_VERSION = 7
 
 
 class WorkflowState(StrEnum):
@@ -72,17 +72,265 @@ class ProjectAvailability(StrEnum):
     OCCUPIED = "OCCUPIED"
 
 
+class ProjectDeletionAvailability(StrEnum):
+    READY = "READY"
+    BUSY = "BUSY"
+    REFUSED = "REFUSED"
+
+
+class VerificationJobState(StrEnum):
+    """Durable lifecycle of one detached verification worker."""
+
+    STARTING = "STARTING"
+    RUNNING = "RUNNING"
+    CANCEL_REQUESTED = "CANCEL_REQUESTED"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+    INTERRUPTED = "INTERRUPTED"
+
+    @property
+    def terminal(self) -> bool:
+        return self in {
+            VerificationJobState.SUCCEEDED,
+            VerificationJobState.FAILED,
+            VerificationJobState.INTERRUPTED,
+        }
+
+
+class FailureScope(StrEnum):
+    """The authority boundary at which a verification failure occurred."""
+
+    RUN = "RUN"
+    BATCH = "BATCH"
+    CLAIM = "CLAIM"
+    COMPONENT = "COMPONENT"
+
+
+class FailureKind(StrEnum):
+    """Stable, UI-neutral failure classes independent of diagnostic wording."""
+
+    CLAIM_TECHNICAL = "CLAIM_TECHNICAL"
+    BATCH_TECHNICAL = "BATCH_TECHNICAL"
+    PROVIDER = "PROVIDER"
+    INFRASTRUCTURE = "INFRASTRUCTURE"
+    SOURCE_INTEGRITY = "SOURCE_INTEGRITY"
+    DEPENDENCY_CYCLE = "DEPENDENCY_CYCLE"
+    UNKNOWN = "UNKNOWN"
+
+
+class SettingsScopeKind(StrEnum):
+    """Persistence scope; PROJECT is reserved for a future overlay."""
+
+    MACHINE = "MACHINE"
+    PROJECT = "PROJECT"
+
+
+class BenchmarkKind(StrEnum):
+    CODEX = "codex-concurrency"
+    LEAN = "lean-concurrency"
+    BUILD = "build-concurrency"
+
+
 @dataclass(frozen=True)
 class VerificationSettings:
     model: str = "gpt-5.6-sol"
     effort: str = "high"
-    jobs: int = 1
+    jobs: int = 2
     batch_size: int = 8
     lean_pool_size: int = 1
     turn_timeout: float = 86400.0
     setup_timeout: float = 1800.0
     request_timeout: float = 120.0
     gc_timeout: float = 900.0
+
+
+@dataclass(frozen=True)
+class ConcurrencySettingsView:
+    """Editable machine policy; ``None`` means automatic for numeric fields."""
+
+    mode: str = "adaptive"
+    resource_profile: str = "auto"
+    codex_plan: str = "unknown"
+    budget_policy: str = "balanced"
+    ai_initial: int | None = None
+    ai_hard_max: int | None = None
+    ai_minimum: int = 1
+    ai_increase_after_successes: int | None = None
+    lean_pool: int | None = None
+    lean_max: int | None = None
+    lean_minimum: int = 1
+    lean_memory_calibration: bool = True
+    fallback_memory_per_repl_gib: float = 3.0
+    max_builds: int | None = None
+    build_hard_max: int = 8
+    agents_per_target_initial: int = 1
+    agents_per_target_max: int = 4
+    duplicate_agent_escalation: bool = True
+    dependency_priority: bool = True
+    adaptive_controller: bool = True
+    hardware_telemetry: bool = True
+
+
+@dataclass(frozen=True)
+class EffectiveConcurrencyView:
+    ai_limit: int
+    ai_ceiling: int
+    lean_pool: int
+    lean_max: int
+    build_limit: int
+    build_ceiling: int
+    agents_per_target_current: int
+    agents_per_target_max: int
+
+
+@dataclass(frozen=True)
+class ResourceTelemetryView:
+    os_name: str
+    architecture: str
+    resource_profile: str
+    physical_cpus: int
+    logical_cpus: int
+    cpu_percent: float
+    total_memory_gib: float
+    available_memory_gib: float
+    memory_percent_available: float
+    swap_used_gib: float
+    swap_delta_gib: float
+    memory_pressure: str
+    load_average: tuple[float, float, float] | None
+    io_wait_percent: float | None
+    ai_active: int
+    ai_queued: int
+    ai_throttles: int
+    ai_backoff_until: str | None
+    lean_active: int
+    lean_queued: int
+    lean_p95_rss_gib: float | None
+    build_active: int
+    build_queued: int
+    sampled_at: str
+
+
+@dataclass(frozen=True)
+class LegacySettingsView:
+    """Old coupled knobs retained visibly as machine compatibility settings."""
+
+    proof_jobs: int = 2
+    batch_size: int = 8
+    per_worker_lean_pool: int = 1
+    proof_jobs_status: str = "compatibility minimum logical-worker fan-out; machine AI admission is authoritative"
+    batch_size_status: str = "active scheduling granularity; next run"
+    per_worker_lean_pool_status: str = "superseded by global Lean admission"
+    process_local_ai_status: str = "removed; superseded by machine AI admission"
+    raw_build_status: str = "removed; superseded by machine build admission"
+
+
+@dataclass(frozen=True)
+class SettingResolution:
+    field: str
+    configured: str
+    effective: str
+    source: str
+
+
+@dataclass(frozen=True)
+class MachineSettingsSnapshot:
+    scope: SettingsScopeKind
+    machine_id: str
+    config_path: Path
+    cache_path: Path
+    revision: int
+    configured: ConcurrencySettingsView
+    effective: EffectiveConcurrencyView
+    telemetry: ResourceTelemetryView
+    legacy: LegacySettingsView
+    resolution: tuple[SettingResolution, ...]
+    reasons: tuple[str, ...]
+    updated_at: str
+
+
+@dataclass(frozen=True)
+class MachineSettingsUpdateRequest:
+    expected_revision: int
+    configured: ConcurrencySettingsView
+    legacy: LegacySettingsView
+    scope: SettingsScopeKind = SettingsScopeKind.MACHINE
+
+
+@dataclass(frozen=True)
+class SettingsWarning:
+    warning_id: str
+    message: str
+    recommended_value: str
+
+
+@dataclass(frozen=True)
+class SettingsChangePreview:
+    preview_token: str
+    requested: MachineSettingsUpdateRequest
+    effective_if_applied: EffectiveConcurrencyView
+    warnings: tuple[SettingsWarning, ...]
+    live_fields: tuple[str, ...]
+    next_run_fields: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class BenchmarkResult:
+    kind: BenchmarkKind
+    recommendation: int
+    tested_values: tuple[int, ...]
+    detail: str
+    used_codex_traffic: bool
+    calibration_path: Path
+
+
+@dataclass(frozen=True)
+class CalibrationResetResult:
+    """Result of deleting one exact project/environment calibration profile."""
+
+    project_path: Path
+    profile_id: str
+    calibration_path: Path
+    removed: bool
+
+
+@dataclass(frozen=True)
+class AdaptiveHistoryResetResult:
+    """Effective controller state after clearing machine adaptive history.
+
+    Existing leases are deliberately preserved.  In adaptive mode the three
+    admission limits return to their current policy-derived starting values;
+    fixed/manual limits remain unchanged.
+    """
+
+    reset_at: str
+    ai_limit: int
+    lean_pool: int
+    build_limit: int
+    in_flight_work_preserved: bool = True
+
+
+@dataclass(frozen=True)
+class VerificationJob:
+    """Immutable backend-owned identity and lifecycle facts for one job."""
+
+    job_id: str
+    project_path: Path
+    state: VerificationJobState
+    request_fingerprint: str
+    plan_id: str | None
+    settings: VerificationSettings | None
+    created_at: str
+    started_at: str | None
+    updated_at: str
+    completed_at: str | None
+    heartbeat_at: str | None
+    pid: int | None
+    error: str | None
+    cancellable: bool
+    attached_legacy: bool
+    worker_log_path: Path | None = None
+    launch_command: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -183,6 +431,32 @@ class ProjectDestinationInspection:
 
 
 @dataclass(frozen=True)
+class ProjectDeletionInspection:
+    """Backend-owned preflight for recoverably deleting one managed project."""
+
+    project_path: Path
+    source_path: Path | None
+    availability: ProjectDeletionAvailability
+    issue: str | None = None
+    source_in_dropbox: bool = False
+
+    @property
+    def can_delete(self) -> bool:
+        return self.availability == ProjectDeletionAvailability.READY
+
+
+@dataclass(frozen=True)
+class ProjectDeletionResult:
+    """Exact paths resulting from a successful recoverable project move."""
+
+    project_path: Path
+    source_path: Path
+    trash_path: Path
+    deleted_at: str
+    recoverable: bool = True
+
+
+@dataclass(frozen=True)
 class FileChange:
     path: str
     kind: FileChangeKind
@@ -265,6 +539,127 @@ class FindingSummary:
     dependency_discrepancies: tuple[Mapping[str, Any], ...] = ()
     report_path: Path | None = None
     project_path: Path | None = None
+    failure_report: FailureDependencyReport | None = None
+
+
+@dataclass(frozen=True)
+class FailureArtifact:
+    """A durable artifact supporting one exact failure reason."""
+
+    path: Path
+    label: str
+    sha256: str | None = None
+    command: tuple[str, ...] = ()
+    exit_code: int | None = None
+    timed_out: bool = False
+
+
+@dataclass(frozen=True)
+class FailureIncident:
+    """One immutable failure observation made during a verification run."""
+
+    incident_id: int
+    run_id: int
+    scope: FailureScope
+    kind: FailureKind
+    phase: str
+    category: str
+    message: str
+    detail: str | None
+    provenance: str
+    claim_ids: tuple[str, ...]
+    batch_index: int | None
+    retryable: bool
+    artifacts: tuple[FailureArtifact, ...] = ()
+
+
+@dataclass(frozen=True)
+class FailureGraphNode:
+    """A claim in the immutable dependency graph recorded for one run."""
+
+    claim_id: str
+    kind: str
+    source_file: str
+    statement_start: int
+    statement_end: int
+    state: str
+    incident_ids: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True)
+class FailureGraphEdge:
+    """A grouped dependent-to-dependency edge in one run's graph."""
+
+    dependent: str
+    dependency: str
+    kinds: tuple[str, ...]
+    provenances: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class FailureOutlineNode:
+    """Tree-first rendering node for an acyclic dependency graph.
+
+    A repeated DAG node is emitted as a leaf with ``shared_reference=True``.
+    This preserves sharing without recursively duplicating its descendants.
+    """
+
+    # A claim ID, or ``incident:<id>`` for a run/batch-scoped synthetic root.
+    claim_id: str
+    state: str
+    blocker: bool
+    incident_ids: tuple[int, ...]
+    shared_reference: bool
+    children: tuple[FailureOutlineNode, ...] = ()
+
+
+@dataclass(frozen=True)
+class FailureComponent:
+    """A strongly connected component used only for cyclic graph fallback."""
+
+    component_id: str
+    members: tuple[str, ...]
+    cyclic: bool
+    blocker: bool
+    incident_ids: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True)
+class FailureComponentEdge:
+    dependent_component: str
+    dependency_component: str
+
+
+@dataclass(frozen=True)
+class FailurePath:
+    """A canonical target-to-blocker path using dependent-first order."""
+
+    target: str
+    blocker: str
+    claims: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class FailureDependencyReport:
+    """Immutable failure explanation and dependency visualization for one run."""
+
+    run_id: int
+    snapshot: str | None
+    outcome: str
+    detail: str
+    targets: tuple[str, ...]
+    selected: tuple[str, ...]
+    nodes: tuple[FailureGraphNode, ...]
+    edges: tuple[FailureGraphEdge, ...]
+    incidents: tuple[FailureIncident, ...]
+    global_incident_ids: tuple[int, ...]
+    primary_incident_id: int | None
+    first_blocker: FailurePath | None
+    paths: tuple[FailurePath, ...]
+    has_cycles: bool
+    outline: tuple[FailureOutlineNode, ...]
+    components: tuple[FailureComponent, ...]
+    component_edges: tuple[FailureComponentEdge, ...]
 
 
 @dataclass(frozen=True)
@@ -284,6 +679,19 @@ class ProgressEvent:
     total: int | None = None
     claim_id: str | None = None
     details: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class VerificationJobObservation:
+    """Cursor-based replay and current state for a detached verification job."""
+
+    job: VerificationJob
+    events: tuple[ProgressEvent, ...]
+    after_sequence: int
+    next_sequence: int
+    started: bool = False
+    attached: bool = True
+    poll_after_seconds: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -329,15 +737,53 @@ class CancellationToken(Protocol):
 class WorkflowServiceContract(Protocol):
     def default_task_text(self) -> str: ...
 
+    def default_verification_settings(self) -> VerificationSettings: ...
+
+    def get_machine_settings(
+        self, *, project: Path | None = None
+    ) -> MachineSettingsSnapshot: ...
+
+    def preview_machine_settings(
+        self, request: MachineSettingsUpdateRequest
+    ) -> SettingsChangePreview: ...
+
+    def apply_machine_settings(
+        self,
+        preview_token: str,
+        accepted_warning_ids: tuple[str, ...] = (),
+    ) -> MachineSettingsSnapshot: ...
+
+    def reset_machine_settings(
+        self, expected_revision: int
+    ) -> MachineSettingsSnapshot: ...
+
+    def run_concurrency_benchmark(
+        self,
+        kind: BenchmarkKind,
+        *,
+        project: Path | None = None,
+        allow_codex_traffic: bool = False,
+    ) -> BenchmarkResult: ...
+
+    def reset_project_lean_calibration(
+        self, project: Path
+    ) -> CalibrationResetResult: ...
+
+    def reset_adaptive_history(self) -> AdaptiveHistoryResetResult: ...
+
     def inspect_source(self, source: Path) -> SourceInspection: ...
 
     def inspect_project_destination(
         self, name: str, project_path: Path | None = None
     ) -> ProjectDestinationInspection: ...
 
+    def inspect_project_deletion(self, project: Path) -> ProjectDeletionInspection: ...
+
     def list_projects(self) -> Sequence[ProjectCatalogEntry]: ...
 
     def create_project(self, request: NewProjectRequest) -> WorkflowSnapshot: ...
+
+    def delete_project(self, project: Path) -> ProjectDeletionResult: ...
 
     def select_project_main_file(
         self, project: Path, main_file: str
@@ -345,34 +791,110 @@ class WorkflowServiceContract(Protocol):
 
     def load_report(self, project: Path) -> ReportDocument: ...
 
+    def load_failure_report(
+        self, project: Path, run_id: int | None = None
+    ) -> FailureDependencyReport | None: ...
+
     def resume_project(self, project: Path) -> WorkflowSnapshot: ...
 
     def plan_changes(self, project: Path) -> ChangeImpactPlan | None: ...
 
-    def confirm_and_verify(
+    def start_verification(
         self,
         project: Path,
         plan_id: str | None,
         settings: VerificationSettings,
-        *,
-        progress: ProgressSink | None = None,
-        cancellation: CancellationToken | None = None,
-    ) -> WorkflowSnapshot: ...
+    ) -> VerificationJobObservation: ...
+
+    def observe_verification(
+        self, project: Path, after_sequence: int = 0
+    ) -> VerificationJobObservation | None: ...
+
+    def request_verification_cancel(
+        self, project: Path, job_id: str
+    ) -> VerificationJobObservation: ...
 
 
 def contract_dict(value: object) -> dict[str, Any]:
     """Return a JSON-friendly representation for persisted UI state/events."""
-    payload = asdict(value)
 
     def normalize(item: Any) -> Any:
+        if isinstance(item, FailureDependencyReport):
+            payload = {
+                field_info.name: normalize(getattr(item, field_info.name))
+                for field_info in fields(item)
+                if field_info.name != "outline"
+            }
+            # A recursive dataclass tree is ergonomic for a live TUI, but an
+            # arbitrarily deep manuscript must not overflow Python or a JSON
+            # encoder. Persist outline occurrences as a flat parent-indexed list.
+            occurrences: list[dict[str, Any]] = []
+            stack: list[tuple[FailureOutlineNode, int | None, int]] = [
+                (root, None, 0) for root in reversed(item.outline)
+            ]
+            while stack:
+                node, parent, depth = stack.pop()
+                index = len(occurrences)
+                occurrences.append(
+                    {
+                        "index": index,
+                        "parent": parent,
+                        "depth": depth,
+                        "claim_id": node.claim_id,
+                        "state": node.state,
+                        "blocker": node.blocker,
+                        "incident_ids": list(node.incident_ids),
+                        "shared_reference": node.shared_reference,
+                    }
+                )
+                stack.extend(
+                    (child, index, depth + 1) for child in reversed(node.children)
+                )
+            payload["outline"] = occurrences
+            payload["outline_format"] = "flat_parent_indexed"
+            return payload
+        if isinstance(item, FailureOutlineNode):
+            outline = contract_dict(
+                FailureDependencyReport(
+                    run_id=0,
+                    snapshot=None,
+                    outcome="",
+                    detail="",
+                    targets=(),
+                    selected=(),
+                    nodes=(),
+                    edges=(),
+                    incidents=(),
+                    global_incident_ids=(),
+                    primary_incident_id=None,
+                    first_blocker=None,
+                    paths=(),
+                    has_cycles=False,
+                    outline=(item,),
+                    components=(),
+                    component_edges=(),
+                )
+            )
+            return {
+                "outline": outline["outline"],
+                "outline_format": outline["outline_format"],
+            }
         if isinstance(item, Path):
             return str(item)
         if isinstance(item, StrEnum):
             return str(item)
+        if is_dataclass(item) and not isinstance(item, type):
+            return {
+                field_info.name: normalize(getattr(item, field_info.name))
+                for field_info in fields(item)
+            }
         if isinstance(item, dict):
             return {str(key): normalize(val) for key, val in item.items()}
         if isinstance(item, (list, tuple)):
             return [normalize(entry) for entry in item]
         return item
 
-    return normalize(payload)
+    payload = normalize(value)
+    if not isinstance(payload, dict):
+        raise TypeError("contract_dict requires a dataclass or mapping contract")
+    return payload

@@ -575,6 +575,30 @@ class IncrementalSession:
                     )
                     if not selected:
                         selected = set(targets)
+                    store.record_run_scope(
+                        run_id,
+                        targets=tuple(targets),
+                        selected=tuple(selected),
+                    )
+                    store.replace_run_dependency_edges(run_id, edges)
+                    for cycle in cycles:
+                        if not set(cycle).issubset(selected):
+                            continue
+                        store.add_failure_incident(
+                            run_id=run_id,
+                            scope="COMPONENT",
+                            failure_kind="DEPENDENCY_CYCLE",
+                            phase="INDEXING",
+                            category="dependency_cycle",
+                            message="Dependency cycle: " + " -> ".join(cycle),
+                            detail=(
+                                "The dependency scheduler cannot establish a "
+                                "dependency-first proof frontier for this component"
+                            ),
+                            provenance="session.explicit_reference_graph",
+                            claim_ids=cycle,
+                            retryable=False,
+                        )
                     notify(
                         "IMPACT_ANALYSIS",
                         "Computed direct changes, descendants, and proof targets",
@@ -668,6 +692,17 @@ class IncrementalSession:
                         input_files=input_files,
                     )
                 except Exception as exc:
+                    store.add_failure_incident(
+                        run_id=run_id,
+                        scope="RUN",
+                        failure_kind="INFRASTRUCTURE",
+                        phase="PREPARING",
+                        category=type(exc).__name__,
+                        message=str(exc) or type(exc).__name__,
+                        detail=f"{type(exc).__name__}: {exc}",
+                        provenance="session.prepare_pass",
+                        retryable=True,
+                    )
                     store.finish_run(
                         run_id,
                         status="FAILED",
@@ -830,8 +865,8 @@ class IncrementalSession:
             lock_context.__enter__()
         except ProjectLockedError:
             # SQLite WAL readers and atomic report/export renames are safe while
-            # a writer owns the project lock. Monitoring must remain available
-            # during a day-long Codex turn.
+            # a backend worker holds the mutation lock. Monitoring must remain
+            # available during a day-long Codex turn.
             mutation_in_progress = True
             lock_context = None
         try:

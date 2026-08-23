@@ -148,6 +148,26 @@ class ProjectCatalog:
         )
         return record
 
+    def forget_path(self, project: Path) -> None:
+        """Remove exactly one moved project path from the disposable index."""
+
+        resolved = project.expanduser().resolve(strict=False)
+        payload = self._load()
+        retained: list[Any] = []
+        for item in payload["projects"]:
+            if not isinstance(item, dict) or not isinstance(
+                item.get("project_path"), str
+            ):
+                retained.append(item)
+                continue
+            candidate = Path(item["project_path"]).expanduser().resolve(strict=False)
+            if candidate != resolved:
+                retained.append(item)
+        atomic_write_json(
+            self.path,
+            {"schema_version": CATALOG_SCHEMA_VERSION, "projects": retained},
+        )
+
     def _write(self, records: object) -> None:
         values = sorted(
             list(records),

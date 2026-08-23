@@ -9,6 +9,20 @@ from typing import Any
 
 from .models import ClaimState, LeanDeclaration, ManuscriptEdge, Snapshot, SourceObject
 
+DATABASE_SCHEMA_VERSION = 3
+FAILURE_SCOPES = frozenset({"RUN", "BATCH", "CLAIM", "COMPONENT"})
+FAILURE_KINDS = frozenset(
+    {
+        "CLAIM_TECHNICAL",
+        "BATCH_TECHNICAL",
+        "PROVIDER",
+        "INFRASTRUCTURE",
+        "SOURCE_INTEGRITY",
+        "DEPENDENCY_CYCLE",
+        "UNKNOWN",
+    }
+)
+
 SCHEMA_SQL = """
 PRAGMA foreign_keys = ON;
 
@@ -193,6 +207,96 @@ CREATE UNIQUE INDEX IF NOT EXISTS one_open_question_per_claim
 ON clarifications(claim_id) WHERE status = 'OPEN';
 """
 
+MIGRATION_2_SQL = """
+CREATE TABLE IF NOT EXISTS run_scope (
+    run_id INTEGER NOT NULL,
+    claim_id TEXT NOT NULL,
+    role TEXT NOT NULL CHECK(role IN ('TARGET', 'SELECTED')),
+    ordinal INTEGER NOT NULL,
+    PRIMARY KEY (run_id, role, claim_id),
+    UNIQUE (run_id, role, ordinal)
+);
+
+CREATE TABLE IF NOT EXISTS run_dependency_edges (
+    run_id INTEGER NOT NULL,
+    src TEXT NOT NULL,
+    dst TEXT NOT NULL,
+    edge_kind TEXT NOT NULL,
+    provenance TEXT NOT NULL,
+    approved INTEGER NOT NULL,
+    PRIMARY KEY (run_id, src, dst, edge_kind)
+);
+
+CREATE TABLE IF NOT EXISTS run_claim_nodes (
+    run_id INTEGER NOT NULL,
+    claim_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    source_file TEXT NOT NULL,
+    statement_start INTEGER NOT NULL,
+    statement_end INTEGER NOT NULL,
+    state TEXT NOT NULL,
+    PRIMARY KEY (run_id, claim_id)
+);
+
+CREATE TABLE IF NOT EXISTS failure_incidents (
+    failure_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL,
+    scope TEXT NOT NULL,
+    failure_kind TEXT NOT NULL,
+    phase TEXT NOT NULL,
+    category TEXT NOT NULL,
+    message TEXT NOT NULL,
+    detail TEXT,
+    provenance TEXT NOT NULL,
+    batch_index INTEGER,
+    retryable INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS failure_incident_claims (
+    failure_id INTEGER NOT NULL REFERENCES failure_incidents(failure_id)
+        ON DELETE CASCADE,
+    claim_id TEXT NOT NULL,
+    ordinal INTEGER NOT NULL,
+    PRIMARY KEY (failure_id, claim_id),
+    UNIQUE (failure_id, ordinal)
+);
+
+CREATE TABLE IF NOT EXISTS failure_artifacts (
+    failure_id INTEGER NOT NULL REFERENCES failure_incidents(failure_id)
+        ON DELETE CASCADE,
+    ordinal INTEGER NOT NULL,
+    path TEXT NOT NULL,
+    label TEXT NOT NULL,
+    sha256 TEXT,
+    command_json TEXT NOT NULL,
+    exit_code INTEGER,
+    timed_out INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (failure_id, ordinal)
+);
+
+CREATE INDEX IF NOT EXISTS run_scope_run_role
+ON run_scope(run_id, role, ordinal);
+CREATE INDEX IF NOT EXISTS run_dependency_edges_run
+ON run_dependency_edges(run_id, src, dst, edge_kind);
+CREATE INDEX IF NOT EXISTS run_claim_nodes_run
+ON run_claim_nodes(run_id, claim_id);
+CREATE INDEX IF NOT EXISTS failure_incidents_run
+ON failure_incidents(run_id, failure_id);
+CREATE INDEX IF NOT EXISTS failure_incident_claims_claim
+ON failure_incident_claims(claim_id, failure_id);
+"""
+
+MIGRATION_3_SQL = """
+CREATE TABLE IF NOT EXISTS run_concurrency (
+    run_id INTEGER PRIMARY KEY,
+    configured_json TEXT NOT NULL,
+    initial_effective_json TEXT NOT NULL,
+    final_effective_json TEXT,
+    telemetry_json TEXT NOT NULL,
+    FOREIGN KEY(run_id) REFERENCES runs(run_id)
+);
+"""
+
 
 class StateStore:
     """SQLite authority for deterministic incremental verification state."""
@@ -206,6 +310,29 @@ class StateStore:
         self.connection.execute("PRAGMA synchronous = FULL")
         self.connection.executescript(SCHEMA_SQL)
         self.set_metadata_default("schema_version", "1")
+        self._migrate_schema()
+
+    def _migrate_schema(self) -> None:
+        raw_version = self.get_metadata("schema_version") or "1"
+        try:
+            version = int(raw_version)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"Invalid verification database schema version: {raw_version!r}"
+            ) from exc
+        if version > DATABASE_SCHEMA_VERSION:
+            raise RuntimeError(
+                "Verification database schema is newer than this package "
+                f"({version} > {DATABASE_SCHEMA_VERSION})"
+            )
+        # Every statement is idempotent, so an interrupted migration is safely
+        # completed on the next open before the version is advanced. Running
+        # current migration bodies for an existing database also permit
+        # additive tables introduced by pre-release builds.
+        self.connection.executescript(MIGRATION_2_SQL)
+        self.connection.executescript(MIGRATION_3_SQL)
+        if version < DATABASE_SCHEMA_VERSION:
+            self.set_metadata("schema_version", str(DATABASE_SCHEMA_VERSION))
 
     def close(self) -> None:
         self.connection.close()
@@ -439,6 +566,364 @@ class StateStore:
         return self.connection.execute(
             "SELECT * FROM runs ORDER BY run_id DESC LIMIT 1"
         ).fetchone()
+
+    def run_row(self, run_id: int) -> sqlite3.Row | None:
+        return self.connection.execute(
+            "SELECT * FROM runs WHERE run_id = ?", (run_id,)
+        ).fetchone()
+
+    def record_run_concurrency(
+        self,
+        run_id: int,
+        *,
+        configured: Any,
+        initial_effective: Any,
+        telemetry: Any,
+    ) -> None:
+        """Persist the configured and initially effective resource policy.
+
+        Concurrency is operational provenance, not proof authority.  It is kept
+        beside the run so an adaptive execution remains explainable without
+        changing certificate semantics.
+        """
+
+        self.connection.execute(
+            """
+            INSERT INTO run_concurrency(
+                run_id, configured_json, initial_effective_json, telemetry_json
+            ) VALUES (?, ?, ?, ?)
+            ON CONFLICT(run_id) DO UPDATE SET
+                configured_json = excluded.configured_json,
+                initial_effective_json = excluded.initial_effective_json,
+                telemetry_json = excluded.telemetry_json
+            """,
+            (
+                run_id,
+                self._json(configured),
+                self._json(initial_effective),
+                self._json(telemetry),
+            ),
+        )
+
+    def finish_run_concurrency(
+        self,
+        run_id: int,
+        *,
+        final_effective: Any,
+        telemetry: Any,
+    ) -> None:
+        self.connection.execute(
+            """
+            UPDATE run_concurrency
+            SET final_effective_json = ?, telemetry_json = ?
+            WHERE run_id = ?
+            """,
+            (self._json(final_effective), self._json(telemetry), run_id),
+        )
+
+    def run_concurrency(self, run_id: int) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT * FROM run_concurrency WHERE run_id = ?", (run_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "configured": json.loads(str(row["configured_json"])),
+            "initial_effective": json.loads(str(row["initial_effective_json"])),
+            "final_effective": (
+                json.loads(str(row["final_effective_json"]))
+                if row["final_effective_json"] is not None
+                else None
+            ),
+            "telemetry": json.loads(str(row["telemetry_json"])),
+        }
+
+    def latest_failure_run(self) -> sqlite3.Row | None:
+        return self.connection.execute(
+            """
+            SELECT runs.* FROM runs
+            WHERE EXISTS (
+                SELECT 1 FROM failure_incidents
+                WHERE failure_incidents.run_id = runs.run_id
+            )
+               OR EXISTS (
+                SELECT 1 FROM run_claims
+                WHERE run_claims.run_id = runs.run_id
+                  AND run_claims.state_after = ?
+            )
+               OR runs.outcome IN (
+                'provider_failure',
+                'lean_infrastructure_failure',
+                'setup_failure'
+            )
+            ORDER BY runs.run_id DESC LIMIT 1
+            """,
+            (str(ClaimState.FAILED_TECHNICAL),),
+        ).fetchone()
+
+    def record_run_scope(
+        self,
+        run_id: int,
+        *,
+        targets: Sequence[str],
+        selected: Sequence[str],
+    ) -> None:
+        """Persist canonical target and selected-claim order for one run."""
+
+        with self.transaction() as connection:
+            connection.execute("DELETE FROM run_scope WHERE run_id = ?", (run_id,))
+            for role, values in (
+                ("TARGET", tuple(sorted(set(targets)))),
+                ("SELECTED", tuple(sorted(set(selected)))),
+            ):
+                connection.executemany(
+                    """
+                    INSERT INTO run_scope(run_id, claim_id, role, ordinal)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    [
+                        (run_id, claim_id, role, ordinal)
+                        for ordinal, claim_id in enumerate(values)
+                    ],
+                )
+
+    def run_scope_rows(self, run_id: int, role: str) -> list[sqlite3.Row]:
+        if role not in {"TARGET", "SELECTED"}:
+            raise ValueError(f"Invalid run-scope role: {role}")
+        return list(
+            self.connection.execute(
+                """
+                SELECT * FROM run_scope WHERE run_id = ? AND role = ?
+                ORDER BY ordinal, claim_id
+                """,
+                (run_id, role),
+            )
+        )
+
+    def replace_run_dependency_edges(
+        self, run_id: int, edges: Sequence[ManuscriptEdge]
+    ) -> None:
+        """Record the immutable final manuscript graph used by one run."""
+
+        with self.transaction() as connection:
+            connection.execute(
+                "DELETE FROM run_dependency_edges WHERE run_id = ?", (run_id,)
+            )
+            connection.executemany(
+                """
+                INSERT INTO run_dependency_edges(
+                    run_id, src, dst, edge_kind, provenance, approved
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        run_id,
+                        edge.src,
+                        edge.dst,
+                        edge.kind,
+                        edge.provenance,
+                        int(edge.approved),
+                    )
+                    for edge in sorted(
+                        edges, key=lambda item: (item.src, item.dst, item.kind)
+                    )
+                ],
+            )
+
+    def run_dependency_edge_rows(self, run_id: int) -> list[sqlite3.Row]:
+        return list(
+            self.connection.execute(
+                """
+                SELECT * FROM run_dependency_edges WHERE run_id = ?
+                ORDER BY src, dst, edge_kind
+                """,
+                (run_id,),
+            )
+        )
+
+    def record_run_claim_nodes(self, run_id: int) -> None:
+        """Freeze selected claim metadata and state at this run's report boundary."""
+
+        with self.transaction() as connection:
+            connection.execute(
+                "DELETE FROM run_claim_nodes WHERE run_id = ?", (run_id,)
+            )
+            connection.execute(
+                """
+                WITH included(claim_id) AS (
+                    SELECT claim_id FROM run_scope WHERE run_id = ?
+                    UNION
+                    SELECT failure_incident_claims.claim_id
+                    FROM failure_incident_claims
+                    INNER JOIN failure_incidents
+                        ON failure_incidents.failure_id =
+                           failure_incident_claims.failure_id
+                    WHERE failure_incidents.run_id = ?
+                    UNION
+                    SELECT src FROM run_dependency_edges WHERE run_id = ?
+                    UNION
+                    SELECT dst FROM run_dependency_edges WHERE run_id = ?
+                )
+                INSERT INTO run_claim_nodes(
+                    run_id, claim_id, kind, source_file,
+                    statement_start, statement_end, state
+                )
+                SELECT ?, claims.claim_id, versions.kind, versions.source_file,
+                       versions.statement_start, versions.statement_end,
+                       claims.status
+                FROM included
+                INNER JOIN claims ON claims.claim_id = included.claim_id
+                INNER JOIN runs ON runs.run_id = ?
+                INNER JOIN claim_versions AS versions
+                    ON versions.claim_id = claims.claim_id
+                   AND versions.snapshot_commit = runs.snapshot_commit
+                WHERE claims.retired = 0
+                ORDER BY claims.claim_id
+                """,
+                (run_id, run_id, run_id, run_id, run_id, run_id),
+            )
+
+    def run_claim_node_rows(self, run_id: int) -> list[sqlite3.Row]:
+        return list(
+            self.connection.execute(
+                """
+                SELECT * FROM run_claim_nodes WHERE run_id = ? ORDER BY claim_id
+                """,
+                (run_id,),
+            )
+        )
+
+    def add_failure_incident(
+        self,
+        *,
+        run_id: int,
+        scope: str,
+        failure_kind: str,
+        phase: str,
+        category: str,
+        message: str,
+        provenance: str,
+        claim_ids: Sequence[str] = (),
+        detail: str | None = None,
+        batch_index: int | None = None,
+        retryable: bool = False,
+        artifacts: Sequence[dict[str, Any]] = (),
+    ) -> int:
+        """Append one exact, structured failure observation and its evidence."""
+
+        if scope not in FAILURE_SCOPES:
+            raise ValueError(f"Invalid failure scope: {scope}")
+        if failure_kind not in FAILURE_KINDS:
+            raise ValueError(f"Invalid failure kind: {failure_kind}")
+        if not phase or not category or not message or not provenance:
+            raise ValueError(
+                "Failure phase, category, message, and provenance must be non-empty"
+            )
+        unknown_claims = sorted(
+            claim_id for claim_id in set(claim_ids) if self.claim_row(claim_id) is None
+        )
+        if unknown_claims:
+            raise ValueError(
+                "Failure incident identifies unknown claims: "
+                + ", ".join(unknown_claims)
+            )
+        selected = {
+            str(row["claim_id"]) for row in self.run_scope_rows(run_id, "SELECTED")
+        }
+        outside_scope = sorted(set(claim_ids) - selected) if selected else []
+        if outside_scope:
+            raise ValueError(
+                "Failure incident identifies claims outside this run's selected scope: "
+                + ", ".join(outside_scope)
+            )
+        with self.transaction() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO failure_incidents(
+                    run_id, scope, failure_kind, phase, category, message,
+                    detail, provenance, batch_index, retryable
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    scope,
+                    failure_kind,
+                    phase,
+                    category,
+                    message,
+                    detail,
+                    provenance,
+                    batch_index,
+                    int(retryable),
+                ),
+            )
+            failure_id = int(cursor.lastrowid)
+            unique_claims = tuple(sorted(set(claim_ids)))
+            connection.executemany(
+                """
+                INSERT INTO failure_incident_claims(failure_id, claim_id, ordinal)
+                VALUES (?, ?, ?)
+                """,
+                [
+                    (failure_id, claim_id, ordinal)
+                    for ordinal, claim_id in enumerate(unique_claims)
+                ],
+            )
+            connection.executemany(
+                """
+                INSERT INTO failure_artifacts(
+                    failure_id, ordinal, path, label, sha256, command_json,
+                    exit_code, timed_out
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        failure_id,
+                        ordinal,
+                        str(artifact["path"]),
+                        str(artifact.get("label") or "Failure artifact"),
+                        artifact.get("sha256"),
+                        self._json(tuple(artifact.get("command") or ())),
+                        artifact.get("exit_code"),
+                        int(bool(artifact.get("timed_out", False))),
+                    )
+                    for ordinal, artifact in enumerate(artifacts)
+                ],
+            )
+        return failure_id
+
+    def failure_incident_rows(self, run_id: int) -> list[sqlite3.Row]:
+        return list(
+            self.connection.execute(
+                """
+                SELECT * FROM failure_incidents WHERE run_id = ?
+                ORDER BY failure_id
+                """,
+                (run_id,),
+            )
+        )
+
+    def failure_claim_rows(self, failure_id: int) -> list[sqlite3.Row]:
+        return list(
+            self.connection.execute(
+                """
+                SELECT * FROM failure_incident_claims WHERE failure_id = ?
+                ORDER BY ordinal, claim_id
+                """,
+                (failure_id,),
+            )
+        )
+
+    def failure_artifact_rows(self, failure_id: int) -> list[sqlite3.Row]:
+        return list(
+            self.connection.execute(
+                """
+                SELECT * FROM failure_artifacts WHERE failure_id = ?
+                ORDER BY ordinal
+                """,
+                (failure_id,),
+            )
+        )
 
     def record_snapshot(
         self,

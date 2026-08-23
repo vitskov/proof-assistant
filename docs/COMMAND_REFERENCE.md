@@ -41,7 +41,17 @@ Important options:
 
 - `--model MODEL` and `--effort EFFORT` select an exact pair advertised by
   `models`;
-- `--jobs 1|2` limits independent proof workers;
+- `--concurrency auto|adaptive|fixed` selects adaptive automatic admission or
+  fixed reproducible limits;
+- `--ai-concurrency N`, `--lean-pool N`, and `--max-builds N` set independent
+  exact one-run resource limits;
+- `--agents-per-target N` sets the duplicate-attempt ceiling;
+- `--codex-plan plus|pro-5x|pro-20x|unknown` selects a Proof Assistant policy
+  heuristic, not an official OpenAI service limit;
+- `--resource-profile auto|interactive|server` controls the hardware reserve
+  policy;
+- `--jobs N` controls logical proof-batch worker fan-out (legacy default: `2`),
+  while machine AI admission remains authoritative;
 - `--batch-size N` bounds claims assigned to one turn;
 - `--turn-timeout SECONDS` applies to each Codex turn (`86400` is one day);
 - `--setup-timeout SECONDS` bounds Lean/cache preparation; and
@@ -83,6 +93,30 @@ proof-assistant smoke --model MODEL --effort EFFORT
 - `doctor` checks Codex app-server initialization and model listing.
 - `models` prints exact model IDs and supported reasoning effort.
 - `smoke` runs one real client-defined dynamic-tool round trip.
+
+The `smoke` and `repoprover-prove` commands accept the same concurrency
+overrides as `manuscript verify`.
+
+## Concurrency calibration
+
+```bash
+proof-assistant benchmark codex-concurrency
+proof-assistant benchmark lean-concurrency [--project PROJECT]
+proof-assistant benchmark build-concurrency [--project PROJECT]
+```
+
+The default Codex action sends no Codex traffic. Add
+`--allow-codex-traffic` only to explicitly authorize the small harmless probe;
+the result always reports whether traffic was used. A Lean action with
+`--project` measures disposable representative project REPLs under an exclusive
+Lean admission lease and persists their RSS summary; without a project it
+records the conservative uncalibrated policy. The build action records its
+machine recommendation without starting concurrent builds. None modifies proof
+state, and recommendations are never silently applied.
+
+Machine settings, the exact precedence rules, environment variables, policy
+formulas, and run-provenance fields are documented in [Concurrency and resource
+management](CONCURRENCY.md).
 
 ## Managed cache
 

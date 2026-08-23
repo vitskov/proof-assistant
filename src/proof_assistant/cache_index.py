@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import sqlite3
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -42,7 +44,7 @@ class CacheIndex:
     def __init__(self, path: Path) -> None:
         self.path = path
 
-    def _connect(self) -> sqlite3.Connection:
+    def _open_connection(self) -> sqlite3.Connection:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         connection: sqlite3.Connection | None = None
         try:
@@ -66,6 +68,21 @@ class CacheIndex:
             raise CacheIndexError(
                 f"Could not open cache index {self.path}: {exc}"
             ) from exc
+        except BaseException:
+            if connection is not None:
+                connection.close()
+            raise
+
+    @contextmanager
+    def _connection(self) -> Iterator[sqlite3.Connection]:
+        """Yield a transaction and close its SQLite descriptor on every path."""
+
+        connection = self._open_connection()
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     @staticmethod
     def _initialize(connection: sqlite3.Connection) -> None:
@@ -143,7 +160,7 @@ class CacheIndex:
 
     def entries(self) -> tuple[IndexedCacheEntry, ...]:
         try:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 rows = connection.execute(
                     """
                     SELECT path, kind, allocated_bytes, last_used, signature,
@@ -169,7 +186,7 @@ class CacheIndex:
 
     def upsert_entry(self, entry: IndexedCacheEntry) -> None:
         try:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 connection.execute(
                     """
                     INSERT INTO entries(
@@ -199,7 +216,7 @@ class CacheIndex:
 
     def remove_entry(self, path: Path) -> None:
         try:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 connection.execute("DELETE FROM entries WHERE path = ?", (str(path),))
         except sqlite3.Error as exc:
             raise CacheIndexError(f"Could not remove cache entry: {exc}") from exc
@@ -207,7 +224,7 @@ class CacheIndex:
     def remove_entries_not_in(self, paths: set[Path]) -> None:
         wanted = {str(path) for path in paths}
         try:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 rows = connection.execute("SELECT path FROM entries").fetchall()
                 stale = [(row["path"],) for row in rows if row["path"] not in wanted]
                 connection.executemany("DELETE FROM entries WHERE path = ?", stale)
@@ -216,7 +233,7 @@ class CacheIndex:
 
     def mark_deleting(self, path: Path) -> None:
         try:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 connection.execute(
                     "UPDATE entries SET state = 'deleting' WHERE path = ?",
                     (str(path),),
@@ -236,7 +253,7 @@ class CacheIndex:
     ) -> None:
         """Record that an entry may grow while retaining its known byte count."""
         try:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 connection.execute(
                     """
                     INSERT INTO entries(
@@ -257,7 +274,7 @@ class CacheIndex:
 
     def touch_entry(self, path: Path) -> None:
         try:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 connection.execute(
                     "UPDATE entries SET last_used = ? WHERE path = ?",
                     (time.time(), str(path)),
@@ -267,7 +284,7 @@ class CacheIndex:
 
     def reservations(self) -> tuple[IndexedReservation, ...]:
         try:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 rows = connection.execute(
                     """
                     SELECT identifier, reserved_bytes, lock_name, created_at
@@ -293,7 +310,7 @@ class CacheIndex:
         lock_name: str,
     ) -> None:
         try:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 connection.execute(
                     """
                     INSERT INTO reservations(
@@ -307,7 +324,7 @@ class CacheIndex:
 
     def remove_reservation(self, identifier: str) -> None:
         try:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 connection.execute(
                     "DELETE FROM reservations WHERE identifier = ?", (identifier,)
                 )

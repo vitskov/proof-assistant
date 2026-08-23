@@ -6,7 +6,10 @@ from pathlib import Path
 
 import pytest
 
-from proof_assistant.incremental.agent import IncrementalAgentContext
+from proof_assistant.incremental.agent import (
+    IncrementalAgentContext,
+    write_batch_context,
+)
 from proof_assistant.incremental.locking import project_lock
 from proof_assistant.incremental.models import ClaimState
 from proof_assistant.incremental.session import IncrementalSession, utc_now
@@ -51,6 +54,28 @@ def finish_prepared(session: IncrementalSession, run_id: int) -> None:
             completed_at=utc_now(),
             detail="test finalized",
         )
+
+
+def test_batch_context_records_effective_resource_admission_contract(tmp_path):
+    path = write_batch_context(
+        tmp_path,
+        run_id=7,
+        snapshot="snapshot-hash",
+        claims=("claim:one",),
+        pause_on_ambiguity=True,
+        counterexample_search=False,
+        concurrency={
+            "configured": {"mode": "adaptive"},
+            "effective": {"ai_limit": 4, "lean_pool": 2, "build_limit": 1},
+        },
+        admission_timeout=1800.0,
+    )
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["resource_admission"] == {
+        "timeout_seconds": 1800.0,
+        "configured": {"mode": "adaptive"},
+        "effective": {"ai_limit": 4, "lean_pool": 2, "build_limit": 1},
+    }
 
 
 def test_state_store_recovers_runs_and_rolls_back_transactions(tmp_path):

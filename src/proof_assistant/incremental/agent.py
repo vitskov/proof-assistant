@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..concurrency import ConcurrencyRuntimeSpec
 from .diagnostics import (
     CLARIFICATION_CATEGORIES,
     CLARIFICATION_DIAGNOSTICS,
@@ -197,6 +198,8 @@ class IncrementalAgentContext:
     require_correspondence_review: bool = False
     pause_on_ambiguity: bool = True
     counterexample_search: bool = True
+    concurrency: ConcurrencyRuntimeSpec = ConcurrencyRuntimeSpec()
+    admission_timeout: float = 3600.0
 
     @property
     def database(self) -> Path:
@@ -492,6 +495,18 @@ class IncrementalAgentContext:
                 category=category,
                 message=message,
             )
+            if state == ClaimState.FAILED_TECHNICAL:
+                store.add_failure_incident(
+                    run_id=self.run_id,
+                    scope="CLAIM",
+                    failure_kind="CLAIM_TECHNICAL",
+                    phase="PROOF_BATCH",
+                    category=category,
+                    message=message,
+                    provenance="agent.claim_report_unresolved",
+                    claim_ids=(claim_id,),
+                    retryable=True,
+                )
         return f"Recorded {category}; no falsity conclusion was made"
 
 
@@ -625,6 +640,8 @@ def write_batch_context(
     claims: Sequence[str],
     pause_on_ambiguity: bool,
     counterexample_search: bool,
+    concurrency: Mapping[str, Any],
+    admission_timeout: float,
 ) -> Path:
     path = workspace / ".repoprover-agent" / "CURRENT_BATCH.json"
     atomic_write_json(
@@ -637,6 +654,11 @@ def write_batch_context(
             "policy": {
                 "pause_on_ambiguity": pause_on_ambiguity,
                 "counterexample_search": counterexample_search,
+            },
+            "resource_admission": {
+                "timeout_seconds": admission_timeout,
+                "configured": concurrency["configured"],
+                "effective": concurrency["effective"],
             },
         },
     )
