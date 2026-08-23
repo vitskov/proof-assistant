@@ -242,22 +242,36 @@ class AppServerClient:
         self.proc = None
         if proc is None:
             return
-        try:
-            if proc.stdin:
-                proc.stdin.close()
-        except Exception:
-            pass
-        if proc.poll() is None:
-            proc.terminate()
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=5)
         reader = self._reader
         self._reader = None
-        if reader is not None and reader is not threading.current_thread():
-            reader.join(timeout=5)
+        try:
+            try:
+                if proc.stdin:
+                    proc.stdin.close()
+            except Exception:
+                pass
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=5)
+        finally:
+            # ``Popen.wait`` reaps the child but does not close file objects
+            # supplied as PIPE.  Join the reader after process exit, then close
+            # every pipe even when termination or waiting raised.  Long-lived
+            # coordinators may create many clients, so relying on cyclic GC can
+            # exhaust macOS's relatively small per-process descriptor limit.
+            if reader is not None and reader is not threading.current_thread():
+                reader.join(timeout=5)
+            for stream in (proc.stdin, proc.stdout, proc.stderr):
+                if stream is None:
+                    continue
+                try:
+                    stream.close()
+                except Exception:
+                    pass
 
     def register_request_handler(
         self, method: str, handler: Callable[[dict[str, Any]], Any]

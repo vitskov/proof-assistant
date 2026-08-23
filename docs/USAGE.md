@@ -255,8 +255,8 @@ backend-owned operation, not a recursive deletion performed by the TUI:
 1. the backend reclassifies the exact path and tests its project lock;
 2. the confirmation dialog shows selectable managed-project and external-source
    paths;
-3. you must type the exact project name and activate the explicit deletion
-   button; and
+3. **Cancel** is focused by default, while deletion requires activating the
+   separate red **Delete managed project (recoverable)** button; and
 4. the backend tests the lock again, atomically moves only the managed project
    into a collision-safe recovery area, then refreshes the catalog.
 

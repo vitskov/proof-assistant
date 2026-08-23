@@ -55,10 +55,11 @@ The project list is reconciled by the backend. Resumable projects have a
 **Resume** action and a guarded **Delete project** action; older projects
 without an unambiguous manuscript root have a **Select main file** action;
 incomplete projects and occupied directories remain visible with their
-diagnostic instead of being silently omitted. Deletion requires the exact
-project name, is refused while a backend verification is active, and moves only
-the managed project to a recoverable location. The authoritative manuscript
-source is never moved or changed.
+diagnostic instead of being silently omitted. Deletion uses a cancel-first
+confirmation dialog with a separate destructive button, is refused while a
+backend verification is active, and moves only the managed project to a
+recoverable location. The authoritative manuscript source is never moved or
+changed.
 
 Select an existing folder containing the LaTeX source, then choose **Continue:
 inspect source**. Proof Assistant establishes one explicit manuscript root

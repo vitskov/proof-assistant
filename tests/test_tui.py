@@ -1499,7 +1499,9 @@ async def test_occupied_and_incomplete_catalog_entries_remain_visible() -> None:
 
 
 @async_test
-async def test_project_deletion_is_cancel_first_typed_and_recoverable() -> None:
+async def test_project_deletion_is_cancel_first_button_confirmed_and_recoverable() -> (
+    None
+):
     service = FakeWorkflowService()
     app = ProofAssistantApp(service)
 
@@ -1538,20 +1540,10 @@ async def test_project_deletion_is_cancel_first_typed_and_recoverable() -> None:
             pilot,
             lambda: isinstance(app.screen, ProjectDeletionConfirmationScreen),
         )
-        confirmation = app.screen.query_one("#delete-project-confirmation", Input)
         destructive = app.screen.query_one("#delete-project-confirm", Button)
-        confirmation.value = "Paper"
-        await pilot.pause()
-        assert destructive.disabled
-        confirmation.focus()
-        await pilot.press("enter")
-        assert isinstance(app.screen, ProjectDeletionConfirmationScreen)
-        assert service.deleted_projects == []
-
-        confirmation.value = service.project.name
-        await pilot.pause()
         assert not destructive.disabled
-        assert app.focused is confirmation
+        assert destructive.label.plain == "Delete managed project (recoverable)"
+        assert not app.screen.query("#delete-project-confirmation").nodes
         destructive.press()
         await wait_for(
             pilot, lambda: isinstance(app.screen, ProjectDeletionOutcomeScreen)
@@ -1609,7 +1601,7 @@ async def test_project_deletion_refusal_and_failure_are_copyable() -> None:
         issue = app.screen.query_one("#delete-project-issue", TextArea)
         issue.select_all()
         assert "backend verification is currently active" in issue.selected_text
-        assert app.screen.query_one("#delete-project-confirmation", Input).disabled
+        assert not app.screen.query("#delete-project-confirmation").nodes
         assert app.screen.query_one("#delete-project-confirm", Button).disabled
         await pilot.press("escape")
         await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
@@ -1629,10 +1621,6 @@ async def test_project_deletion_refusal_and_failure_are_copyable() -> None:
             pilot,
             lambda: isinstance(app.screen, ProjectDeletionConfirmationScreen),
         )
-        app.screen.query_one(
-            "#delete-project-confirmation", Input
-        ).value = service.project.name
-        await pilot.pause()
         app.screen.query_one("#delete-project-confirm", Button).press()
         await wait_for(
             pilot, lambda: isinstance(app.screen, ProjectDeletionOutcomeScreen)

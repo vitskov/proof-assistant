@@ -53,6 +53,7 @@ for line in sys.stdin:
     fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
 
     client = AppServerClient(str(fake))
+    process = None
     client.register_request_handler(
         "item/tool/call",
         lambda params: {
@@ -66,11 +67,15 @@ for line in sys.stdin:
         assert client.request("initialize", {}) == {"ok": True}
         client.notify("initialized", {})
         result = client.request("ping", {})
+        process = client.proc
     finally:
         client.close()
 
     assert result["toolResult"]["success"] is True
     assert result["toolResult"]["contentItems"][0]["text"] == "hello"
+    assert process is not None
+    assert process.stdin is not None and process.stdin.closed
+    assert process.stdout is not None and process.stdout.closed
 
 
 def test_missing_codex_executable_has_structured_error(tmp_path):

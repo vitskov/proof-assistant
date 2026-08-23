@@ -337,7 +337,7 @@ class WelcomeScreen(NoticeScreen):
 
 
 class ProjectDeletionConfirmationScreen(ModalScreen[bool]):
-    """Cancel-first, typed confirmation for backend-owned recoverable deletion."""
+    """Cancel-first button confirmation for backend-owned recoverable deletion."""
 
     BINDINGS = [("escape", "cancel", "Cancel")]
 
@@ -386,29 +386,21 @@ class ProjectDeletionConfirmationScreen(ModalScreen[bool]):
                     id="delete-project-issue",
                     max_lines=5,
                 )
-            yield Label(
-                f"To enable deletion, type the exact project name: {self.project.name}"
-            )
-            yield Input(
-                placeholder=self.project.name,
-                id="delete-project-confirmation",
-                disabled=not self.inspection.can_delete,
-            )
             with Horizontal(classes="toolbar"):
                 yield Button("Cancel", id="delete-project-cancel", variant="primary")
                 yield Button(
-                    "Confirm recoverable deletion",
+                    "Delete managed project (recoverable)",
                     id="delete-project-confirm",
                     variant="error",
-                    disabled=True,
+                    disabled=not self.inspection.can_delete,
                 )
             yield CopyableText(
                 (
                     "Deletion is refused by the backend preflight. Cancel and resolve "
                     "the issue above."
                     if not self.inspection.can_delete
-                    else "Cancel is focused by default. Pressing Enter now cancels; "
-                    "deletion requires the exact name and an explicit button action."
+                    else "Cancel is focused by default. Review the paths above, then "
+                    "activate Delete managed project (recoverable) to continue."
                 ),
                 id="delete-project-status",
                 classes="muted" if self.inspection.can_delete else "error",
@@ -426,28 +418,11 @@ class ProjectDeletionConfirmationScreen(ModalScreen[bool]):
     def action_cancel(self) -> None:
         self.dismiss(False)
 
-    def on_input_changed(self, event: Input.Changed) -> None:
-        if event.input.id != "delete-project-confirmation":
-            return
-        exact = event.value == self.project.name
-        self.query_one("#delete-project-confirm", Button).disabled = not (
-            self.inspection.can_delete and exact
-        )
-        status = self.query_one("#delete-project-status", TextArea)
-        if exact and self.inspection.can_delete:
-            status.text = (
-                "Exact name matched. Deletion still requires activating the explicit "
-                "Confirm recoverable deletion button."
-            )
-        elif self.inspection.can_delete:
-            status.text = "The exact project name has not been entered."
-
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "delete-project-cancel":
             self.action_cancel()
         elif event.button.id == "delete-project-confirm":
-            typed = self.query_one("#delete-project-confirmation", Input).value
-            if self.inspection.can_delete and typed == self.project.name:
+            if self.inspection.can_delete:
                 self.dismiss(True)
 
 

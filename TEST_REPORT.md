@@ -10,8 +10,8 @@ calibration, and a provider-backed two-claim manuscript verification.
 
 | Gate | Result |
 |---|---|
-| complete automated suite | **377 passed** in 117.15 seconds |
-| supported installer | **passed**; compiler compile/run and 377 tests |
+| complete automated suite | **377 passed** in 117.54 seconds |
+| supported installer | **passed**; compiler compile/run and 377 tests in 118.69 seconds |
 | Ruff lint and format | **passed** |
 | Python `compileall` | **passed** |
 | `git diff --check` | **passed** |
@@ -57,7 +57,12 @@ The automated tests cover:
 - configured/effective run provenance, peaks, queues, pressure events, and
   calibration identity; and
 - reliable closure of every SQLite connection in admission, job, and cache
-  stores, including early returns and failures.
+  stores, including early returns and failures;
+- explicit closure of Codex app-server standard-I/O pipes when a client exits,
+  preventing long-lived coordinators from accumulating file descriptors; and
+- cancel-first, button-confirmed recoverable project deletion, including busy
+  refusal, delete-time backend revalidation, copyable paths, and recovery
+  destination reporting without a typed-name hurdle.
 
 The concurrency package is in `src/proof_assistant/concurrency/`; the UI-neutral
 settings and project contracts are in `workflow/`; Textual remains a replaceable
@@ -149,7 +154,7 @@ PROOF_ASSISTANT_PYTHON=3.13
 
 It reused `/Users/vui1/.local/bin/uv`, installed the editable package and test
 dependencies, compiled and executed a native C program with `/usr/bin/clang`,
-initialized the cache, and ran all 377 tests in 117.84 seconds. The compiler
+initialized the cache, and ran all 377 tests in 118.69 seconds. The compiler
 check is mandatory in the installer and records `LEAN_CC` when Lean's bundled
 compiler is unusable.
 
