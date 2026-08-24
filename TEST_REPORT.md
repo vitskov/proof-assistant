@@ -10,8 +10,8 @@ calibration, and a provider-backed two-claim manuscript verification.
 
 | Gate | Result |
 |---|---|
-| complete automated suite | **377 passed** in 117.54 seconds |
-| supported installer | **passed**; compiler compile/run and 377 tests in 118.69 seconds |
+| complete automated suite | **393 passed** in 137.18 seconds |
+| supported installer | **passed**; compiler compile/run and 393 tests in 123.92 seconds |
 | Ruff lint and format | **passed** |
 | Python `compileall` | **passed** |
 | `git diff --check` | **passed** |
@@ -20,6 +20,51 @@ calibration, and a provider-backed two-claim manuscript verification.
 | real manuscript verification | **verified**, 2/2 current certificates |
 | RepoProver checkout | exact commit, clean and unchanged |
 | upstream RepoProver PR | **NOT CREATED** |
+
+## Fresh-project and state-isolation regressions
+
+This revision addresses three failures found on the real `lapl` project and in
+release testing:
+
+- Lean-version auto-tuning no longer invokes `lake env` before cache setup.
+  The direct `lean --version` probe cannot materialize a fresh project's
+  `.lake/packages` directory.
+- Each isolated build now has an atomic ownership marker bound to the exact
+  project and build target. Proof Assistant-owned disposable packages may be
+  replaced by the matching shared depot, while imported, unmarked, mismatched,
+  and explicitly unowned package trees are refused.
+- Detached workers receive the launcher's exact catalog and machine-settings
+  paths. A direct/legacy hidden worker uses a project-local catalog and cannot
+  populate the real interactive project list. A sentinel credential test also
+  proves that secrets are not serialized in durable worker commands.
+
+The existing `/Users/vui1/proof-assistant/lapl` build was repaired without
+modifying its authoritative source at `/Users/vui1/manuscripts/laplacians`.
+Thirty-one managed-snapshot source files were compared against both the
+external source and the recoverable deleted-project copy; every corresponding
+file was byte-identical. The production catalog was backed up, purged of stale
+test records, and retained only the valid `lapl` project. Its SHA-256 remained
+`245bd42a1f9887b579966df9bee5c932a61bbfa25a49e52d0328e45aaa53373f`
+across the final complete suite.
+
+A new disposable project was then initialized from the two-claim test
+manuscript and prepared with the installed command. `cache prepare` reused
+dependency depot `deps-e50bd489673215a5b89a0dc2` (7.06 GiB), created an
+ownership-marked isolated root build of only 23 MiB, and completed `lake build`
+successfully. The disposable project, isolated build, lease, and index row were
+removed after inspection; no Codex traffic was used.
+
+The new terminal folder chooser is covered at an 80×24 viewport. Tests exercise
+keyboard traversal, compact Up/Home/Open/Select/Cancel controls, copyable paths,
+unreadable directories, cancellation, explicit-selection-only persistence,
+sorted symlink-deduplicated listings, valid/stale/malformed preferences, safe
+XDG handling, and the home fallback. The preference path is injected in backend
+tests, and the real machine preference file was neither created nor modified.
+The final full-suite run also exposed an existing Textual mount-order race in
+the recoverable-deletion result screen. Focus assignment is now deferred until
+refresh, readiness assertions wait for the complete control set, and both
+deletion scenarios passed ten consecutive stress repetitions before the final
+complete suite.
 
 ## Adaptive-concurrency acceptance
 
@@ -154,7 +199,7 @@ PROOF_ASSISTANT_PYTHON=3.13
 
 It reused `/Users/vui1/.local/bin/uv`, installed the editable package and test
 dependencies, compiled and executed a native C program with `/usr/bin/clang`,
-initialized the cache, and ran all 377 tests in 118.69 seconds. The compiler
+initialized the cache, and ran all 393 tests in 123.92 seconds. The compiler
 check is mandatory in the installer and records `LEAN_CC` when Lean's bundled
 compiler is unusable.
 
@@ -165,7 +210,8 @@ for:
 - distribution/import version 0.1.0;
 - `proof-assistant` and deprecated 0.1 `repoprover-codex` entry points;
 - packaged `proof_assistant.lean/DependencyExtractor.lean`;
-- public `ProofAssistantWorkflow` and `ConcurrencyResourcesScreen` imports;
+- packaged machine-local preference module plus public `ProofAssistantWorkflow`
+  and `ConcurrencyResourcesScreen` imports;
 - fresh automatic concurrency provenance;
 - Textual 1.0.0 compatibility; and
 - native compiler compile-and-execute behavior.
@@ -208,11 +254,11 @@ commit above and remained untouched by Proof Assistant publication work.
 At the final cache check:
 
 ```text
-managed cache:          9.64 GiB
+managed cache:          9.88 GiB
 cache limit:           16.00 GiB
-filesystem free:      119.61 GiB
+filesystem free:      118.41 GiB
 dependency depots:      7.06 GiB
-isolated builds:        2.19 GiB
+isolated builds:        2.43 GiB
 active reservations:    0.00 GiB
 ```
 

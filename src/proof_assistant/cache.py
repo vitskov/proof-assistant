@@ -41,6 +41,8 @@ DEFAULT_GC_TIMEOUT_SECONDS = 900.0
 _GIB = 1024**3
 _CONFIG_SCHEMA = 2
 _DEPOT_SCHEMA = 2
+_BUILD_OWNERSHIP_SCHEMA = 1
+_BUILD_OWNERSHIP_MARKER = ".proof-assistant-build.json"
 _REMOTE_FILESYSTEM_MARKERS = (
     "remote:",
     "nfs",
@@ -562,14 +564,90 @@ def initialize_cache(
     return config, check
 
 
-def project_cache_target(project: str | Path, layout: CacheLayout) -> Path:
-    root = Path(project).expanduser().resolve()
+def _project_cache_name(root: Path) -> str:
     digest = hashlib.sha256(str(root).encode("utf-8")).hexdigest()[:12]
     safe_name = "".join(
         character if character.isalnum() or character in "-_" else "-"
         for character in root.name
     ).strip("-")
-    return layout.lake_builds / f"{safe_name or 'project'}-{digest}"
+    return f"{safe_name or 'project'}-{digest}"
+
+
+def project_cache_target(project: str | Path, layout: CacheLayout) -> Path:
+    root = Path(project).expanduser().resolve()
+    return layout.lake_builds / _project_cache_name(root)
+
+
+def _managed_incremental_project(project: Path) -> bool:
+    """Recognize a project created at a new destination by Proof Assistant."""
+
+    config_path = project / ".repoprover" / "config.json"
+    try:
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    expected = hashlib.sha256(str(project).encode("utf-8")).hexdigest()[:16]
+    return bool(
+        isinstance(payload, dict)
+        and isinstance(payload.get("schema_version"), int)
+        and payload.get("project_id") == expected
+    )
+
+
+def _build_ownership_path(target: Path) -> Path:
+    return target / _BUILD_OWNERSHIP_MARKER
+
+
+def _write_build_ownership(
+    project: Path,
+    target: Path,
+    *,
+    packages_owned: bool,
+    origin: str,
+) -> None:
+    """Atomically record whether package data is disposable managed cache."""
+
+    if target.name != _project_cache_name(project):
+        raise CacheLocationError(
+            f"Managed build target does not match its project identity: {target}"
+        )
+    _write_json_atomic(
+        _build_ownership_path(target),
+        {
+            "schema_version": _BUILD_OWNERSHIP_SCHEMA,
+            "project_sha256": hashlib.sha256(str(project).encode("utf-8")).hexdigest(),
+            "target_name": target.name,
+            "packages_owned": packages_owned,
+            "origin": origin,
+            "recorded_at": datetime.now(UTC).isoformat(),
+        },
+    )
+
+
+def _managed_build_packages_owned(project: Path, target: Path) -> bool:
+    """Validate the ownership contract for one exact project/build pair."""
+
+    marker = _build_ownership_path(target)
+    try:
+        payload = json.loads(marker.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return False
+    except (OSError, json.JSONDecodeError) as exc:
+        raise CacheLocationError(
+            f"Invalid managed build marker at {marker}: {exc}"
+        ) from exc
+    expected_digest = hashlib.sha256(str(project).encode("utf-8")).hexdigest()
+    if not (
+        isinstance(payload, dict)
+        and payload.get("schema_version") == _BUILD_OWNERSHIP_SCHEMA
+        and payload.get("project_sha256") == expected_digest
+        and payload.get("target_name") == target.name
+        and isinstance(payload.get("packages_owned"), bool)
+    ):
+        raise CacheLocationError(
+            f"Managed build marker does not match project ownership: {marker}"
+        )
+    return bool(payload["packages_owned"])
 
 
 def ensure_project_outside_dropbox(project: str | Path, layout: CacheLayout) -> Path:
@@ -676,6 +754,24 @@ def attach_project_cache(project: str | Path, layout: CacheLayout) -> Path:
                     f"{resolved}"
                 )
             resolved.mkdir(parents=True, exist_ok=True)
+            marker = _build_ownership_path(resolved)
+            if marker.exists():
+                _managed_build_packages_owned(root, resolved)
+            else:
+                # Pre-marker Proof Assistant projects were initialized into a
+                # new empty destination, so their .lake contents are cache
+                # products. Generic attached Lake projects remain fail-closed.
+                legacy_managed = _managed_incremental_project(root)
+                _write_build_ownership(
+                    root,
+                    resolved,
+                    packages_owned=legacy_managed,
+                    origin=(
+                        "legacy-proof-assistant-project"
+                        if legacy_managed
+                        else "legacy-unknown"
+                    ),
+                )
             return resolved
         if lake.exists() and not lake.is_dir():
             raise CacheLocationError(f"Expected a .lake directory, found: {lake}")
@@ -686,16 +782,58 @@ def attach_project_cache(project: str | Path, layout: CacheLayout) -> Path:
             )
 
         moved = False
+        created_target = False
+        marker_written = False
+        ownership_origin = "proof-assistant-created"
+        write_ownership = True
+        packages_owned = not lake.is_dir()
         if lake.is_dir():
+            packages_owned = _managed_incremental_project(root)
             shutil.move(str(lake), str(target))
             moved = True
+            ownership_origin = (
+                "proof-assistant-project-pre-attach"
+                if packages_owned
+                else "project-imported"
+            )
+        elif target.exists():
+            if not target.is_dir():
+                raise CacheLocationError(
+                    f"Expected a managed build directory, found: {target}"
+                )
+            marker = _build_ownership_path(target)
+            if marker.exists():
+                packages_owned = _managed_build_packages_owned(root, target)
+                write_ownership = False
+            elif any(target.iterdir()):
+                # Data without a provenance marker may be user-owned. Record
+                # that uncertainty permanently; never escalate ownership merely
+                # because the project-side symlink disappeared.
+                packages_owned = False
+                ownership_origin = "existing-unproven"
         else:
             target.mkdir(parents=True, exist_ok=True)
+            created_target = True
         try:
             lake.symlink_to(target, target_is_directory=True)
+            if write_ownership:
+                _write_build_ownership(
+                    root,
+                    target,
+                    packages_owned=packages_owned,
+                    origin=ownership_origin,
+                )
+                marker_written = True
         except Exception:
+            if lake.is_symlink():
+                lake.unlink()
             if moved and target.exists() and not lake.exists():
+                _build_ownership_path(target).unlink(missing_ok=True)
                 shutil.move(str(target), str(lake))
+            elif target.exists() and created_target:
+                _remove_cache_path(target, layout)
+            elif marker_written:
+                _build_ownership_path(target).unlink(missing_ok=True)
             raise
         return ensure_project_cache_managed(root, layout)
     finally:
@@ -1645,6 +1783,34 @@ class DependencyDepotClaim:
     def project_manifest(self) -> Path:
         return self.project / "lake-manifest.json"
 
+    def _replace_managed_packages(self, packages: Path) -> None:
+        """Replace only package data proven to be managed disposable cache."""
+
+        build_target = project_cache_target(self.project, self.layout)
+        if (self.project / ".lake").resolve() != build_target.resolve():
+            raise CacheLocationError(
+                f"Project packages are outside their managed build target: {packages}"
+            )
+        if not _managed_build_packages_owned(self.project, build_target):
+            raise CacheLocationError(
+                "Refusing to replace a nonempty project packages directory without "
+                f"Proof Assistant ownership: {packages}"
+            )
+        backup = self.layout.temporary / (
+            f"packages-replaced-{build_target.name}-{uuid.uuid4().hex}"
+        )
+        self.layout.temporary.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(packages), str(backup))
+        try:
+            packages.symlink_to(self.target / "packages", target_is_directory=True)
+        except Exception:
+            if packages.is_symlink():
+                packages.unlink()
+            if not packages.exists() and backup.exists():
+                shutil.move(str(backup), str(packages))
+            raise
+        _remove_cache_path(backup, self.layout)
+
     def _attach_ready(self) -> None:
         manifest = self.target / "lake-manifest.json"
         if self.project_manifest.exists():
@@ -1661,12 +1827,15 @@ class DependencyDepotClaim:
                     f"Existing packages symlink points outside its depot: {link}"
                 )
         elif link.exists():
-            if any(link.iterdir()):
+            if not link.is_dir():
                 raise CacheLocationError(
-                    f"Refusing to replace a nonempty project packages directory: {link}"
+                    f"Expected a project packages directory, found: {link}"
                 )
-            link.rmdir()
-            link.symlink_to(self.target / "packages", target_is_directory=True)
+            if any(link.iterdir()):
+                self._replace_managed_packages(link)
+            else:
+                link.rmdir()
+                link.symlink_to(self.target / "packages", target_is_directory=True)
         else:
             link.parent.mkdir(parents=True, exist_ok=True)
             link.symlink_to(self.target / "packages", target_is_directory=True)

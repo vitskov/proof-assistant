@@ -182,9 +182,19 @@ def _version_stamp(root: Path) -> tuple[int, int]:
 def _read_project_lean_version(
     root: Path, runner: Callable[..., subprocess.CompletedProcess[str]]
 ) -> str:
+    """Read the selected Lean version without asking Lake to load the project.
+
+    ``lake env`` is not an observational command for a fresh project: Lake may
+    resolve the manifest and materialize ``.lake/packages``.  Runtime
+    auto-tuning happens before Proof Assistant enters its managed cache/depot
+    boundary, so version discovery must invoke only the toolchain selector.
+    The ordinary ``lean`` launcher honors ``lean-toolchain`` when provided by
+    Elan and cannot hydrate Lake dependencies.
+    """
+
     try:
         result = runner(
-            ("lake", "env", "lean", "--version"),
+            ("lean", "--version"),
             cwd=root,
             text=True,
             capture_output=True,

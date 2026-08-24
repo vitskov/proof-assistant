@@ -35,9 +35,11 @@ nonselectable syntax/Markdown renderers require an exact copyable source twin.
 
 Owns the UI-neutral application state machine. Immutable contracts live in
 `workflow.contracts`; `workflow.service.ProofAssistantWorkflow` implements
-`default_task_text`, `inspect_source`, `inspect_project_destination`,
-`list_projects`, `create_project`, `select_project_main_file`, `resume_project`,
-`plan_changes`, and `confirm_and_verify`. `CancellationFlag` and
+`default_task_text`, `browse_manuscript_folders`,
+`remember_manuscript_folder`, `inspect_source`,
+`inspect_project_destination`, `list_projects`, `create_project`,
+`select_project_main_file`, `resume_project`, `plan_changes`, and
+`confirm_and_verify`. `CancellationFlag` and
 `StaleChangePlanError` make cancellation and stale confirmation explicit. The
 service maps persisted backend state to screens but contains no Textual imports.
 
@@ -72,6 +74,13 @@ implicit meaning or mutable UI objects.
 - `SourceInspection` contains the resolved external folder and every candidate
   LaTeX root. The TUI must use it instead of implementing its own file
   discovery.
+- `ManuscriptFolderListing` contains a backend-resolved current directory,
+  parent, home directory, ordered/deduplicated child directories, and the reason
+  for its initial location. The terminal picker traverses only these immutable
+  listings; it never enumerates directories or reads configuration itself.
+  `remember_manuscript_folder` persists a choice only after the user's explicit
+  **Select** action. This advisory preference is machine-local, stored outside
+  managed projects and Dropbox, and falls back to home if absent or invalid.
 - `NewProjectRequest` and the persisted project configuration contain a validated,
   source-relative `main_file` in addition to resolved source/project locations
   and a project-owned task. There is no backend state in which a new project

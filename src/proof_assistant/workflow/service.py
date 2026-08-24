@@ -130,6 +130,9 @@ from .contracts import (
     LegacySettingsView,
     MachineSettingsSnapshot,
     MachineSettingsUpdateRequest,
+    ManuscriptFolderEntry,
+    ManuscriptFolderListing,
+    ManuscriptFolderOrigin,
     NewProjectRequest,
     ProgressEvent,
     ProgressPhase,
@@ -156,6 +159,7 @@ from .contracts import (
     WorkflowState,
 )
 from .jobs import VerificationJobStore, request_fingerprint
+from .preferences import LocalPreferenceStore
 
 
 class StaleChangePlanError(RuntimeError):
@@ -287,6 +291,7 @@ class ProofAssistantWorkflow:
         use_codex_clarification: bool = True,
         codex_model: str = "gpt-5.6-sol",
         machine_config_path: Path | None = None,
+        preference_path: Path | None = None,
     ) -> None:
         catalog_path = None
         if catalog_root is not None:
@@ -304,6 +309,7 @@ class ProofAssistantWorkflow:
         self.codex_model = codex_model
         self._sequence = 0
         self._machine_config_store = MachineConfigStore(machine_config_path)
+        self._local_preferences = LocalPreferenceStore(preference_path)
         self._telemetry = TelemetryCollector()
         self._concurrency_runtime: ConcurrencyRuntime | None = None
         self._settings_previews: dict[
@@ -325,6 +331,73 @@ class ProofAssistantWorkflow:
             batch_size=legacy.batch_size,
             lean_pool_size=legacy.lean_pool_size,
         )
+
+    def browse_manuscript_folders(
+        self, directory: Path | None = None
+    ) -> ManuscriptFolderListing:
+        """Enumerate directories without exposing filesystem access to a UI."""
+
+        origin = ManuscriptFolderOrigin.REQUESTED
+        if directory is None:
+            preferred = self._local_preferences.load_manuscript_folder()
+            if preferred is not None and preferred.is_dir():
+                directory = preferred
+                origin = ManuscriptFolderOrigin.PREFERENCE
+            else:
+                directory = Path.home()
+                origin = ManuscriptFolderOrigin.HOME_FALLBACK
+        try:
+            resolved = directory.expanduser().resolve()
+        except (OSError, RuntimeError) as exc:
+            raise ValueError(
+                f"Could not resolve manuscript folder: {directory}"
+            ) from exc
+        if not resolved.is_dir():
+            raise ValueError(f"Manuscript folder is not a directory: {resolved}")
+        try:
+            children = tuple(
+                sorted(
+                    resolved.iterdir(),
+                    key=lambda child: (child.name.casefold(), child.name),
+                )
+            )
+        except OSError as exc:
+            raise ValueError(
+                f"Could not read manuscript folder: {resolved}: {exc}"
+            ) from exc
+        entries: list[ManuscriptFolderEntry] = []
+        seen: set[Path] = set()
+        for child in children:
+            try:
+                if not child.is_dir():
+                    continue
+                target = child.resolve()
+            except (OSError, RuntimeError):
+                continue
+            if target in seen:
+                continue
+            seen.add(target)
+            entries.append(
+                ManuscriptFolderEntry(
+                    name=child.name,
+                    path=target,
+                    symlink=child.is_symlink(),
+                )
+            )
+        entries.sort(key=lambda item: (item.name.casefold(), item.name, str(item.path)))
+        parent = None if resolved == resolved.parent else resolved.parent
+        return ManuscriptFolderListing(
+            directory=resolved,
+            parent=parent,
+            home=Path.home().resolve(),
+            folders=tuple(entries),
+            origin=origin,
+        )
+
+    def remember_manuscript_folder(self, directory: Path) -> Path:
+        """Persist one successfully inspected manuscript folder machine-locally."""
+
+        return self._local_preferences.save_manuscript_folder(directory)
 
     def _concurrency_spec(
         self,
@@ -1853,6 +1926,10 @@ class ProofAssistantWorkflow:
                         job.job_id,
                         "--lease-fd",
                         str(lease_fd),
+                        "--catalog-file",
+                        str(self.catalog.path),
+                        "--machine-config-file",
+                        str(self._machine_config_store.path),
                     )
                 )
                 try:

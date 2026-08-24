@@ -62,7 +62,12 @@ recoverable location. The authoritative manuscript source is never moved or
 changed.
 
 Select an existing folder containing the LaTeX source, then choose **Continue:
-inspect source**. Proof Assistant establishes one explicit manuscript root
+inspect source**. **Browse folders** opens an SSH-safe terminal picker with
+copyable paths and explicit **Up**, **Home**, **Select**, and **Cancel**
+controls; a path can still be typed directly. Only an explicit selection saves
+the last manuscript folder in the machine-local
+`~/.config/proof-assistant/preferences.json` (or safe XDG equivalent), outside
+managed projects and Dropbox. Proof Assistant establishes one explicit manuscript root
 before it creates anything. With one LaTeX file it shows that file as the
 automatically selected main file; with several, it lists them and requires you
 to select one. A final review screen shows the choice and requires confirmation

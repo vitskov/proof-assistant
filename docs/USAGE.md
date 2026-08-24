@@ -25,6 +25,21 @@ Select an existing directory containing the LaTeX manuscript. This remains the
 author-facing source folder: when Proof Assistant asks for a clarification,
 edit this original folder in your normal editor.
 
+Choose **Browse folders** for a terminal-native directory picker that works over
+SSH. Arrow keys move through the folder list, Enter opens the highlighted
+folder, and the explicit **Up**, **Home**, **Select current folder**, and
+**Cancel** controls are keyboard-focusable. Current and highlighted paths are
+selectable and copyable. You may instead type a path in the form field.
+
+The picker starts at the last folder you explicitly selected on this machine,
+or at your home directory when that preference is absent, malformed, or stale.
+Navigation and cancellation do not change the preference: only **Select current
+folder** does. The preference is stored in local configuration outside managed
+projects and Dropbox; it does not become project state. Its normal location is
+`~/.config/proof-assistant/preferences.json`, or the corresponding safe
+`XDG_CONFIG_HOME` location. A Dropbox-backed or managed-project XDG location is
+ignored in favor of the home-local path.
+
 The source may be in Dropbox. In that case the TUI warns that synchronization
 can expose intermediate multi-file saves. It still permits the source because
 the importer waits for a stable inventory, stages a complete copy, re-hashes

@@ -37,6 +37,8 @@ from proof_assistant.workflow.contracts import (
     FailureDependencyReport,
     FailureIncident,
     FileChange,
+    ManuscriptFolderEntry,
+    ManuscriptFolderListing,
     NewProjectRequest,
     ProgressEvent,
     ProgressPhase,
@@ -503,7 +505,12 @@ class ProjectDeletionOutcomeScreen(NoticeScreen):
         yield Footer()
 
     def on_mount(self) -> None:
-        self.query_one("#deletion-projects", Button).focus()
+        self.call_after_refresh(self._focus_projects)
+
+    def _focus_projects(self) -> None:
+        buttons = self.query("#deletion-projects")
+        if buttons.nodes:
+            self.query_one("#deletion-projects", Button).focus()
 
     def action_projects(self) -> None:
         self.proof_app.show_welcome()
@@ -513,6 +520,200 @@ class ProjectDeletionOutcomeScreen(NoticeScreen):
             self.action_projects()
         elif event.button.id == "deletion-retry":
             self.proof_app.request_project_deletion(self.project)
+
+
+class ManuscriptFolderPickerScreen(NoticeScreen):
+    """SSH-safe directory traversal over backend-provided folder listings."""
+
+    BINDINGS = [
+        ("escape", "cancel", "Cancel"),
+        ("backspace", "parent", "Up"),
+        ("ctrl+home", "home_folder", "Home"),
+    ]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.listing: ManuscriptFolderListing | None = None
+        self._rows: dict[str, ManuscriptFolderEntry] = {}
+        self._selected: ManuscriptFolderEntry | None = None
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        with Vertical(id="page"):
+            yield CopyableText("Choose manuscript source folder", classes="title")
+            yield CopyableText(
+                "Loading the backend-owned starting folder…",
+                id="folder-picker-current",
+                max_lines=4,
+            )
+            yield DataTable(
+                show_row_labels=False,
+                cursor_type="row",
+                zebra_stripes=True,
+                id="folder-picker-table",
+            )
+            yield CopyableText(
+                "No child folder selected.",
+                id="folder-picker-selection",
+                classes="muted",
+                max_lines=3,
+            )
+            with Horizontal(id="folder-picker-controls", classes="toolbar"):
+                yield Button("Up", id="folder-picker-parent", disabled=True)
+                yield Button("Home", id="folder-picker-home")
+                yield Button(
+                    "Open selected",
+                    id="folder-picker-open",
+                    disabled=True,
+                )
+                yield Button(
+                    "Select current folder",
+                    id="folder-picker-use",
+                    variant="success",
+                    disabled=True,
+                )
+                yield Button("Cancel", id="folder-picker-cancel")
+            yield CopyableText(
+                "Arrow keys highlight folders; Enter opens one. Backspace goes up "
+                "and Ctrl+Home returns home. "
+                "The chooser works entirely in this terminal; no desktop file "
+                "dialog is used.",
+                id="status-line",
+                classes="muted",
+                max_lines=3,
+            )
+        yield Footer()
+
+    def on_mount(self) -> None:
+        table = self.query_one("#folder-picker-table", DataTable)
+        table.add_columns("Folder", "Resolved path")
+        table.focus()
+        self._load(None)
+
+    def _load(self, directory: Path | None) -> None:
+        self.show_notice("Loading folders…")
+        self.query_one("#folder-picker-use", Button).disabled = True
+        self.query_one("#folder-picker-open", Button).disabled = True
+
+        def load() -> None:
+            try:
+                listing = self.proof_app.service.browse_manuscript_folders(directory)
+            except Exception as exc:
+                self.proof_app.call_from_thread(
+                    self.show_notice,
+                    f"Could not browse folders: {exc}",
+                    error=True,
+                )
+                return
+            self.proof_app.call_from_thread(self._show_listing, listing)
+
+        self.run_worker(load, thread=True, exclusive=True, group="folder-picker")
+
+    def _show_listing(self, listing: ManuscriptFolderListing) -> None:
+        self.listing = listing
+        self._rows.clear()
+        self._selected = None
+        table = self.query_one("#folder-picker-table", DataTable)
+        table.clear(columns=False)
+        for index, folder in enumerate(listing.folders):
+            key = f"folder:{index}"
+            suffix = " →" if folder.symlink else ""
+            table.add_row(folder.name + suffix, str(folder.path), key=key)
+            self._rows[key] = folder
+        origin = {
+            "PREFERENCE": "saved manuscript-folder preference",
+            "HOME_FALLBACK": "home fallback (no valid saved preference)",
+            "REQUESTED": "selected navigation location",
+        }.get(listing.origin.value, listing.origin.value)
+        self.query_one(
+            "#folder-picker-current", TextArea
+        ).text = f"Current folder: {listing.directory}\nStarting source: {origin}"
+        self.query_one("#folder-picker-selection", TextArea).text = (
+            "No child folders are available. You may still use the current folder."
+            if not listing.folders
+            else "Highlight a child folder and press Enter to open it."
+        )
+        self.query_one("#folder-picker-parent", Button).disabled = (
+            listing.parent is None
+        )
+        self.query_one("#folder-picker-use", Button).disabled = False
+        self.query_one("#folder-picker-open", Button).disabled = True
+        self.show_notice(f"{len(listing.folders)} child folder(s) available.")
+        table.focus()
+        if listing.folders:
+            table.move_cursor(row=0, column=0, animate=False)
+
+    def _highlight(self, key: str | None) -> None:
+        self._selected = self._rows.get(key or "")
+        self.query_one("#folder-picker-open", Button).disabled = self._selected is None
+        self.query_one("#folder-picker-selection", TextArea).text = (
+            f"Selected child folder: {self._selected.path}"
+            if self._selected is not None
+            else "No child folder selected."
+        )
+
+    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        if event.data_table.id == "folder-picker-table":
+            self._highlight(event.row_key.value)
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        if event.data_table.id != "folder-picker-table":
+            return
+        self._highlight(event.row_key.value)
+        self._open_selected()
+
+    def _open_selected(self) -> None:
+        if self._selected is None:
+            self.show_notice("Highlight a child folder to open it.", error=True)
+            return
+        self._load(self._selected.path)
+
+    def action_parent(self) -> None:
+        if self.listing is not None and self.listing.parent is not None:
+            self._load(self.listing.parent)
+
+    def action_home_folder(self) -> None:
+        if self.listing is not None:
+            self._load(self.listing.home)
+
+    def _select_current(self) -> None:
+        if self.listing is None:
+            return
+        selected = self.listing.directory
+        self.query_one("#folder-picker-use", Button).disabled = True
+        self.show_notice("Saving selected manuscript folder…")
+
+        def save() -> None:
+            try:
+                persisted = self.proof_app.service.remember_manuscript_folder(selected)
+            except Exception as exc:
+                self.proof_app.call_from_thread(
+                    self._selection_failed,
+                    f"Could not select manuscript folder: {exc}",
+                )
+                return
+            self.proof_app.call_from_thread(self.dismiss, persisted)
+
+        self.run_worker(save, thread=True, exclusive=True, group="folder-picker-select")
+
+    def _selection_failed(self, message: str) -> None:
+        self.query_one("#folder-picker-use", Button).disabled = False
+        self.show_notice(message, error=True)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "folder-picker-parent":
+            self.action_parent()
+        elif event.button.id == "folder-picker-home":
+            self.action_home_folder()
+        elif event.button.id == "folder-picker-open":
+            self._open_selected()
+        elif event.button.id == "folder-picker-use":
+            self._select_current()
+        elif event.button.id == "folder-picker-cancel":
+            self.action_cancel()
 
 
 class NewProjectScreen(NoticeScreen):
@@ -536,11 +737,15 @@ class NewProjectScreen(NoticeScreen):
                 id="project-name",
             )
             yield Label("Existing manuscript source folder")
-            yield Input(
-                value=(str(self.draft.source_path) if self.draft is not None else ""),
-                placeholder="/absolute/path/to/manuscript",
-                id="source-path",
-            )
+            with Horizontal(id="source-folder-controls"):
+                yield Input(
+                    value=(
+                        str(self.draft.source_path) if self.draft is not None else ""
+                    ),
+                    placeholder="/absolute/path/to/manuscript",
+                    id="source-path",
+                )
+                yield Button("Browse folders", id="browse-source")
             yield CopyableText(
                 "The source may be in Dropbox. Files are copied into a managed, "
                 "Git-versioned "
@@ -596,6 +801,11 @@ class NewProjectScreen(NoticeScreen):
         button_id = event.button.id
         if button_id == "cancel":
             self.action_back()
+        elif button_id == "browse-source":
+            self.proof_app.push_screen(
+                ManuscriptFolderPickerScreen(),
+                callback=self._folder_selected,
+            )
         elif button_id == "default-task":
             self._custom_task = False
             editor = self.query_one("#task-editor", TextArea)
@@ -610,6 +820,13 @@ class NewProjectScreen(NoticeScreen):
             self.show_notice("Edit the project-owned task below.")
         elif button_id == "continue":
             self._continue()
+
+    def _folder_selected(self, folder: Path | None) -> None:
+        if folder is None:
+            self.show_notice("Folder selection canceled; the typed path is unchanged.")
+            return
+        self.query_one("#source-path", Input).value = str(folder)
+        self.show_notice(f"Selected manuscript source folder: {folder}")
 
     def _continue(self) -> None:
         name = self.query_one("#project-name", Input).value.strip()

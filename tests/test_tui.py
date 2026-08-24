@@ -32,6 +32,7 @@ from proof_assistant.tui.screens import (
     FailureTree,
     FindingsScreen,
     MainFileSelectionScreen,
+    ManuscriptFolderPickerScreen,
     NewProjectScreen,
     ProgressScreen,
     ProjectDeletionConfirmationScreen,
@@ -78,6 +79,9 @@ from proof_assistant.workflow.contracts import (
     LegacySettingsView,
     MachineSettingsSnapshot,
     MachineSettingsUpdateRequest,
+    ManuscriptFolderEntry,
+    ManuscriptFolderListing,
+    ManuscriptFolderOrigin,
     NewProjectRequest,
     ProgressEvent,
     ProgressPhase,
@@ -470,6 +474,55 @@ class FakeWorkflowService:
         self.project = project()
         self.projects: tuple[ProjectCatalogEntry, ...] = (catalog_entry(self.project),)
         self.inspected: list[Path] = []
+        self.folder_browse_requests: list[Path | None] = []
+        self.remembered_manuscript_folders: list[Path] = []
+        self.folder_browse_error: Exception | None = None
+        self.folder_preference_error: Exception | None = None
+        folder_home = Path("/Users/writer")
+        folder_documents = folder_home / "Documents"
+        self.folder_listings = {
+            None: ManuscriptFolderListing(
+                directory=folder_documents,
+                parent=folder_home,
+                home=folder_home,
+                folders=(
+                    ManuscriptFolderEntry("notes", folder_documents / "notes"),
+                    ManuscriptFolderEntry("paper", folder_documents / "paper"),
+                ),
+                origin=ManuscriptFolderOrigin.PREFERENCE,
+            ),
+            folder_documents: ManuscriptFolderListing(
+                directory=folder_documents,
+                parent=folder_home,
+                home=folder_home,
+                folders=(
+                    ManuscriptFolderEntry("notes", folder_documents / "notes"),
+                    ManuscriptFolderEntry("paper", folder_documents / "paper"),
+                ),
+                origin=ManuscriptFolderOrigin.REQUESTED,
+            ),
+            folder_documents / "notes": ManuscriptFolderListing(
+                directory=folder_documents / "notes",
+                parent=folder_documents,
+                home=folder_home,
+                folders=(),
+                origin=ManuscriptFolderOrigin.REQUESTED,
+            ),
+            folder_documents / "paper": ManuscriptFolderListing(
+                directory=folder_documents / "paper",
+                parent=folder_documents,
+                home=folder_home,
+                folders=(),
+                origin=ManuscriptFolderOrigin.REQUESTED,
+            ),
+            folder_home: ManuscriptFolderListing(
+                directory=folder_home,
+                parent=Path("/Users"),
+                home=folder_home,
+                folders=(ManuscriptFolderEntry("Documents", folder_documents),),
+                origin=ManuscriptFolderOrigin.REQUESTED,
+            ),
+        }
         self.inspected_destinations: list[tuple[str, Path | None]] = []
         self.inspected_deletions: list[Path] = []
         self.deleted_projects: list[Path] = []
@@ -688,6 +741,20 @@ class FakeWorkflowService:
             suggested_main_file=self.inspection.suggested_main_file,
             source_in_dropbox=self.inspection.source_in_dropbox,
         )
+
+    def browse_manuscript_folders(
+        self, directory: Path | None = None
+    ) -> ManuscriptFolderListing:
+        self.folder_browse_requests.append(directory)
+        if self.folder_browse_error is not None:
+            raise self.folder_browse_error
+        return self.folder_listings[directory]
+
+    def remember_manuscript_folder(self, directory: Path) -> Path:
+        if self.folder_preference_error is not None:
+            raise self.folder_preference_error
+        self.remembered_manuscript_folders.append(directory)
+        return directory
 
     def inspect_project_deletion(self, project_path: Path) -> ProjectDeletionInspection:
         self.inspected_deletions.append(project_path)
@@ -944,6 +1011,134 @@ def test_nonselectable_static_output_has_an_explicit_copyable_twin() -> None:
     }
     assert ids == {"source-excerpt"}
     assert "source-excerpt-copy" in source_path.read_text(encoding="utf-8")
+
+
+@async_test
+async def test_terminal_folder_picker_traverses_and_persists_only_on_select() -> None:
+    service = FakeWorkflowService()
+    app = ProofAssistantApp(service)
+    documents = Path("/Users/writer/Documents")
+    notes = documents / "notes"
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        await pilot.click("#new-project")
+        await wait_for(pilot, lambda: isinstance(app.screen, NewProjectScreen))
+        await pilot.click("#browse-source")
+        await wait_for(
+            pilot,
+            lambda: (
+                isinstance(app.screen, ManuscriptFolderPickerScreen)
+                and app.screen.listing is not None
+            ),
+        )
+        assert app.screen.listing is not None
+        assert app.screen.listing.directory == documents
+        assert service.folder_browse_requests == [None]
+        assert service.remembered_manuscript_folders == []
+
+        current = app.screen.query_one("#folder-picker-current", TextArea)
+        assert current.read_only
+        current.select_all()
+        assert str(documents) in current.selected_text
+        assert "saved manuscript-folder preference" in current.selected_text
+
+        table = app.screen.query_one("#folder-picker-table", DataTable)
+        table.move_cursor(row=0, column=0, animate=False)
+        await pilot.pause()
+        selection = app.screen.query_one("#folder-picker-selection", TextArea)
+        await pilot.press("down")
+        await pilot.pause()
+        assert str(documents / "paper") in selection.text
+        await pilot.press("up")
+        await pilot.pause()
+        selection.select_all()
+        assert str(notes) in selection.selected_text
+        await pilot.press("enter")
+        await wait_for(
+            pilot,
+            lambda: (
+                isinstance(app.screen, ManuscriptFolderPickerScreen)
+                and app.screen.listing is not None
+                and app.screen.listing.directory == notes
+            ),
+        )
+        assert service.remembered_manuscript_folders == []
+
+        await pilot.click("#folder-picker-parent")
+        await wait_for(
+            pilot,
+            lambda: (
+                app.screen.listing is not None
+                and app.screen.listing.directory == documents
+            ),
+        )
+        await pilot.click("#folder-picker-home")
+        await wait_for(
+            pilot,
+            lambda: (
+                app.screen.listing is not None
+                and app.screen.listing.directory == Path("/Users/writer")
+            ),
+        )
+        app.screen.query_one("#folder-picker-table", DataTable).move_cursor(
+            row=0, column=0, animate=False
+        )
+        await pilot.press("enter")
+        await wait_for(
+            pilot,
+            lambda: (
+                app.screen.listing is not None
+                and app.screen.listing.directory == documents
+            ),
+        )
+        await pilot.click("#folder-picker-use")
+        await wait_for(pilot, lambda: isinstance(app.screen, NewProjectScreen))
+        assert app.screen.query_one("#source-path", Input).value == str(documents)
+        assert service.remembered_manuscript_folders == [documents]
+
+
+@async_test
+async def test_terminal_folder_picker_cancel_and_browse_error_are_safe() -> None:
+    service = FakeWorkflowService()
+    app = ProofAssistantApp(service)
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        await pilot.click("#new-project")
+        await wait_for(pilot, lambda: isinstance(app.screen, NewProjectScreen))
+        source = app.screen.query_one("#source-path", Input)
+        source.value = "/manual/path"
+        await pilot.click("#browse-source")
+        await wait_for(
+            pilot,
+            lambda: (
+                isinstance(app.screen, ManuscriptFolderPickerScreen)
+                and app.screen.listing is not None
+            ),
+        )
+        await pilot.press("escape")
+        await wait_for(pilot, lambda: isinstance(app.screen, NewProjectScreen))
+        assert app.screen.query_one("#source-path", Input).value == "/manual/path"
+        assert service.remembered_manuscript_folders == []
+
+        service.folder_browse_error = PermissionError("folder is not readable")
+        await pilot.click("#browse-source")
+        await wait_for(
+            pilot,
+            lambda: (
+                isinstance(app.screen, ManuscriptFolderPickerScreen)
+                and "not readable"
+                in app.screen.query_one("#status-line", TextArea).text
+            ),
+        )
+        error = app.screen.query_one("#status-line", TextArea)
+        error.select_all()
+        assert "not readable" in error.selected_text
+        assert service.remembered_manuscript_folders == []
+        await pilot.click("#folder-picker-cancel")
+        await wait_for(pilot, lambda: isinstance(app.screen, NewProjectScreen))
+        assert app.screen.query_one("#source-path", Input).value == "/manual/path"
 
 
 @async_test
@@ -1513,7 +1708,12 @@ async def test_project_deletion_is_cancel_first_button_confirmed_and_recoverable
         delete_button.press()
         await wait_for(
             pilot,
-            lambda: isinstance(app.screen, ProjectDeletionConfirmationScreen),
+            lambda: (
+                isinstance(app.screen, ProjectDeletionConfirmationScreen)
+                and bool(app.screen.query("#delete-project-paths").nodes)
+                and bool(app.screen.query("#delete-project-cancel").nodes)
+                and bool(app.screen.query("#delete-project-confirm").nodes)
+            ),
         )
 
         paths = app.screen.query_one("#delete-project-paths", TextArea)
@@ -1538,7 +1738,10 @@ async def test_project_deletion_is_cancel_first_button_confirmed_and_recoverable
         app.screen.query_one("#delete-project-0", Button).press()
         await wait_for(
             pilot,
-            lambda: isinstance(app.screen, ProjectDeletionConfirmationScreen),
+            lambda: (
+                isinstance(app.screen, ProjectDeletionConfirmationScreen)
+                and bool(app.screen.query("#delete-project-confirm").nodes)
+            ),
         )
         destructive = app.screen.query_one("#delete-project-confirm", Button)
         assert not destructive.disabled
@@ -1596,7 +1799,11 @@ async def test_project_deletion_refusal_and_failure_are_copyable() -> None:
         app.screen.query_one("#delete-project-0", Button).press()
         await wait_for(
             pilot,
-            lambda: isinstance(app.screen, ProjectDeletionConfirmationScreen),
+            lambda: (
+                isinstance(app.screen, ProjectDeletionConfirmationScreen)
+                and bool(app.screen.query("#delete-project-issue").nodes)
+                and bool(app.screen.query("#delete-project-confirm").nodes)
+            ),
         )
         issue = app.screen.query_one("#delete-project-issue", TextArea)
         issue.select_all()
@@ -1619,14 +1826,21 @@ async def test_project_deletion_refusal_and_failure_are_copyable() -> None:
         app.screen.query_one("#delete-project-0", Button).press()
         await wait_for(
             pilot,
-            lambda: isinstance(app.screen, ProjectDeletionConfirmationScreen),
+            lambda: (
+                isinstance(app.screen, ProjectDeletionConfirmationScreen)
+                and bool(app.screen.query("#delete-project-confirm").nodes)
+            ),
         )
         app.screen.query_one("#delete-project-confirm", Button).press()
         await wait_for(
             pilot, lambda: isinstance(app.screen, ProjectDeletionOutcomeScreen)
         )
         await wait_for(
-            pilot, lambda: bool(app.screen.query("#delete-project-error").nodes)
+            pilot,
+            lambda: (
+                bool(app.screen.query("#delete-project-error").nodes)
+                and bool(app.screen.query("#deletion-retry").nodes)
+            ),
         )
         error = app.screen.query_one("#delete-project-error", TextArea)
         error.select_all()

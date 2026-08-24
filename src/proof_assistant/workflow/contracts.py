@@ -13,7 +13,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Protocol
 
-CONTRACT_SCHEMA_VERSION = 7
+CONTRACT_SCHEMA_VERSION = 8
 
 
 class WorkflowState(StrEnum):
@@ -76,6 +76,14 @@ class ProjectDeletionAvailability(StrEnum):
     READY = "READY"
     BUSY = "BUSY"
     REFUSED = "REFUSED"
+
+
+class ManuscriptFolderOrigin(StrEnum):
+    """Why the backend chose the current folder-picker location."""
+
+    REQUESTED = "REQUESTED"
+    PREFERENCE = "PREFERENCE"
+    HOME_FALLBACK = "HOME_FALLBACK"
 
 
 class VerificationJobState(StrEnum):
@@ -353,6 +361,26 @@ class SourceInspection:
     @property
     def selection_required(self) -> bool:
         return len(self.candidates) > 1
+
+
+@dataclass(frozen=True)
+class ManuscriptFolderEntry:
+    """One backend-enumerated child directory in the terminal picker."""
+
+    name: str
+    path: Path
+    symlink: bool = False
+
+
+@dataclass(frozen=True)
+class ManuscriptFolderListing:
+    """Complete UI-neutral state for one directory-picker location."""
+
+    directory: Path
+    parent: Path | None
+    home: Path
+    folders: tuple[ManuscriptFolderEntry, ...]
+    origin: ManuscriptFolderOrigin
 
 
 @dataclass(frozen=True)
@@ -770,6 +798,12 @@ class WorkflowServiceContract(Protocol):
     ) -> CalibrationResetResult: ...
 
     def reset_adaptive_history(self) -> AdaptiveHistoryResetResult: ...
+
+    def browse_manuscript_folders(
+        self, directory: Path | None = None
+    ) -> ManuscriptFolderListing: ...
+
+    def remember_manuscript_folder(self, directory: Path) -> Path: ...
 
     def inspect_source(self, source: Path) -> SourceInspection: ...
 

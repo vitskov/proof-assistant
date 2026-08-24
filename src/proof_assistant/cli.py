@@ -1459,8 +1459,28 @@ def cmd_project_worker(args) -> int:
 
     from .workflow.service import ProofAssistantWorkflow
 
-    service = ProofAssistantWorkflow(cache_home=args.cache_home, codex=args.codex)
-    return service._run_verification_job(Path(args.project), args.job_id, args.lease_fd)
+    project = Path(args.project).expanduser().resolve()
+    # The launcher normally passes its exact disposable catalog/config paths.
+    # A directly invoked or older hidden command must still never fall back to
+    # the interactive user's catalog, because detached test/service workers
+    # are project-scoped and may outlive their launcher.
+    catalog_file = (
+        Path(args.catalog_file).expanduser().resolve(strict=False)
+        if args.catalog_file
+        else project / ".repoprover" / "jobs" / "worker-catalog.json"
+    )
+    machine_config_file = (
+        Path(args.machine_config_file).expanduser().resolve(strict=False)
+        if args.machine_config_file
+        else None
+    )
+    service = ProofAssistantWorkflow(
+        catalog_root=catalog_file,
+        cache_home=args.cache_home,
+        codex=args.codex,
+        machine_config_path=machine_config_file,
+    )
+    return service._run_verification_job(project, args.job_id, args.lease_fd)
 
 
 def cmd_benchmark(args) -> int:
@@ -1539,6 +1559,8 @@ def build_parser() -> argparse.ArgumentParser:
     worker.add_argument("--project", required=True)
     worker.add_argument("--job-id", required=True)
     worker.add_argument("--lease-fd", required=True, type=int)
+    worker.add_argument("--catalog-file")
+    worker.add_argument("--machine-config-file")
     worker.set_defaults(func=cmd_project_worker)
     sub._choices_actions = [
         action for action in sub._choices_actions if action.dest != "_project-worker"

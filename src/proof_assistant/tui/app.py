@@ -83,11 +83,16 @@ class ProofAssistantApp(App[None]):
     .toolbar { height: auto; margin-top: 1; }
     .toolbar Button { margin-right: 1; }
     Input { margin-bottom: 1; }
+    #source-folder-controls { height: auto; }
+    #source-folder-controls Input { width: 1fr; }
+    #source-folder-controls Button { width: auto; margin-left: 1; }
     TextArea { height: 12; border: round $accent; margin-bottom: 1; }
     .copyable-info {
         border: none; padding: 0; margin: 0; background: transparent;
     }
     #project-list { height: 1fr; border: round $panel; padding: 1; }
+    #folder-picker-table { height: 1fr; min-height: 6; border: round $panel; }
+    #folder-picker-controls Button { min-width: 0; width: auto; }
     .project-row { height: auto; margin-bottom: 1; }
     .project-row .project-summary { width: 1fr; }
     .project-row Button { width: auto; }

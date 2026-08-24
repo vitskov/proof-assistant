@@ -17,6 +17,7 @@ from proof_assistant.concurrency import (
     measure_lean_repl_memory,
     project_calibration_key,
     project_import_profile,
+    project_lean_version,
     summarize_repl_memory,
 )
 
@@ -79,6 +80,24 @@ def test_calibration_key_contains_exact_project_environment(tmp_path):
     assert key.import_profile.startswith("imports-")
     assert key.os_name == "Darwin"
     assert key.architecture == "arm64"
+
+
+def test_project_version_probe_cannot_materialize_lake_packages(tmp_path):
+    project = _project(tmp_path)
+    calls = []
+
+    def runner(argv, **kwargs):
+        calls.append((tuple(argv), kwargs))
+        return type(
+            "Result",
+            (),
+            {"returncode": 0, "stdout": "Lean (version 4.28.0)\n", "stderr": ""},
+        )()
+
+    assert project_lean_version(project, runner=runner) == "Lean (version 4.28.0)"
+    assert [call[0] for call in calls] == [("lean", "--version")]
+    assert calls[0][1]["cwd"] == project
+    assert not (project / ".lake").exists()
 
 
 def test_repl_summary_uses_nearest_rank_p95_and_validates_samples():

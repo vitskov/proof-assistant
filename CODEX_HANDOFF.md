@@ -54,6 +54,13 @@ project outside Dropbox, and creates a project-owned `VERIFY.yaml`. The user
 chooses the default task or customizes seeded instructions in the built-in text
 editor. There is no user-facing external task-file workflow.
 
+Folder selection is also a workflow-service boundary. The TUI renders immutable
+`ManuscriptFolderListing` values and must not enumerate the filesystem itself.
+The backend persists the most recently explicitly selected folder in
+`$HOME/.config/proof-assistant/preferences.json` (or a safe XDG equivalent),
+with home as the fallback. The preference file must remain outside Dropbox and
+managed projects; the selected manuscript source itself may be in Dropbox.
+
 If verification needs clarification, show the actual input file and exact
 highlighted LaTeX span. The user edits the external source. Detect all stable
 multi-file changes, stage/re-hash them, calculate proof-tree impact, and require
@@ -104,6 +111,12 @@ SQLite, calculate invalidation, invoke Codex directly, or assign certificate
 state. Filesystem notifications only wake the observer; stable full inventories
 and staged re-hashing establish source identity.
 
+Detached-worker launch arguments carry the launcher's exact catalog and
+machine-settings paths. A legacy/direct hidden worker falls back to a
+project-local worker catalog, never the interactive user's production catalog.
+Secrets remain in the child environment and are never serialized into the
+durable launch command.
+
 Codex may improve clarification wording under a validated schema, but the host
 owns the claim, source path/span, quotation, diagnostics, affected graph, and
 possible-resolution facts. Invalid output falls back deterministically.
@@ -135,6 +148,20 @@ possible-resolution facts. Invalid output falls back deterministically.
   corresponding controller.
 - `jobs=2` is the default logical multi-agent fan-out. Logical agents never
   override the current AI, Lean, or build admission limits.
+
+## Managed-cache ownership contract
+
+- Lean version discovery invokes `lean --version` directly. It must never call
+  `lake env`, resolve dependencies, or materialize `.lake` before cache attach.
+- Every isolated build target has an atomic
+  `.proof-assistant-build.json` marker bound to the exact resolved project and
+  build-target identity.
+- A nonempty packages directory may be replaced by the shared dependency depot
+  only when that marker proves Proof Assistant ownership. Imported, unmarked,
+  mismatched, and explicitly unowned package trees fail closed.
+- Pre-marker Proof Assistant projects are recognized only through their exact
+  deterministic managed-project identity. Reattaching a target cannot escalate
+  an unowned marker.
 
 ## Verification invariants
 

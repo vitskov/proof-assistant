@@ -49,7 +49,9 @@ def _workflow(tmp_path: Path) -> tuple[ProofAssistantWorkflow, Path]:
         encoding="utf-8",
     )
     service = ProofAssistantWorkflow(
-        catalog_root=tmp_path / "catalog", use_codex_clarification=False
+        catalog_root=tmp_path / "catalog",
+        machine_config_path=tmp_path / "settings.yaml",
+        use_codex_clarification=False,
     )
     project = tmp_path / "project"
     service.create_project(
@@ -80,6 +82,8 @@ class _FakeDetachedProcesses:
 def test_start_is_detached_idempotent_and_conflicts_on_different_request(
     tmp_path, monkeypatch
 ):
+    credential_sentinel = "must-not-appear-in-persisted-worker-command"
+    monkeypatch.setenv("OPENAI_API_KEY", credential_sentinel)
     service, project = _workflow(tmp_path)
     processes = _FakeDetachedProcesses()
     monkeypatch.setattr(service, "plan_changes", lambda _project: None)
@@ -107,9 +111,14 @@ def test_start_is_detached_idempotent_and_conflicts_on_different_request(
         command = processes.commands[0]
         assert command[:3] == (os.sys.executable, "-m", "proof_assistant")
         assert "_project-worker" in command
+        catalog_index = command.index("--catalog-file")
+        assert Path(command[catalog_index + 1]) == service.catalog.path
+        settings_index = command.index("--machine-config-file")
+        assert Path(command[settings_index + 1]) == service._machine_config_store.path
         assert first.job.launch_command == command
+        assert credential_sentinel not in command
+        assert credential_sentinel not in first.job.launch_command
         assert first.job.worker_log_path is not None
-        assert not any("token" in item.casefold() for item in command)
 
         with pytest.raises(VerificationJobConflictError) as raised:
             service.start_verification(
@@ -118,6 +127,45 @@ def test_start_is_detached_idempotent_and_conflicts_on_different_request(
         assert raised.value.observation.job.job_id == first.job.job_id
     finally:
         processes.close()
+
+
+def test_hidden_worker_cli_consumes_explicit_state_paths(tmp_path, monkeypatch):
+    captured = {}
+
+    class FakeWorkflow:
+        def __init__(self, **kwargs):
+            captured["kwargs"] = kwargs
+
+        def _run_verification_job(self, project, job_id, lease_fd):
+            captured["call"] = (project, job_id, lease_fd)
+            return 17
+
+    monkeypatch.setattr(
+        "proof_assistant.workflow.service.ProofAssistantWorkflow", FakeWorkflow
+    )
+    catalog = tmp_path / "catalog" / "projects.json"
+    settings = tmp_path / "config" / "settings.yaml"
+    project = tmp_path / "project"
+    args = build_parser().parse_args(
+        [
+            "_project-worker",
+            "--project",
+            str(project),
+            "--job-id",
+            "job-1",
+            "--lease-fd",
+            "19",
+            "--catalog-file",
+            str(catalog),
+            "--machine-config-file",
+            str(settings),
+        ]
+    )
+
+    assert args.func(args) == 17
+    assert captured["kwargs"]["catalog_root"] == catalog.resolve()
+    assert captured["kwargs"]["machine_config_path"] == settings.resolve()
+    assert captured["call"] == (project.resolve(), "job-1", 19)
 
 
 def test_concurrent_equivalent_submissions_spawn_exactly_one_worker(
@@ -339,8 +387,10 @@ def test_worker_rejects_fd_that_is_not_the_project_worker_lease(tmp_path):
 
 
 def test_hidden_worker_survives_launcher_fd_close_and_honors_persisted_cancel(
-    tmp_path,
+    tmp_path, monkeypatch
 ):
+    production_config = tmp_path / "production-config"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(production_config))
     _service, project = _workflow(tmp_path)
     store = VerificationJobStore(project)
     job = store.create(
@@ -377,6 +427,8 @@ def test_hidden_worker_survives_launcher_fd_close_and_honors_persisted_cancel(
     assert finished is not None
     assert finished.state == VerificationJobState.INTERRUPTED
     assert worker_lease_active(project) is False
+    assert not (production_config / "proof-assistant" / "projects.json").exists()
+    assert (project / ".repoprover" / "jobs" / "worker-catalog.json").is_file()
 
 
 def test_bounded_two_job_parallelism_is_the_default_everywhere() -> None:

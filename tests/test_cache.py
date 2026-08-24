@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
@@ -335,6 +336,32 @@ def _lean_project(root: Path) -> Path:
     return root
 
 
+def _publish_ready_depot(
+    project: Path,
+    layout: CacheLayout,
+    *,
+    env: dict[str, str],
+) -> Path:
+    key = cache.dependency_cache_key(project, env=env)
+    target = cache.dependency_depot_target(layout, key)
+    (target / "packages" / "mathlib").mkdir(parents=True)
+    (target / "packages" / "mathlib" / "shared.olean").write_text("shared")
+    (target / "lake-manifest.json").write_bytes(
+        (project / "lake-manifest.json").read_bytes()
+    )
+    (target / "READY").write_text("ready\n")
+    return target
+
+
+def _mark_managed_incremental_project(project: Path) -> None:
+    state = project / ".repoprover"
+    state.mkdir()
+    project_id = hashlib.sha256(str(project).encode()).hexdigest()[:16]
+    (state / "config.json").write_text(
+        json.dumps({"schema_version": 2, "project_id": project_id}) + "\n"
+    )
+
+
 def test_dependency_key_reuses_compatible_projects_and_tracks_compiler(tmp_path):
     first = _lean_project(tmp_path / "first")
     second = _lean_project(tmp_path / "second")
@@ -429,12 +456,169 @@ def test_dependency_depot_is_shared_but_root_builds_are_isolated(tmp_path):
     concurrent_claim.close()
 
 
+def test_ready_depot_reuses_packages_created_in_managed_build(tmp_path):
+    home = tmp_path / "home"
+    project = _lean_project(home / "project")
+    layout = layout_for(home)
+    build = cache.attach_project_cache(project, layout)
+    local_packages = project / ".lake" / "packages"
+    (local_packages / "mathlib").mkdir(parents=True)
+    (local_packages / "mathlib" / "local.olean").write_text("disposable")
+    (project / "lake-manifest.json").write_text('{"version": "1.1.0"}\n')
+    depot = _publish_ready_depot(
+        project,
+        layout,
+        env={"LEAN_CC": "/usr/bin/clang"},
+    )
+
+    with cache.claim_dependency_depot(
+        project,
+        layout,
+        env={"LEAN_CC": "/usr/bin/clang"},
+    ) as claim:
+        assert claim.ready
+        assert local_packages.is_symlink()
+        assert local_packages.resolve() == depot / "packages"
+        assert not any(layout.temporary.iterdir())
+        assert build == cache.project_cache_target(project, layout)
+
+
+def test_first_managed_run_reuses_packages_materialized_before_attach(tmp_path):
+    home = tmp_path / "home"
+    project = _lean_project(home / "project")
+    _mark_managed_incremental_project(project)
+    generated = project / ".lake" / "packages" / "mathlib" / "generated.olean"
+    generated.parent.mkdir(parents=True)
+    generated.write_text("materialized by pre-cache setup")
+    (project / "lake-manifest.json").write_text('{"version": "1.1.0"}\n')
+    layout = layout_for(home)
+    depot = _publish_ready_depot(
+        project,
+        layout,
+        env={"LEAN_CC": "/usr/bin/clang"},
+    )
+
+    cache.attach_project_cache(project, layout)
+    with cache.claim_dependency_depot(
+        project,
+        layout,
+        env={"LEAN_CC": "/usr/bin/clang"},
+    ):
+        packages = project / ".lake" / "packages"
+        assert packages.is_symlink()
+        assert packages.resolve() == depot / "packages"
+
+
+def test_ready_depot_never_replaces_imported_user_packages(tmp_path):
+    home = tmp_path / "home"
+    project = _lean_project(home / "project")
+    private = project / ".lake" / "packages" / "mathlib" / "private.txt"
+    private.parent.mkdir(parents=True)
+    private.write_text("user-owned")
+    (project / "lake-manifest.json").write_text('{"version": "1.1.0"}\n')
+    layout = layout_for(home)
+    cache.attach_project_cache(project, layout)
+    _publish_ready_depot(
+        project,
+        layout,
+        env={"LEAN_CC": "/usr/bin/clang"},
+    )
+
+    with pytest.raises(CacheLocationError, match="without Proof Assistant ownership"):
+        cache.claim_dependency_depot(
+            project,
+            layout,
+            env={"LEAN_CC": "/usr/bin/clang"},
+        )
+    assert private.read_text() == "user-owned"
+    assert not (project / ".lake" / "packages").is_symlink()
+
+
+def test_reattach_same_target_never_escalates_imported_package_ownership(tmp_path):
+    home = tmp_path / "home"
+    project = _lean_project(home / "project")
+    private = project / ".lake" / "packages" / "private.txt"
+    private.parent.mkdir(parents=True)
+    private.write_text("user-owned")
+    (project / "lake-manifest.json").write_text('{"version": "1.1.0"}\n')
+    layout = layout_for(home)
+    target = cache.attach_project_cache(project, layout)
+    (project / ".lake").unlink()
+
+    assert cache.attach_project_cache(project, layout) == target
+    _publish_ready_depot(
+        project,
+        layout,
+        env={"LEAN_CC": "/usr/bin/clang"},
+    )
+    with pytest.raises(CacheLocationError, match="without Proof Assistant ownership"):
+        cache.claim_dependency_depot(
+            project,
+            layout,
+            env={"LEAN_CC": "/usr/bin/clang"},
+        )
+    assert private.read_text() == "user-owned"
+
+
+def test_unmarked_nonempty_existing_target_is_recorded_unowned(tmp_path):
+    home = tmp_path / "home"
+    project = _lean_project(home / "project")
+    (project / "lake-manifest.json").write_text('{"version": "1.1.0"}\n')
+    layout = layout_for(home)
+    layout.create()
+    target = cache.project_cache_target(project, layout)
+    private = target / "packages" / "private.txt"
+    private.parent.mkdir(parents=True)
+    private.write_text("unknown-owner")
+
+    cache.attach_project_cache(project, layout)
+    _publish_ready_depot(
+        project,
+        layout,
+        env={"LEAN_CC": "/usr/bin/clang"},
+    )
+    with pytest.raises(CacheLocationError, match="without Proof Assistant ownership"):
+        cache.claim_dependency_depot(
+            project,
+            layout,
+            env={"LEAN_CC": "/usr/bin/clang"},
+        )
+    assert private.read_text() == "unknown-owner"
+
+
+def test_legacy_managed_project_recovers_pre_marker_packages(tmp_path):
+    home = tmp_path / "home"
+    project = _lean_project(home / "project")
+    _mark_managed_incremental_project(project)
+    layout = layout_for(home)
+    layout.create()
+    build = cache.project_cache_target(project, layout)
+    (build / "packages" / "mathlib").mkdir(parents=True)
+    (build / "packages" / "mathlib" / "generated.olean").write_text("cache")
+    (project / "lake-manifest.json").write_text('{"version": "1.1.0"}\n')
+    (project / ".lake").symlink_to(build, target_is_directory=True)
+    assert not (build / cache._BUILD_OWNERSHIP_MARKER).exists()
+    depot = _publish_ready_depot(
+        project,
+        layout,
+        env={"LEAN_CC": "/usr/bin/clang"},
+    )
+
+    cache.attach_project_cache(project, layout)
+    with cache.claim_dependency_depot(
+        project,
+        layout,
+        env={"LEAN_CC": "/usr/bin/clang"},
+    ):
+        assert (project / ".lake" / "packages").resolve() == depot / "packages"
+
+
 def test_attach_repairs_a_managed_symlink_after_gc(tmp_path):
     home = tmp_path / "home"
     project = _lean_project(home / "project")
     layout = layout_for(home)
     target = cache.attach_project_cache(project, layout)
-    target.rmdir()
+    cache._remove_cache_path(target, layout)
 
     repaired = cache.attach_project_cache(project, layout)
 
