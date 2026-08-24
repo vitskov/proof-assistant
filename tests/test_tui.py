@@ -16,6 +16,7 @@ from textual.widgets import (
     DataTable,
     Input,
     MarkdownViewer,
+    RadioButton,
     Select,
     TabbedContent,
     TextArea,
@@ -1528,6 +1529,10 @@ async def test_multiple_latex_files_require_deliberate_main_selection() -> None:
         )
 
         await pilot.click("#main-option-2")
+        await wait_for(
+            pilot,
+            lambda: app.screen.query_one("#main-option-2", RadioButton).value,
+        )
         await pilot.click("#select-main")
         await wait_for(pilot, lambda: isinstance(app.screen, ProjectReviewScreen))
         assert service.created == []

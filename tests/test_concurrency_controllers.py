@@ -3,7 +3,7 @@ from __future__ import annotations
 import multiprocessing
 import pickle
 import sqlite3
-import time
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -158,13 +158,34 @@ def test_heartbeat_extends_ttl_and_crashed_lease_is_reclaimed(tmp_path):
     assert controller.heartbeat(lease) is None
 
 
-def test_lease_context_heartbeats_long_work_and_releases_on_exit(tmp_path):
-    store = SQLiteAdmissionStore(tmp_path / "admission.sqlite3")
+def test_lease_context_heartbeats_long_work_and_releases_on_exit(
+    tmp_path, monkeypatch
+):
+    clock = FakeClock()
+    store = SQLiteAdmissionStore(tmp_path / "admission.sqlite3", clock=clock)
     controller = AdmissionController(store, ResourceKind.BUILD, 1)
-    build_request = request(ResourceKind.BUILD, "long-build", ttl=0.5)
+    heartbeat_started = threading.Event()
+    heartbeat_allowed = threading.Event()
+    heartbeat_finished = threading.Event()
+    original_heartbeat = store.heartbeat
+
+    def tracked_heartbeat(lease, *, ttl_seconds=None):
+        heartbeat_started.set()
+        if not heartbeat_allowed.wait(5):
+            raise AssertionError("timed out waiting to release the test heartbeat")
+        renewed = original_heartbeat(lease, ttl_seconds=ttl_seconds)
+        heartbeat_finished.set()
+        return renewed
+
+    monkeypatch.setattr(store, "heartbeat", tracked_heartbeat)
+    build_request = request(ResourceKind.BUILD, "long-build", ttl=0.2)
     with controller.lease(build_request) as lease:
-        time.sleep(0.4)
-        assert store.heartbeat(lease) is not None
+        assert heartbeat_started.wait(5)
+        clock.advance(0.15)
+        heartbeat_allowed.set()
+        assert heartbeat_finished.wait(5)
+        clock.advance(0.1)
+        assert clock() > lease.expires_at
         assert controller.snapshot().active == 1
     assert controller.snapshot().active == 0
 
