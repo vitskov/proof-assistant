@@ -1819,7 +1819,11 @@ async def test_project_deletion_is_cancel_first_button_confirmed_and_recoverable
             pilot, lambda: isinstance(app.screen, ProjectDeletionOutcomeScreen)
         )
         await wait_for(
-            pilot, lambda: bool(app.screen.query("#delete-project-result").nodes)
+            pilot,
+            lambda: (
+                bool(app.screen.query("#delete-project-result").nodes)
+                and bool(app.screen.query("#deletion-projects").nodes)
+            ),
         )
         result = app.screen.query_one("#delete-project-result", TextArea)
         assert result.read_only

@@ -49,7 +49,10 @@ the accepted optimization claim is memory reduction only.
 The same source tree passed compiler preflight, a clean uv-managed Python 3.13
 installation, Ruff, strict mypy, the typing policy, and all 433 tests on Cortex
 (Ubuntu, Linux 6.8.0-136, x86_64). This clean run did not reproduce the earlier
-host-specific Linux behavior.
+host-specific Linux behavior. GitHub's Ubuntu 24.04 runner subsequently exposed
+a genuine test synchronization race: the deletion outcome's copyable result
+could mount before its navigation toolbar. The acceptance test now waits for
+both controls, matching the complete-screen readiness rule used elsewhere.
 
 ## Fresh-project and state-isolation regressions
 
