@@ -35,6 +35,7 @@ from proof_assistant.workflow.service import (
     VerificationJobConflictError,
     VerificationJobNotCancellableError,
 )
+from proof_assistant.workspace.management import ProjectManager
 
 
 def _workflow(tmp_path: Path) -> tuple[ProofAssistantWorkflow, Path]:
@@ -52,6 +53,14 @@ def _workflow(tmp_path: Path) -> tuple[ProofAssistantWorkflow, Path]:
         catalog_root=tmp_path / "catalog",
         machine_config_path=tmp_path / "settings.yaml",
         use_codex_clarification=False,
+    )
+    # These tests exercise detached-worker and mutation-lease behavior, not the
+    # host's default recoverable-trash mount. Keep both paths on pytest's
+    # temporary filesystem so a split /tmp and $HOME layout cannot mask the
+    # lease state with an unrelated cross-filesystem deletion refusal.
+    service.projects = ProjectManager(
+        service.catalog,
+        trash_root=tmp_path / "recoverable-trash",
     )
     project = tmp_path / "project"
     service.create_project(
