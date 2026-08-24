@@ -17,6 +17,29 @@ proof-assistant
 `proof-assistant tui` is an explicit equivalent. The welcome screen offers
 **New project** and **Resume project**.
 
+### Keyboard commands and themes
+
+The footer is permanent and changes with the active screen and focused control,
+so the relevant commands remain visible without memorization. Press **F1** at
+any time for a scrollable reference containing every application shortcut.
+The `?` key is an additional help shortcut when focus is not inside a text
+field; in an editor it remains normal text input.
+
+The common vocabulary is consistent throughout the application:
+
+- **Esc** goes back or safely cancels a modal;
+- **Ctrl+Enter** confirms or continues a reviewed form;
+- **Ctrl+S** saves settings;
+- **Ctrl+P** opens the searchable command palette;
+- **Ctrl+T** switches between **Proof Ink** (dark) and **Proof Paper** (light);
+  and
+- **Ctrl+Q** exits the application.
+
+Letter shortcuts follow the visible action name on their current screen, such
+as **N** for New, **R** for Refresh/Retry, **S** for Settings, **V** for Verify,
+and **O** for Open. The F1 reference documents navigation and less frequent
+contextual commands as well.
+
 ## Start a project
 
 ### 1. Choose the manuscript source

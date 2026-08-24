@@ -15,7 +15,6 @@ from textual.screen import ModalScreen, Screen
 from textual.widgets import (
     Button,
     DataTable,
-    Footer,
     Header,
     Input,
     Label,
@@ -30,6 +29,30 @@ from textual.widgets import (
     Tree,
 )
 
+from proof_assistant.tui.commands import (
+    BACK,
+    CANCEL,
+    CANCEL_JOB,
+    CHECK_CHANGES,
+    CLOSE,
+    CONFIRM,
+    DETACH_JOB,
+    FAILURES,
+    HOME_FOLDER,
+    NEW_PROJECT,
+    NEXT,
+    OPEN,
+    PARENT_FOLDER,
+    PREVIOUS,
+    REFRESH,
+    REPORT,
+    RETRY,
+    SELECT_ALL,
+    SETTINGS,
+    VERIFY,
+    CommandFooter,
+    shortcut_reference_text,
+)
 from proof_assistant.workflow.contracts import (
     ChangeImpactPlan,
     ClarificationPresentation,
@@ -90,7 +113,7 @@ def _candidate_text(
 class CopyableText(TextArea):
     """Read-only selectable text for every externally useful displayed value."""
 
-    BINDINGS = [("ctrl+a", "select_all", "Select all")]
+    BINDINGS = [SELECT_ALL.binding()]
 
     def __init__(
         self,
@@ -210,13 +233,38 @@ class NoticeScreen(Screen[None]):
         widget.add_class("error" if error else "muted")
 
 
+class ShortcutHelpScreen(ModalScreen[None]):
+    """Complete command reference generated from the binding registry."""
+
+    BINDINGS = [BACK.binding(action="close"), CLOSE.binding()]
+
+    def compose(self) -> ComposeResult:
+        with VerticalScroll(id="shortcut-help-dialog"):
+            yield CopyableText("Keyboard commands", classes="title")
+            yield CopyableText(
+                shortcut_reference_text(),
+                id="shortcut-reference",
+                soft_wrap=False,
+                expand=True,
+            )
+            yield CopyableText(
+                "The footer always shows commands for the active screen and focused "
+                "control.",
+                classes="muted",
+            )
+        yield CommandFooter()
+
+    def action_close(self) -> None:
+        self.dismiss()
+
+
 class WelcomeScreen(NoticeScreen):
     """Choose a new project or resume a catalogued project."""
 
     BINDINGS = [
-        ("n", "new_project", "New project"),
-        ("s", "settings", "Settings"),
-        ("q", "quit", "Quit"),
+        NEW_PROJECT.binding(),
+        REFRESH.binding(),
+        SETTINGS.binding(),
     ]
 
     def compose(self) -> ComposeResult:
@@ -236,7 +284,7 @@ class WelcomeScreen(NoticeScreen):
             yield CopyableText(
                 "Loading project catalog…", id="status-line", classes="muted"
             )
-        yield Footer()
+        yield CommandFooter()
 
     def on_mount(self) -> None:
         self.load_projects()
@@ -244,8 +292,8 @@ class WelcomeScreen(NoticeScreen):
     def action_new_project(self) -> None:
         self.proof_app.show_new_project()
 
-    def action_quit(self) -> None:
-        self.proof_app.exit()
+    def action_refresh(self) -> None:
+        self.load_projects()
 
     def action_settings(self) -> None:
         self.proof_app.show_settings(return_to_project=False)
@@ -255,7 +303,7 @@ class WelcomeScreen(NoticeScreen):
         if button_id == "new-project":
             self.action_new_project()
         elif button_id == "refresh-projects":
-            self.load_projects()
+            self.action_refresh()
         elif button_id == "settings":
             self.action_settings()
         elif button_id.startswith("resume-"):
@@ -341,7 +389,7 @@ class WelcomeScreen(NoticeScreen):
 class ProjectDeletionConfirmationScreen(ModalScreen[bool]):
     """Cancel-first button confirmation for backend-owned recoverable deletion."""
 
-    BINDINGS = [("escape", "cancel", "Cancel")]
+    BINDINGS = [CANCEL.binding()]
 
     def __init__(
         self,
@@ -408,6 +456,7 @@ class ProjectDeletionConfirmationScreen(ModalScreen[bool]):
                 classes="muted" if self.inspection.can_delete else "error",
                 max_lines=4,
             )
+        yield CommandFooter()
 
     def on_mount(self) -> None:
         self.call_after_refresh(self._focus_cancel)
@@ -431,7 +480,7 @@ class ProjectDeletionConfirmationScreen(ModalScreen[bool]):
 class ProjectDeletionOutcomeScreen(NoticeScreen):
     """Copyable success or failure result returned by the deletion contract."""
 
-    BINDINGS = [("escape", "projects", "Projects")]
+    BINDINGS = [BACK.binding(action="projects")]
 
     def __init__(
         self,
@@ -502,7 +551,7 @@ class ProjectDeletionOutcomeScreen(NoticeScreen):
                 id="status-line",
                 classes="muted",
             )
-        yield Footer()
+        yield CommandFooter()
 
     def on_mount(self) -> None:
         self.call_after_refresh(self._focus_projects)
@@ -526,9 +575,9 @@ class ManuscriptFolderPickerScreen(NoticeScreen):
     """SSH-safe directory traversal over backend-provided folder listings."""
 
     BINDINGS = [
-        ("escape", "cancel", "Cancel"),
-        ("backspace", "parent", "Up"),
-        ("ctrl+home", "home_folder", "Home"),
+        CANCEL.binding(),
+        PARENT_FOLDER.binding(),
+        HOME_FOLDER.binding(),
     ]
 
     def __init__(self) -> None:
@@ -582,7 +631,7 @@ class ManuscriptFolderPickerScreen(NoticeScreen):
                 classes="muted",
                 max_lines=3,
             )
-        yield Footer()
+        yield CommandFooter()
 
     def on_mount(self) -> None:
         table = self.query_one("#folder-picker-table", DataTable)
@@ -719,7 +768,7 @@ class ManuscriptFolderPickerScreen(NoticeScreen):
 class NewProjectScreen(NoticeScreen):
     """First wizard step: collect source, destination, and project task."""
 
-    BINDINGS = [("escape", "back", "Back")]
+    BINDINGS = [BACK.binding(), CONFIRM.binding(action="continue")]
 
     def __init__(self, draft: NewProjectDraft | None = None) -> None:
         super().__init__()
@@ -792,10 +841,13 @@ class NewProjectScreen(NoticeScreen):
                 id="status-line",
                 classes="muted",
             )
-        yield Footer()
+        yield CommandFooter()
 
     def action_back(self) -> None:
         self.proof_app.show_welcome()
+
+    def action_continue(self) -> None:
+        self._continue()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         button_id = event.button.id
@@ -819,7 +871,7 @@ class NewProjectScreen(NoticeScreen):
             editor.focus()
             self.show_notice("Edit the project-owned task below.")
         elif button_id == "continue":
-            self._continue()
+            self.action_continue()
 
     def _folder_selected(self, folder: Path | None) -> None:
         if folder is None:
@@ -860,7 +912,7 @@ class NewProjectScreen(NoticeScreen):
 class MainFileSelectionScreen(NoticeScreen):
     """Require a deliberate main-file choice for an ambiguous source folder."""
 
-    BINDINGS = [("escape", "back", "Back")]
+    BINDINGS = [BACK.binding(), CONFIRM.binding()]
 
     def __init__(
         self,
@@ -921,17 +973,12 @@ class MainFileSelectionScreen(NoticeScreen):
                 id="status-line",
                 classes="muted",
             )
-        yield Footer()
+        yield CommandFooter()
 
     def action_back(self) -> None:
         self.proof_app.show_new_project(self.draft)
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "back":
-            self.action_back()
-            return
-        if event.button.id != "select-main":
-            return
+    def action_confirm(self) -> None:
         index = self.query_one("#main-file-options", RadioSet).pressed_index
         if index < 0:
             self.show_notice(
@@ -947,11 +994,18 @@ class MainFileSelectionScreen(NoticeScreen):
             auto_selected=False,
         )
 
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "back":
+            self.action_back()
+            return
+        if event.button.id == "select-main":
+            self.action_confirm()
+
 
 class ProjectReviewScreen(NoticeScreen):
     """Final wizard step before the first persistent project mutation."""
 
-    BINDINGS = [("escape", "back", "Back")]
+    BINDINGS = [BACK.binding(), CONFIRM.binding()]
 
     def __init__(
         self,
@@ -995,7 +1049,7 @@ class ProjectReviewScreen(NoticeScreen):
                 id="status-line",
                 classes="muted",
             )
-        yield Footer()
+        yield CommandFooter()
 
     def _detail(self) -> str:
         selection = (
@@ -1029,14 +1083,17 @@ class ProjectReviewScreen(NoticeScreen):
         else:
             self.proof_app.show_new_project(self.draft)
 
+    def action_confirm(self) -> None:
+        self.proof_app.create_project(
+            self.draft.request(
+                self.main_file,
+                resolved_project_path=self.destination.project_path,
+            )
+        )
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "confirm-create":
-            self.proof_app.create_project(
-                self.draft.request(
-                    self.main_file,
-                    resolved_project_path=self.destination.project_path,
-                )
-            )
+            self.action_confirm()
         elif event.button.id == "review-back":
             self.action_back()
         elif event.button.id == "cancel":
@@ -1046,7 +1103,7 @@ class ProjectReviewScreen(NoticeScreen):
 class ExistingProjectMainFileSelectionScreen(NoticeScreen):
     """Recover a catalogued legacy project through backend-provided candidates."""
 
-    BINDINGS = [("escape", "back", "Projects")]
+    BINDINGS = [BACK.binding(), CONFIRM.binding()]
 
     def __init__(self, entry: ProjectCatalogEntry) -> None:
         super().__init__()
@@ -1096,17 +1153,12 @@ class ExistingProjectMainFileSelectionScreen(NoticeScreen):
                 id="status-line",
                 classes="muted",
             )
-        yield Footer()
+        yield CommandFooter()
 
     def action_back(self) -> None:
         self.proof_app.show_welcome()
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "back":
-            self.action_back()
-            return
-        if event.button.id != "confirm-existing-main":
-            return
+    def action_confirm(self) -> None:
         index = self.query_one("#existing-main-file-options", RadioSet).pressed_index
         if index < 0:
             self.show_notice("Select one main LaTeX file first.", error=True)
@@ -1114,9 +1166,18 @@ class ExistingProjectMainFileSelectionScreen(NoticeScreen):
         main_file = self.entry.main_file_candidates[index].relative_path
         self.proof_app.select_existing_project_main_file(self.entry, main_file)
 
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "back":
+            self.action_back()
+            return
+        if event.button.id == "confirm-existing-main":
+            self.action_confirm()
+
 
 class ProjectDestinationConflictScreen(NoticeScreen):
     """Show a backend-classified destination conflict without mutating it."""
+
+    BINDINGS = [BACK.binding()]
 
     def __init__(
         self,
@@ -1149,23 +1210,29 @@ class ProjectDestinationConflictScreen(NoticeScreen):
                 id="status-line",
                 classes="muted",
             )
-        yield Footer()
+        yield CommandFooter()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "back":
-            self.proof_app.show_new_project(self.draft)
+            self.action_back()
         elif event.button.id == "projects":
             self.proof_app.show_welcome()
         elif event.button.id == "open-folder":
             self.proof_app.open_location(self.inspection.project_path)
+
+    def action_back(self) -> None:
+        self.proof_app.show_new_project(self.draft)
 
 
 class DashboardScreen(NoticeScreen):
     """Project landing page between verification iterations."""
 
     BINDINGS = [
-        ("s", "settings", "Settings"),
-        ("escape", "projects", "Projects"),
+        VERIFY.binding(),
+        CHECK_CHANGES.binding(),
+        OPEN.binding(),
+        SETTINGS.binding(),
+        BACK.binding(),
     ]
 
     def __init__(self, snapshot: WorkflowSnapshot) -> None:
@@ -1198,20 +1265,28 @@ class DashboardScreen(NoticeScreen):
                 yield Button("Settings", id="settings")
                 yield Button("Projects", id="projects")
             yield CopyableText("", id="status-line", classes="muted")
-        yield Footer()
+        yield CommandFooter()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        project = self.snapshot.project
         if event.button.id == "verify":
-            self.proof_app.start_verification(project, None)
+            self.action_verify()
         elif event.button.id == "check-changes":
-            self.proof_app.check_for_changes(project)
+            self.action_check_changes()
         elif event.button.id == "open-project":
-            self.proof_app.open_location(project.project_path)
+            self.action_open()
         elif event.button.id == "settings":
             self.action_settings()
         elif event.button.id == "projects":
-            self.action_projects()
+            self.action_back()
+
+    def action_verify(self) -> None:
+        self.proof_app.start_verification(self.snapshot.project, None)
+
+    def action_check_changes(self) -> None:
+        self.proof_app.check_for_changes(self.snapshot.project)
+
+    def action_open(self) -> None:
+        self.proof_app.open_location(self.snapshot.project.project_path)
 
     def action_settings(self) -> None:
         self.proof_app.show_settings(
@@ -1219,12 +1294,14 @@ class DashboardScreen(NoticeScreen):
             return_to_project=True,
         )
 
-    def action_projects(self) -> None:
+    def action_back(self) -> None:
         self.proof_app.show_welcome()
 
 
 class ProgressScreen(NoticeScreen):
     """Live view of typed progress events emitted by the workflow service."""
+
+    BINDINGS = [CANCEL_JOB.binding(), DETACH_JOB.binding()]
 
     def __init__(
         self,
@@ -1308,7 +1385,7 @@ class ProgressScreen(NoticeScreen):
                 id="status-line",
                 classes="muted",
             )
-        yield Footer()
+        yield CommandFooter()
 
     def _source_detail(self) -> str:
         inputs = "\n".join(f"  {path}" for path in self.input_files) or "  none"
@@ -1434,6 +1511,7 @@ class ProgressScreen(NoticeScreen):
             or observation.job.state.terminal
             or observation.job.state.value == "CANCEL_REQUESTED"
         )
+        self.refresh_bindings()
         for event in observation.events:
             self.record_progress(event)
         if observation.job.attached_legacy and not self._lines:
@@ -1453,6 +1531,7 @@ class ProgressScreen(NoticeScreen):
 
     def record_cancellation_pending(self) -> None:
         self.query_one("#cancel", Button).disabled = True
+        self.refresh_bindings()
         self.query_one("#status-line", TextArea).text = (
             "Submitting a persistent cancellation request. The detached job remains "
             "active until the backend records and reaches a cooperative stop boundary."
@@ -1484,13 +1563,41 @@ class ProgressScreen(NoticeScreen):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "cancel" and self.cancellable:
-            self.proof_app.cancel_verification()
+            self.action_cancel_job()
         elif event.button.id == "detach-observer" and self.detached_job:
+            self.action_detach_job()
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if action == "cancel_job":
+            buttons = self.query("#cancel").nodes
+            return bool(
+                self.cancellable
+                and buttons
+                and isinstance(buttons[0], Button)
+                and not buttons[0].disabled
+            )
+        if action == "detach_job":
+            return self.detached_job
+        return True
+
+    def action_cancel_job(self) -> None:
+        if self.check_action("cancel_job", ()):
+            self.proof_app.cancel_verification()
+
+    def action_detach_job(self) -> None:
+        if self.detached_job:
             self.proof_app.detach_verification_observer()
 
 
 class ClarificationScreen(NoticeScreen):
     """Show exact source context for a persisted clarification request."""
+
+    BINDINGS = [
+        PREVIOUS.binding(),
+        NEXT.binding(),
+        CHECK_CHANGES.binding(),
+        OPEN.binding(),
+    ]
 
     def __init__(self, snapshot: WorkflowSnapshot, index: int = 0) -> None:
         super().__init__()
@@ -1551,7 +1658,7 @@ class ClarificationScreen(NoticeScreen):
                 id="status-line",
                 classes="muted",
             )
-        yield Footer()
+        yield CommandFooter()
 
     def _syntax(self, question: ClarificationPresentation) -> Syntax:
         location = question.location
@@ -1580,27 +1687,53 @@ class ClarificationScreen(NoticeScreen):
         )
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        question = self.question
         if event.button.id == "open-file":
-            self.proof_app.open_location(question.location.absolute_path)
+            self.action_open()
         elif event.button.id == "open-folder":
-            self.proof_app.open_location(question.location.absolute_path.parent)
+            self.proof_app.open_location(self.question.location.absolute_path.parent)
         elif event.button.id == "check-changes":
-            self.proof_app.check_for_changes(self.snapshot.project)
+            self.action_check_changes()
         elif event.button.id == "previous" and self.index > 0:
-            self.proof_app.switch_screen(
-                ClarificationScreen(self.snapshot, self.index - 1)
-            )
+            self.action_previous()
         elif event.button.id == "next" and self.index + 1 < len(
             self.snapshot.clarifications
         ):
+            self.action_next()
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if action == "previous":
+            return self.index > 0
+        if action == "next":
+            return self.index + 1 < len(self.snapshot.clarifications)
+        return True
+
+    def action_previous(self) -> None:
+        if self.index > 0:
+            self.proof_app.switch_screen(
+                ClarificationScreen(self.snapshot, self.index - 1)
+            )
+
+    def action_next(self) -> None:
+        if self.index + 1 < len(self.snapshot.clarifications):
             self.proof_app.switch_screen(
                 ClarificationScreen(self.snapshot, self.index + 1)
             )
 
+    def action_check_changes(self) -> None:
+        self.proof_app.check_for_changes(self.snapshot.project)
+
+    def action_open(self) -> None:
+        self.proof_app.open_location(self.question.location.absolute_path)
+
 
 class ChangeReviewScreen(NoticeScreen):
     """Require explicit confirmation of an immutable source-impact plan."""
+
+    BINDINGS = [
+        CONFIRM.binding(),
+        BACK.binding(action="wait"),
+        OPEN.binding(),
+    ]
 
     def __init__(self, snapshot: WorkflowSnapshot) -> None:
         super().__init__()
@@ -1632,7 +1765,7 @@ class ChangeReviewScreen(NoticeScreen):
             yield CopyableText(
                 "Explicit confirmation is required.", id="status-line", classes="muted"
             )
-        yield Footer()
+        yield CommandFooter()
 
     def _detail(self) -> str:
         plan = self.plan
@@ -1674,18 +1807,27 @@ class ChangeReviewScreen(NoticeScreen):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "confirm":
-            self.proof_app.start_verification(
-                self.snapshot.project,
-                self.plan.plan_id,
-                main_file=self.plan.main_file,
-                input_files=self.plan.input_files,
-            )
+            self.action_confirm()
         elif event.button.id == "wait":
-            self.proof_app.switch_screen(DashboardScreen(self.snapshot))
+            self.action_wait()
         elif event.button.id == "open-source":
-            self.proof_app.open_location(self.plan.source_path)
+            self.action_open()
         elif event.button.id == "projects":
             self.proof_app.show_welcome()
+
+    def action_confirm(self) -> None:
+        self.proof_app.start_verification(
+            self.snapshot.project,
+            self.plan.plan_id,
+            main_file=self.plan.main_file,
+            input_files=self.plan.input_files,
+        )
+
+    def action_wait(self) -> None:
+        self.proof_app.switch_screen(DashboardScreen(self.snapshot))
+
+    def action_open(self) -> None:
+        self.proof_app.open_location(self.plan.source_path)
 
 
 def _file_change_line(change: FileChange) -> str:
@@ -1695,6 +1837,14 @@ def _file_change_line(change: FileChange) -> str:
 
 class FindingsScreen(NoticeScreen):
     """Human-readable outcome and durable output locations."""
+
+    BINDINGS = [
+        CHECK_CHANGES.binding(),
+        REPORT.binding(),
+        FAILURES.binding(),
+        OPEN.binding(),
+        BACK.binding(),
+    ]
 
     def __init__(self, snapshot: WorkflowSnapshot) -> None:
         super().__init__()
@@ -1733,7 +1883,7 @@ class FindingsScreen(NoticeScreen):
                 id="status-line",
                 classes="muted",
             )
-        yield Footer()
+        yield CommandFooter()
 
     def _detail(self) -> str:
         finding = self.findings
@@ -1767,17 +1917,38 @@ class FindingsScreen(NoticeScreen):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "check-changes":
-            self.proof_app.check_for_changes(self.snapshot.project)
+            self.action_check_changes()
         elif event.button.id == "open-report" and self.findings.report_path is not None:
-            self.proof_app.view_report(self.snapshot)
+            self.action_report()
         elif event.button.id == "open-failures":
-            self.proof_app.view_failure_report(self.snapshot)
+            self.action_failures()
         elif event.button.id == "open-project":
-            self.proof_app.open_location(
-                self.findings.project_path or self.snapshot.project.project_path
-            )
+            self.action_open()
         elif event.button.id == "projects":
-            self.proof_app.show_welcome()
+            self.action_back()
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if action == "report":
+            return self.findings.report_path is not None
+        return True
+
+    def action_check_changes(self) -> None:
+        self.proof_app.check_for_changes(self.snapshot.project)
+
+    def action_report(self) -> None:
+        if self.findings.report_path is not None:
+            self.proof_app.view_report(self.snapshot)
+
+    def action_failures(self) -> None:
+        self.proof_app.view_failure_report(self.snapshot)
+
+    def action_open(self) -> None:
+        self.proof_app.open_location(
+            self.findings.project_path or self.snapshot.project.project_path
+        )
+
+    def action_back(self) -> None:
+        self.proof_app.show_welcome()
 
 
 _FAILURE_STATES = frozenset(
@@ -1834,7 +2005,7 @@ def _status_label(
 class FailureDependencyScreen(NoticeScreen):
     """Interactive terminal explanation of one backend-owned failure report."""
 
-    BINDINGS = [("escape", "back", "Back"), ("q", "close", "Close")]
+    BINDINGS = [BACK.binding(), CLOSE.binding(), REPORT.binding()]
 
     def __init__(
         self,
@@ -1927,7 +2098,7 @@ class FailureDependencyScreen(NoticeScreen):
                 classes="muted",
                 max_lines=2,
             )
-        yield Footer()
+        yield CommandFooter()
 
     def _make_tree(self) -> FailureTree:
         assert self.report is not None
@@ -2327,11 +2498,14 @@ class FailureDependencyScreen(NoticeScreen):
     def action_close(self) -> None:
         self.proof_app.show_welcome()
 
+    def action_report(self) -> None:
+        self.proof_app.view_report(self.snapshot)
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "failure-back":
             self.action_back()
         elif event.button.id == "failure-open-report":
-            self.proof_app.view_report(self.snapshot)
+            self.action_report()
         elif event.button.id == "failure-close":
             self.action_close()
 
@@ -2339,7 +2513,7 @@ class FailureDependencyScreen(NoticeScreen):
 class ReportViewerScreen(NoticeScreen):
     """Terminal-native rendered and copyable verification-report presentation."""
 
-    BINDINGS = [("escape", "back", "Back"), ("q", "close", "Close")]
+    BINDINGS = [BACK.binding(), CLOSE.binding()]
 
     def __init__(
         self,
@@ -2394,7 +2568,7 @@ class ReportViewerScreen(NoticeScreen):
                 id="status-line",
                 classes="muted",
             )
-        yield Footer()
+        yield CommandFooter()
 
     def on_mount(self) -> None:
         if self.document is not None:
@@ -2415,6 +2589,13 @@ class ReportViewerScreen(NoticeScreen):
 
 class RecoveryScreen(NoticeScreen):
     """Interrupted, failed, or externally busy project recovery."""
+
+    BINDINGS = [
+        RETRY.binding(),
+        FAILURES.binding(),
+        OPEN.binding(),
+        BACK.binding(),
+    ]
 
     def __init__(
         self,
@@ -2503,7 +2684,7 @@ class RecoveryScreen(NoticeScreen):
             else:
                 status = "Existing project state is preserved."
             yield CopyableText(status, id="status-line", classes="muted")
-        yield Footer()
+        yield CommandFooter()
 
     @property
     def _has_cancellation_report(self) -> bool:
@@ -2549,10 +2730,32 @@ class RecoveryScreen(NoticeScreen):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "retry" and self.project is not None:
-            self.proof_app.resume_project(self.project)
+            self.action_retry()
         elif event.button.id == "recovery-failures" and self.snapshot is not None:
-            self.proof_app.view_failure_report(self.snapshot)
+            self.action_failures()
         elif event.button.id == "open-project" and self.project is not None:
-            self.proof_app.open_location(self.project)
+            self.action_open()
         elif event.button.id == "projects":
-            self.proof_app.show_welcome()
+            self.action_back()
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if action in {"retry", "open"}:
+            return self.project is not None
+        if action == "failures":
+            return self.snapshot is not None and self.project is not None
+        return True
+
+    def action_retry(self) -> None:
+        if self.project is not None:
+            self.proof_app.resume_project(self.project)
+
+    def action_failures(self) -> None:
+        if self.snapshot is not None:
+            self.proof_app.view_failure_report(self.snapshot)
+
+    def action_open(self) -> None:
+        if self.project is not None:
+            self.proof_app.open_location(self.project)
+
+    def action_back(self) -> None:
+        self.proof_app.show_welcome()

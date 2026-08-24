@@ -51,6 +51,13 @@ defaults to:
 $HOME/proof-assistant/<project-name>
 ```
 
+Every screen keeps its current keyboard commands in a compact footer. Press
+**F1** for the complete command reference, **Ctrl+P** for the searchable
+command palette, and **Ctrl+T** to switch between the warm **Proof Ink** dark
+theme and **Proof Paper** light theme. Setup and settings screens consistently
+use **Esc** to go back, **Ctrl+Enter** to continue, and **Ctrl+S** to save when
+those actions are available.
+
 The project list is reconciled by the backend. Resumable projects have a
 **Resume** action and a guarded **Delete project** action; older projects
 without an unambiguous manuscript root have a **Select main file** action;
