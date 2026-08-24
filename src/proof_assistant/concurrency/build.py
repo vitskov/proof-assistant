@@ -127,7 +127,6 @@ class BuildAdmissionController(AdmissionController):
         *,
         pressure: Any,
         queue_depth: int,
-        swap_growing: bool = False,
         io_pressure: bool = False,
         throughput_improved: bool = True,
     ) -> int:
@@ -136,7 +135,7 @@ class BuildAdmissionController(AdmissionController):
         state = pressure_name(pressure)
         self._pressure = state
         # Yellow intentionally stops admission of additional full-build pressure.
-        self._paused = state in {"yellow", "red", "emergency"} or swap_growing
+        self._paused = state in {"yellow", "red", "emergency"}
         self.store.set_state(
             ResourceKind.BUILD,
             "pressure",
@@ -153,10 +152,9 @@ class BuildAdmissionController(AdmissionController):
         if state == "emergency":
             return self._resize(self.minimum, now)
 
-        shrink = state == "red" or swap_growing or io_pressure
+        shrink = state == "red" or io_pressure
         grow = (
             state == "green"
-            and not swap_growing
             and not io_pressure
             and queue_depth > 0
             and throughput_improved

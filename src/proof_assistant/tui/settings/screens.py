@@ -137,6 +137,16 @@ def _telemetry_text(snapshot: MachineSettingsSnapshot) -> str:
         if telemetry.lean_p95_rss_gib is not None
         else "not calibrated"
     )
+    swap_out = (
+        f"{telemetry.swap_out_mib_per_second:.2f} MiB/s"
+        if telemetry.swap_out_mib_per_second is not None
+        else "not available"
+    )
+    native_pressure = (
+        str(telemetry.native_memory_pressure_level)
+        if telemetry.native_memory_pressure_level is not None
+        else "not available"
+    )
     return (
         f"Hardware: {telemetry.os_name} / {telemetry.architecture} / "
         f"{telemetry.resource_profile}\n"
@@ -148,7 +158,9 @@ def _telemetry_text(snapshot: MachineSettingsSnapshot) -> str:
         f"({telemetry.memory_percent_available:.1f}%); pressure "
         f"{telemetry.memory_pressure}\n"
         f"Swap: {telemetry.swap_used_gib:.2f} GiB used; "
-        f"sample delta {telemetry.swap_delta_gib:+.3f} GiB; I/O wait {io_wait}\n"
+        f"active swap-out {swap_out}; I/O wait {io_wait}\n"
+        f"Pressure source: {telemetry.memory_pressure_source}; "
+        f"native level {native_pressure}\n"
         f"Codex: {telemetry.ai_active} active; {telemetry.ai_queued} queued; "
         f"throttles {telemetry.ai_throttles}; backoff "
         f"{telemetry.ai_backoff_until or 'none'}\n"

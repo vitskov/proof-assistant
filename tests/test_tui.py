@@ -165,8 +165,10 @@ def machine_settings(*, revision: int = 3) -> MachineSettingsSnapshot:
             available_memory_gib=19.25,
             memory_percent_available=60.2,
             swap_used_gib=0.0,
-            swap_delta_gib=0.0,
+            swap_out_mib_per_second=0.0,
             memory_pressure="GREEN",
+            memory_pressure_source="macos_native",
+            native_memory_pressure_level=0,
             load_average=(2.0, 1.8, 1.5),
             io_wait_percent=None,
             ai_active=2,
@@ -2420,6 +2422,8 @@ async def test_machine_settings_navigation_and_copyable_live_status_at_80x24() -
         telemetry = app.screen.query_one("#resource-telemetry", TextArea)
         assert "10 physical / 10 usable logical" in telemetry.text
         assert "pressure GREEN" in telemetry.text
+        assert "active swap-out 0.00 MiB/s" in telemetry.text
+        assert "Pressure source: macos_native; native level 0" in telemetry.text
         assert "Codex: 2 active; 5 queued" in telemetry.text
         assert "Lean: 3 active; 1 queued" in telemetry.text
         resolution = app.screen.query_one("#settings-resolution", TextArea)

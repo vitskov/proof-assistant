@@ -11,6 +11,7 @@ from proof_assistant.concurrency import (
     CodexPlan,
     ConcurrencyConfig,
     HardwareResources,
+    MemoryPressurePolicy,
     PressureState,
     QueueDepths,
     ResourceProfile,
@@ -191,12 +192,13 @@ class FakeTelemetryPsutil:
     def __init__(self):
         self.available = 40
         self.swap_used = 100
+        self.swap_out = 1_000
 
     def virtual_memory(self):
         return SimpleNamespace(total=100, available=self.available)
 
     def swap_memory(self):
-        return SimpleNamespace(used=self.swap_used)
+        return SimpleNamespace(used=self.swap_used, sout=self.swap_out)
 
     def Process(self):
         return SimpleNamespace(
@@ -211,9 +213,9 @@ class FakeTelemetryPsutil:
         return 25.0
 
 
-def test_telemetry_pressure_swap_hysteresis_and_linux_psi(tmp_path):
+def test_telemetry_pressure_active_swap_out_and_linux_psi(tmp_path):
     fake = FakeTelemetryPsutil()
-    times = iter((10.0, 15.0, 20.0, 25.0))
+    times = iter((10.0, 15.0, 20.0, 25.0, 30.0))
     psi = tmp_path / "pressure"
     psi_text = "some avg10=1.50 avg60=0.50 avg300=0.10 total=1\nfull avg10=0.20 avg60=0.10 avg300=0.00 total=1\n"
     collector = TelemetryCollector(
@@ -225,6 +227,11 @@ def test_telemetry_pressure_swap_hysteresis_and_linux_psi(tmp_path):
         read_text=mapping_reader(
             {(psi / name).as_posix(): psi_text for name in ("cpu", "memory", "io")}
         ),
+        pressure_policy=MemoryPressurePolicy(
+            swap_out_memory_fraction_per_second=0.001,
+            swap_out_minimum_bytes_per_second=10.0,
+            swap_out_maximum_bytes_per_second=10.0,
+        ),
     )
     first = collector.sample(queues=QueueDepths(ai=2, lean=1, build=0))
     assert first.pressure == PressureState.GREEN
@@ -232,15 +239,21 @@ def test_telemetry_pressure_swap_hysteresis_and_linux_psi(tmp_path):
     assert first.cpu_psi is not None and first.cpu_psi.some_avg10 == 1.5
     fake.swap_used = 150
     second = collector.sample()
-    assert second.swap_delta_bytes == 50
-    assert second.swap_rate_bytes_per_second == 10.0
-    assert second.pressure == PressureState.YELLOW
-    fake.swap_used = 200
+    assert second.swap_out_delta_bytes == 0
+    assert second.swap_out_rate_bytes_per_second == 0.0
+    assert second.pressure == PressureState.GREEN
+    fake.swap_out = 1_100
     third = collector.sample()
-    assert third.pressure == PressureState.RED
-    fake.available = 7
+    assert third.swap_out_delta_bytes == 100
+    assert third.swap_out_rate_bytes_per_second == 20.0
+    assert third.pressure == PressureState.GREEN
+    fake.swap_out = 1_200
     fourth = collector.sample()
-    assert fourth.pressure == PressureState.EMERGENCY
+    assert fourth.pressure == PressureState.RED
+    fake.swap_used = 200
+    fake.available = 7
+    fifth = collector.sample()
+    assert fifth.pressure == PressureState.EMERGENCY
 
 
 def test_psi_parser_tolerates_missing_or_malformed_metrics():

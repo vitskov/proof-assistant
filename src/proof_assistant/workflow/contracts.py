@@ -203,8 +203,10 @@ class ResourceTelemetryView:
     available_memory_gib: float
     memory_percent_available: float
     swap_used_gib: float
-    swap_delta_gib: float
+    swap_out_mib_per_second: float | None
     memory_pressure: str
+    memory_pressure_source: str
+    native_memory_pressure_level: int | None
     load_average: tuple[float, float, float] | None
     io_wait_percent: float | None
     ai_active: int

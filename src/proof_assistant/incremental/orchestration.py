@@ -9,7 +9,7 @@ import traceback
 from collections.abc import Callable, Sequence
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from contextlib import contextmanager
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..backend import CodexConfig
@@ -28,7 +28,6 @@ from ..cache import (
 from ..concurrency import (
     ConcurrencyRuntime,
     ConcurrencyRuntimeSpec,
-    PressureState,
     QueueDepths,
     ResolvedConcurrencyConfig,
     ScheduledTask,
@@ -239,30 +238,10 @@ class _ConcurrencyMonitor:
         ai = self.runtime.ai.status()
         lean = self.runtime.lean.status()
         build = self.runtime.build.status()
-        telemetry = self.collector.sample(
-            queues=QueueDepths(ai=ai.queued, lean=lean.queued, build=build.queued)
-        )
         allocation = detect_hardware()
-        total = min(telemetry.total_memory_bytes, allocation.total_memory_bytes)
-        available = min(
-            telemetry.available_memory_bytes,
-            allocation.available_memory_bytes,
-            total,
-        )
-        ratio = available / max(1, total)
-        pressure = telemetry.pressure
-        if ratio < 0.08:
-            pressure = PressureState.EMERGENCY
-        elif ratio < 0.15:
-            pressure = PressureState.RED
-        elif ratio <= 0.30 and pressure == PressureState.GREEN:
-            pressure = PressureState.YELLOW
-        telemetry = replace(
-            telemetry,
-            total_memory_bytes=total,
-            available_memory_bytes=available,
-            available_memory_ratio=ratio,
-            pressure=pressure,
+        telemetry = self.collector.sample(
+            queues=QueueDepths(ai=ai.queued, lean=lean.queued, build=build.queued),
+            memory_allocation=allocation,
         )
         if self.enabled:
             self.runtime.observe_telemetry(telemetry)
@@ -284,8 +263,12 @@ class _ConcurrencyMonitor:
                         "sample": self.samples,
                         "state": telemetry.pressure.value,
                         "available_memory_ratio": telemetry.available_memory_ratio,
-                        "swap_rate_bytes_per_second": (
-                            telemetry.swap_rate_bytes_per_second
+                        "swap_out_rate_bytes_per_second": (
+                            telemetry.swap_out_rate_bytes_per_second
+                        ),
+                        "source": telemetry.memory_pressure_source.value,
+                        "native_memory_pressure_level": (
+                            telemetry.native_memory_pressure_level
                         ),
                     }
                 )
@@ -294,7 +277,14 @@ class _ConcurrencyMonitor:
                 "cpu_percent": telemetry.cpu_percent,
                 "available_memory_ratio": telemetry.available_memory_ratio,
                 "swap_used_bytes": telemetry.swap_used_bytes,
-                "swap_rate_bytes_per_second": telemetry.swap_rate_bytes_per_second,
+                "swap_out_rate_bytes_per_second": (
+                    telemetry.swap_out_rate_bytes_per_second
+                ),
+                "memory_pressure_source": telemetry.memory_pressure_source.value,
+                "native_memory_pressure_level": (
+                    telemetry.native_memory_pressure_level
+                ),
+                "pressure_reasons": list(telemetry.pressure_reasons),
                 "disk_iowait_percent": telemetry.disk_iowait_percent,
                 "pressure": telemetry.pressure.value,
                 "ai_throttles": ai.throttles,

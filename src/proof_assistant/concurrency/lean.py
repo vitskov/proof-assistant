@@ -188,7 +188,6 @@ class LeanAdmissionController(AdmissionController):
         pressure: Any,
         queue_depth: int,
         cpu_percent: float,
-        swap_growing: bool = False,
         throughput_improved: bool = True,
     ) -> int:
         """Observe one telemetry sample and possibly resize the effective pool."""
@@ -216,12 +215,10 @@ class LeanAdmissionController(AdmissionController):
 
         shrink = (
             state == "red"
-            or swap_growing
             or (cpu_percent > 92.0 and not throughput_improved)
         )
         grow = (
             state == "green"
-            and not swap_growing
             and queue_depth > 0
             and cpu_percent < 75.0
         )

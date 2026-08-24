@@ -75,6 +75,13 @@ from .hardware import (
     detect_hardware,
 )
 from .lean import LeanAdmissionController, LeanControllerStatus
+from .macos_memory import query_macos_memory_pressure_level
+from .memory_pressure import (
+    MemoryPressureClassifier,
+    MemoryPressureDecision,
+    MemoryPressurePolicy,
+    MemoryPressureSource,
+)
 from .runtime import ConcurrencyRuntime, ConcurrencyRuntimeSpec
 from .scheduler import (
     ConcurrencyScheduler,
@@ -239,6 +246,10 @@ __all__ = [
     "MachineConfigLocationError",
     "MachineConfigRevisionError",
     "MachineConfigStore",
+    "MemoryPressureClassifier",
+    "MemoryPressureDecision",
+    "MemoryPressurePolicy",
+    "MemoryPressureSource",
     "NodeResourceControllers",
     "PressureStallMetrics",
     "PressureState",
@@ -262,6 +273,7 @@ __all__ = [
     "environment_patch",
     "measure_lean_repl_memory",
     "parse_psi",
+    "query_macos_memory_pressure_level",
     "patch_from_mapping",
     "patch_to_mapping",
     "project_calibration_key",

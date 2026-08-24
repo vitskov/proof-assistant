@@ -157,9 +157,11 @@ Automatic startup is capped at 32 REPLs even on very large machines. It can
 ramp only after telemetry supports doing so. The controller waits for repeated
 observations and normally resizes no more often than every 45 seconds. A
 persistent queue with CPU below 75% and green memory can grow the pool by one.
-Red memory, swap growth, or CPU above 92% without a throughput improvement can
-shrink it. Red or emergency memory pressure pauses new Lean admissions; an
-emergency also reduces the effective limit to its minimum in adaptive mode.
+Red memory pressure or CPU above 92% without a throughput improvement can
+shrink it. Sustained active paging contributes to the platform-aware pressure
+state instead of bypassing it. Red or emergency memory pressure pauses new Lean
+admissions; an emergency also reduces the effective limit to its minimum in
+adaptive mode.
 
 Both host-side extraction/certification operations and RepoProver's
 `lean_check` dynamic tool pass through this global boundary.
@@ -188,9 +190,10 @@ admits at most one full build machine-wide: it prevents additional build
 pressure without making forward progress depend on memory returning to green.
 The check is serialized across processes. Red or emergency pressure blocks all
 new builds.
-In adaptive mode, swap growth or I/O pressure can reduce the limit; green
-pressure, queued work, and an observed throughput gain can increase it. The
-controller uses repeated observations and a roughly 60-second resize interval.
+In adaptive mode, red memory pressure or I/O pressure can reduce the limit;
+green pressure, queued work, and an observed throughput gain can increase it.
+The controller uses repeated observations and a roughly 60-second resize
+interval.
 
 Agent-initiated `lake build` commands, batch bootstrap/final builds, merged
 frontier builds, and the final full certification build all use this admission
@@ -363,22 +366,43 @@ The backend samples low-cost telemetry approximately every five seconds during
 a verification run. The same data model supplies the controllers, TUI, and run
 provenance; the UI does not implement a second hardware-measurement path.
 Collected observations include CPU utilization and load, available memory,
-swap usage and growth, process RSS/PSS where the platform exposes it, disk I/O
-wait where available, queue depths, and Linux pressure-stall information from
-`/proc/pressure` when present.
+swap occupancy and active swap-out rate, process RSS/PSS where the platform
+exposes it, disk I/O wait where available, queue depths, and Linux
+pressure-stall information from `/proc/pressure` when present.
 
-Memory pressure is classified as:
+Memory pressure is classified by an OS-specific policy. macOS first consults
+the optional XNU `kern.memorystatus_vm_pressure_level` state, then combines it
+with available memory and active swap-out. If the native query is unavailable,
+telemetry continues with available memory and swap-out, or available memory
+alone when `psutil` does not expose a useful `sout` counter.
+
+The native level mapping follows Apple's
+[XNU memorystatus documentation](https://github.com/apple-oss-distributions/xnu/blob/main/doc/vm/memorystatus_notify.md):
+0 normal, 1 warning, 2 urgent (equivalent to warning), and 3 critical. The
+adapter uses `/usr/sbin/sysctl` with a short timeout and treats any missing,
+denied, malformed, or unknown response as an unavailable optional signal.
+
+macOS available-memory floors are:
 
 | State | Trigger | Admission response |
 |---|---|---|
-| Green | more than 30% RAM available and no swap growth | normal admission; adaptive growth may occur |
-| Yellow | 15–30% available, or the first swap-growth sample | no Lean growth; at most one full build machine-wide |
-| Red | less than 15% available, or sustained swap growth | pause new Lean and build work; adapt downward |
-| Emergency | less than 8% available | shed admission pressure and reduce adaptive pools toward their minimum |
+| Green | more than 20% available, native normal/unknown, and no sustained active swap-out | normal admission; adaptive growth may occur |
+| Yellow | 12–20% available, native warning/urgent, or sustained substantial swap-out | no Lean growth; at most one full build machine-wide |
+| Red | 6–12% available or native critical | pause new Lean and build work; adapt downward |
+| Emergency | at most 6% available | shed admission pressure and reduce adaptive pools toward their minimum |
 
-On macOS, compressed memory alone is not treated as a failure. Available memory
-and sustained swap growth drive the state. Controllers use hysteresis so one
-noisy sample does not repeatedly resize a pool.
+Native critical produces RED immediately rather than EMERGENCY by itself.
+Swap occupancy and changes to occupancy are observational only. The active
+swap-out threshold scales with memory size between 16 MiB/s and 128 MiB/s;
+sustained activity can raise macOS to YELLOW. Ordinary worsening takes two
+samples, while recovery takes four healthy samples. Native critical and an
+emergency available-memory ratio escalate immediately.
+
+Linux retains the existing 30%/15%/8% available-memory thresholds, cgroup-aware
+memory allocation, and `/proc/pressure` collection. Stable swap occupancy has
+no pressure meaning. Active swap-out above the scaled threshold is YELLOW on
+the first observation candidate and RED when sustained; the shared hysteresis
+prevents a transient sample from changing admission.
 
 Telemetry can be disabled as a machine policy, but doing so removes the
 observations needed for runtime adaptation and live pressure explanation.

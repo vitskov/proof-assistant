@@ -343,7 +343,6 @@ class ConcurrencyRuntime:
         lean_throughput_improved: bool = True,
         build_throughput_improved: bool = True,
     ) -> None:
-        swap_growing = snapshot.swap_rate_bytes_per_second > 0
         io_pressure = bool(
             snapshot.disk_iowait_percent is not None
             and snapshot.disk_iowait_percent >= 20.0
@@ -357,13 +356,11 @@ class ConcurrencyRuntime:
             pressure=snapshot.pressure,
             queue_depth=snapshot.queues.lean,
             cpu_percent=snapshot.cpu_percent,
-            swap_growing=swap_growing,
             throughput_improved=lean_throughput_improved,
         )
         self.build.observe(
             pressure=snapshot.pressure,
             queue_depth=snapshot.queues.build,
-            swap_growing=swap_growing,
             io_pressure=io_pressure,
             throughput_improved=build_throughput_improved,
         )

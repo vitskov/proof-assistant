@@ -14,6 +14,7 @@ from proof_assistant.concurrency import (
     HardwareResources,
     LeanConcurrencyPatch,
     MachineConfigStore,
+    MemoryPressureSource,
     PressureState,
     QueueDepths,
     TelemetrySnapshot,
@@ -41,16 +42,22 @@ class GreenTelemetry:
             available_memory_bytes=24 * GIB,
             available_memory_ratio=0.75,
             swap_used_bytes=0,
-            swap_delta_bytes=0,
-            swap_rate_bytes_per_second=0.0,
+            swap_out_delta_bytes=0,
+            swap_out_rate_bytes_per_second=0.0,
             process_rss_bytes=128 * 1024**2,
             process_pss_bytes=None,
             disk_iowait_percent=0.0,
             pressure=PressureState.GREEN,
+            pressure_candidate=PressureState.GREEN,
+            native_memory_pressure_level=0,
+            memory_pressure_source=MemoryPressureSource.MACOS_NATIVE,
+            active_swap_out=False,
+            swap_out_threshold_bytes_per_second=16 * 1024**2,
+            pressure_reasons=("available memory 75.0%",),
             queues=QueueDepths(),
         )
 
-    def sample(self, *, queues: QueueDepths) -> TelemetrySnapshot:
+    def sample(self, *, queues: QueueDepths, memory_allocation=None) -> TelemetrySnapshot:
         return replace(self.snapshot, queues=queues)
 
 
@@ -194,7 +201,11 @@ def test_monitor_reloads_telemetry_switch_before_adaptation(tmp_path, monkeypatc
     monitor._sample()
     assert len(observed) == 2
     assert monitor.enabled is True
-    assert monitor.provenance()["machine_revision"] == 3
+    provenance = monitor.provenance()
+    assert provenance["machine_revision"] == 3
+    assert provenance["latest"]["memory_pressure_source"] == "macos_native"
+    assert provenance["latest"]["native_memory_pressure_level"] == 0
+    assert provenance["latest"]["swap_out_rate_bytes_per_second"] == 0.0
 
 
 def test_monitor_skips_adaptation_when_machine_settings_cannot_be_refreshed(

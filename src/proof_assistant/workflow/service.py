@@ -35,7 +35,6 @@ from ..concurrency import (
     LegacyVerificationPatch,
     MachineConcurrencySettings,
     MachineConfigStore,
-    PressureState,
     QueueDepths,
     ResourceProfile,
     SchedulerConcurrencyPatch,
@@ -508,30 +507,10 @@ class ProofAssistantWorkflow:
         ai = runtime.ai.status()
         lean = runtime.lean.status()
         build = runtime.build.status()
-        sample = self._telemetry.sample(
-            queues=QueueDepths(ai=ai.queued, lean=lean.queued, build=build.queued)
-        )
         allocation = detect_hardware()
-        total = min(sample.total_memory_bytes, allocation.total_memory_bytes)
-        available = min(
-            sample.available_memory_bytes,
-            allocation.available_memory_bytes,
-            total,
-        )
-        ratio = available / max(1, total)
-        pressure = sample.pressure
-        if ratio < 0.08:
-            pressure = PressureState.EMERGENCY
-        elif ratio < 0.15:
-            pressure = PressureState.RED
-        elif ratio <= 0.30 and pressure == PressureState.GREEN:
-            pressure = PressureState.YELLOW
-        sample = replace(
-            sample,
-            total_memory_bytes=total,
-            available_memory_bytes=available,
-            available_memory_ratio=ratio,
-            pressure=pressure,
+        sample = self._telemetry.sample(
+            queues=QueueDepths(ai=ai.queued, lean=lean.queued, build=build.queued),
+            memory_allocation=allocation,
         )
         if runtime.resolved.config.telemetry_enabled:
             runtime.observe_telemetry(sample)
@@ -560,8 +539,14 @@ class ProofAssistantWorkflow:
             ),
             memory_percent_available=100.0 * sample.available_memory_ratio,
             swap_used_gib=sample.swap_used_bytes / (1024**3),
-            swap_delta_gib=sample.swap_delta_bytes / (1024**3),
+            swap_out_mib_per_second=(
+                None
+                if sample.swap_out_rate_bytes_per_second is None
+                else sample.swap_out_rate_bytes_per_second / (1024**2)
+            ),
             memory_pressure=sample.pressure.value,
+            memory_pressure_source=sample.memory_pressure_source.value,
+            native_memory_pressure_level=sample.native_memory_pressure_level,
             load_average=sample.load_average,
             io_wait_percent=sample.disk_iowait_percent,
             ai_active=ai.active,
