@@ -14,6 +14,7 @@ from pathlib import Path
 from textual.app import App
 from textual.worker import Worker, get_current_worker
 
+from proof_assistant.tui.commands import GLOBAL_BINDINGS
 from proof_assistant.tui.screens import (
     ChangeReviewScreen,
     ClarificationScreen,
@@ -31,12 +32,20 @@ from proof_assistant.tui.screens import (
     ProjectReviewScreen,
     RecoveryScreen,
     ReportViewerScreen,
+    ShortcutHelpScreen,
     WelcomeScreen,
 )
 from proof_assistant.tui.settings import (
     ConcurrencyResourcesScreen,
     LegacySettingsScreen,
     SettingsHomeScreen,
+)
+from proof_assistant.tui.theme import (
+    DEFAULT_PROOF_THEME,
+    PROOF_DARK_THEME,
+    PROOF_LIGHT_THEME,
+    PROOF_THEMES,
+    THEME_VARIABLE_DEFAULTS,
 )
 from proof_assistant.workflow.contracts import (
     ChangeImpactPlan,
@@ -71,75 +80,169 @@ class ProofAssistantApp(App[None]):
 
     TITLE = "Proof Assistant"
     SUB_TITLE = "Persistent manuscript verification"
+    BINDINGS = GLOBAL_BINDINGS
     CSS = """
-    Screen { background: $surface; }
-    #page { width: 100%; height: 100%; padding: 1 3; }
-    .title { text-style: bold; color: $accent; margin-bottom: 1; }
-    .section { text-style: bold; margin-top: 1; }
-    .muted { color: $text-muted; }
-    .warning { color: $warning; border: tall $warning; padding: 0 1; margin: 1 0; }
-    .error { color: $error; border: tall $error; padding: 0 1; margin: 1 0; }
-    .success { color: $success; }
+    Screen {
+        background: $proof-page-background;
+        color: $foreground;
+    }
+    Header {
+        background: $proof-chrome-background;
+        color: $proof-chrome-foreground;
+    }
+    Footer {
+        background: $footer-background;
+        color: $footer-foreground;
+    }
+    FooterKey:hover { background: $proof-info-background; }
+    #page {
+        width: 100%; height: 100%; padding: 1 3;
+        background: $proof-page-background;
+    }
+    .title {
+        text-style: bold; color: $text-primary; margin-bottom: 1;
+    }
+    .section { text-style: bold; color: $text-secondary; margin-top: 1; }
+    .muted { color: $proof-muted; }
     .toolbar { height: auto; margin-top: 1; }
     .toolbar Button { margin-right: 1; }
-    Input { margin-bottom: 1; }
+    Input, Select {
+        margin-bottom: 1;
+        background: $proof-input-background;
+        border: tall $proof-panel-border;
+    }
+    Input:focus, Select:focus { border: tall $proof-focus; }
     #source-folder-controls { height: auto; }
     #source-folder-controls Input { width: 1fr; }
     #source-folder-controls Button { width: auto; margin-left: 1; }
-    TextArea { height: 12; border: round $accent; margin-bottom: 1; }
-    .copyable-info {
+    TextArea {
+        height: 12;
+        color: $foreground;
+        background: $proof-input-background;
+        border: round $proof-panel-border;
+        margin-bottom: 1;
+    }
+    TextArea:focus { border: round $proof-focus; }
+    .copyable-info, .copyable-info:focus {
         border: none; padding: 0; margin: 0; background: transparent;
     }
-    #project-list { height: 1fr; border: round $panel; padding: 1; }
-    #folder-picker-table { height: 1fr; min-height: 6; border: round $panel; }
+    .warning, .warning:focus {
+        color: $proof-warning-text;
+        background: $proof-warning-background;
+        border: tall $warning;
+        padding: 0 1; margin: 1 0;
+    }
+    .error, .error:focus {
+        color: $proof-error-text;
+        background: $proof-error-background;
+        border: tall $error;
+        padding: 0 1; margin: 1 0;
+    }
+    .success { color: $proof-success-text; }
+    DataTable, Tree, RadioSet {
+        background: $proof-panel-background;
+        border: round $proof-panel-border;
+    }
+    DataTable:focus, Tree:focus, RadioSet:focus { border: round $proof-focus; }
+    #project-list {
+        height: 1fr; border: round $proof-panel-border;
+        background: $proof-panel-background; padding: 1;
+    }
+    #folder-picker-table {
+        height: 1fr; min-height: 6; border: round $proof-panel-border;
+        background: $proof-panel-background;
+    }
     #folder-picker-controls Button { min-width: 0; width: auto; }
     .project-row { height: auto; margin-bottom: 1; }
     .project-row .project-summary { width: 1fr; }
     .project-row Button { width: auto; }
-    #main-file-options { height: auto; border: round $panel; padding: 1; }
-    #project-review { height: auto; border: round $accent; padding: 1; }
-    #progress-sources { height: 7; border: round $accent; }
-    #progress-stages { height: 16; border: round $panel; }
-    #progress-log { height: 1fr; min-height: 6; border: round $panel; }
-    #cancellation-report { height: 1fr; min-height: 14; border: round $warning; }
+    #main-file-options {
+        height: auto; border: round $proof-panel-border;
+        background: $proof-panel-background; padding: 1;
+    }
+    #project-review {
+        height: auto; border: round $proof-focus;
+        background: $proof-info-background; padding: 1;
+    }
+    #progress-sources {
+        height: 7; border: round $proof-focus;
+        background: $proof-info-background;
+    }
+    #progress-stages {
+        height: 16; border: round $proof-panel-border;
+        background: $proof-panel-background;
+    }
+    #progress-log {
+        height: 1fr; min-height: 6; border: round $proof-panel-border;
+    }
+    #cancellation-report {
+        height: 1fr; min-height: 14; border: round $warning;
+        background: $proof-warning-background; color: $proof-warning-text;
+    }
     #report-tabs { height: 1fr; min-height: 8; }
-    #report-markdown { height: 1fr; border: round $panel; }
-    #report-source { height: 1fr; border: round $accent; }
+    #report-markdown {
+        height: 1fr; border: round $proof-panel-border;
+        background: $proof-panel-background;
+    }
+    #report-source { height: 1fr; border: round $proof-focus; }
     #failure-tabs { height: 1fr; min-height: 8; }
     #failure-tree, #failure-components, #failure-detail, #failure-outline {
-        height: 1fr; min-height: 6; border: round $panel;
+        height: 1fr; min-height: 6; border: round $proof-panel-border;
+        background: $proof-panel-background;
     }
     ProjectDeletionConfirmationScreen {
-        align: center middle; background: $background 70%;
+        align: center middle; background: $proof-overlay;
     }
     #delete-project-dialog {
         width: 92%; max-width: 76; height: 92%; max-height: 22;
-        border: round $error; background: $surface; padding: 1 2;
+        border: round $error; background: $proof-dialog-background; padding: 1 2;
     }
     .progress-warning { height: 5; }
     ProgressScreen #status-line { height: 3; border: none; }
     #source-excerpt {
-        height: 1fr; min-height: 10; border: round $accent; overflow: auto;
+        height: 1fr; min-height: 10; border: round $proof-focus;
+        background: $proof-code-background; overflow: auto;
     }
-    #impact-detail { height: 1fr; border: round $panel; padding: 1; overflow: auto; }
-    #findings-detail { height: 1fr; border: round $panel; padding: 1; overflow: auto; }
+    #impact-detail, #findings-detail {
+        height: 1fr; border: round $proof-panel-border;
+        background: $proof-panel-background; padding: 1; overflow: auto;
+    }
     #status-line { margin: 1 0; }
-    #settings-machine-summary { height: 7; border: round $panel; }
-    #concurrency-summary { height: 18; border: round $accent; }
-    #resource-telemetry { height: 10; border: round $panel; }
-    #settings-resolution { height: 12; border: round $panel; }
-    #benchmark-result { height: 8; border: round $panel; }
-    #legacy-settings-summary { height: 16; border: round $panel; }
+    #settings-machine-summary { height: 7; border: round $proof-panel-border; }
+    #concurrency-summary {
+        height: 18; border: round $proof-focus;
+        background: $proof-info-background;
+    }
+    #resource-telemetry { height: 10; border: round $proof-panel-border; }
+    #settings-resolution { height: 12; border: round $proof-panel-border; }
+    #benchmark-result { height: 8; border: round $proof-panel-border; }
+    #legacy-settings-summary { height: 16; border: round $proof-panel-border; }
     .settings-benchmark-toolbar { height: auto; }
     .settings-benchmark-toolbar Button { width: auto; margin-bottom: 1; }
     SettingsWarningConfirmationScreen {
-        align: center middle; background: $background 70%;
+        align: center middle; background: $proof-overlay;
     }
     #settings-warning-dialog {
         width: 92%; max-width: 76; height: 92%; max-height: 22;
-        border: round $warning; background: $surface; padding: 1 2;
+        border: round $warning; background: $proof-dialog-background; padding: 1 2;
     }
-    #settings-warning-detail { height: 1fr; min-height: 7; }
+    #settings-warning-detail {
+        height: 1fr; min-height: 7;
+        background: $proof-warning-background; color: $proof-warning-text;
+    }
+    ShortcutHelpScreen {
+        align: center middle; background: $proof-overlay;
+    }
+    #shortcut-help-dialog {
+        width: 96%; max-width: 104; height: 92%;
+        border: round $proof-focus;
+        background: $proof-dialog-background; padding: 1 2;
+    }
+    #shortcut-reference {
+        height: 1fr; min-height: 12;
+        border: round $proof-panel-border;
+        background: $proof-panel-background;
+    }
     """
 
     def __init__(
@@ -157,8 +260,27 @@ class ProofAssistantApp(App[None]):
         self._observer_worker: Worker[None] | None = None
         self._progress_screen: ProgressScreen | None = None
 
+    def get_theme_variable_defaults(self) -> dict[str, str]:
+        return THEME_VARIABLE_DEFAULTS
+
     def on_mount(self) -> None:
+        for theme in PROOF_THEMES:
+            self.register_theme(theme)
+        self.theme = DEFAULT_PROOF_THEME
         self.push_screen(WelcomeScreen())
+
+    def action_show_shortcuts(self) -> None:
+        if isinstance(self.screen, ShortcutHelpScreen):
+            self.pop_screen()
+        else:
+            self.push_screen(ShortcutHelpScreen())
+
+    def action_toggle_proof_theme(self) -> None:
+        self.theme = (
+            PROOF_LIGHT_THEME.name
+            if self.theme == PROOF_DARK_THEME.name
+            else PROOF_DARK_THEME.name
+        )
 
     def show_welcome(self) -> None:
         self.switch_screen(WelcomeScreen())

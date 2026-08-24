@@ -16,7 +16,6 @@ from textual.screen import ModalScreen
 from textual.widgets import (
     Button,
     Checkbox,
-    Footer,
     Header,
     Input,
     Label,
@@ -24,6 +23,14 @@ from textual.widgets import (
     TextArea,
 )
 
+from proof_assistant.tui.commands import (
+    BACK,
+    CANCEL,
+    CONFIRM,
+    REFRESH,
+    SAVE,
+    CommandFooter,
+)
 from proof_assistant.tui.screens import CopyableText, NoticeScreen
 from proof_assistant.workflow.contracts import (
     BenchmarkKind,
@@ -207,7 +214,7 @@ def _legacy_text(snapshot: MachineSettingsSnapshot) -> str:
 class SettingsHomeScreen(NoticeScreen):
     """Machine settings landing page with distinct modern and legacy routes."""
 
-    BINDINGS = [("escape", "back", "Back")]
+    BINDINGS = [BACK.binding(), REFRESH.binding()]
 
     def __init__(
         self,
@@ -263,7 +270,7 @@ class SettingsHomeScreen(NoticeScreen):
                 id="status-line",
                 classes="muted",
             )
-        yield Footer()
+        yield CommandFooter()
 
     def on_mount(self) -> None:
         if self.snapshot is None:
@@ -271,6 +278,9 @@ class SettingsHomeScreen(NoticeScreen):
 
     def action_back(self) -> None:
         self.proof_app.close_settings()
+
+    def action_refresh(self) -> None:
+        self.refresh_snapshot()
 
     def refresh_snapshot(self) -> None:
         def load() -> None:
@@ -394,7 +404,7 @@ class _SettingsEditorScreen(NoticeScreen):
 class ConcurrencyResourcesScreen(_SettingsEditorScreen):
     """Editable policy plus live backend resource/controller observations."""
 
-    BINDINGS = [("escape", "back", "Settings")]
+    BINDINGS = [BACK.binding(), SAVE.binding()]
 
     def __init__(
         self,
@@ -576,13 +586,16 @@ class ConcurrencyResourcesScreen(_SettingsEditorScreen):
                 id="status-line",
                 classes="muted",
             )
-        yield Footer()
+        yield CommandFooter()
 
     def on_mount(self) -> None:
         self.set_interval(2.0, self.refresh_status)
 
     def action_back(self) -> None:
         self.proof_app.show_settings(self.snapshot, project=self.project)
+
+    def action_save(self) -> None:
+        self._save()
 
     def _configured_from_form(self) -> ConcurrencySettingsView:
         configured = self.snapshot.configured
@@ -920,7 +933,7 @@ class ConcurrencyResourcesScreen(_SettingsEditorScreen):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         button_id = event.button.id
         if button_id == "save-concurrency":
-            self._save()
+            self.action_save()
         elif button_id == "reset-concurrency":
             self._reset()
         elif button_id == "concurrency-back":
@@ -954,7 +967,7 @@ class ConcurrencyResourcesScreen(_SettingsEditorScreen):
 class LegacySettingsScreen(_SettingsEditorScreen):
     """Visible home for old coupled controls during the migration period."""
 
-    BINDINGS = [("escape", "back", "Settings")]
+    BINDINGS = [BACK.binding(), SAVE.binding()]
 
     def __init__(
         self,
@@ -1005,10 +1018,13 @@ class LegacySettingsScreen(_SettingsEditorScreen):
                 id="status-line",
                 classes="muted",
             )
-        yield Footer()
+        yield CommandFooter()
 
     def action_back(self) -> None:
         self.proof_app.show_settings(self.snapshot, project=self.project)
+
+    def action_save(self) -> None:
+        self._save()
 
     def _save(self) -> None:
         try:
@@ -1064,7 +1080,7 @@ class LegacySettingsScreen(_SettingsEditorScreen):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "save-legacy":
-            self._save()
+            self.action_save()
         elif event.button.id == "legacy-back":
             self.action_back()
 
@@ -1072,7 +1088,7 @@ class LegacySettingsScreen(_SettingsEditorScreen):
 class SettingsWarningConfirmationScreen(ModalScreen[bool]):
     """Cancel-first confirmation for backend-classified unsafe settings."""
 
-    BINDINGS = [("escape", "cancel", "Cancel")]
+    BINDINGS = [CANCEL.binding(), CONFIRM.binding()]
 
     def __init__(self, preview: SettingsChangePreview) -> None:
         super().__init__()
@@ -1109,9 +1125,13 @@ class SettingsWarningConfirmationScreen(ModalScreen[bool]):
                     id="settings-warning-confirm",
                     variant="warning",
                 )
+        yield CommandFooter()
 
     def action_cancel(self) -> None:
         self.dismiss(False)
+
+    def action_confirm(self) -> None:
+        self.dismiss(True)
 
     def on_mount(self) -> None:
         self.set_timer(0.01, self._focus_cancel)
@@ -1125,6 +1145,6 @@ class SettingsWarningConfirmationScreen(ModalScreen[bool]):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "settings-warning-confirm":
-            self.dismiss(True)
+            self.action_confirm()
         elif event.button.id == "settings-warning-cancel":
-            self.dismiss(False)
+            self.action_cancel()

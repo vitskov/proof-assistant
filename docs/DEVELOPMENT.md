@@ -75,7 +75,10 @@ Test the Textual app with its pilot/headless driver. Cover:
 14. findings categories and evidence paths; and
 15. an 80×24 terminal-native report viewer with rendered Markdown, a selectable
     source tab, no OS opener call, normalized load errors, and Back/Close
-    navigation.
+    navigation; and
+16. a permanent context-sensitive command footer, F1 shortcut reference,
+    editable-field-safe `?`, command palette, and WCAG-checked light/dark
+    semantic themes at both ordinary and 80×24 terminal sizes.
 
 Backend source tests must cover rapid editor-style replace sequences,
 simultaneous changes to several `\input` files, adds/deletes/renames, and staged

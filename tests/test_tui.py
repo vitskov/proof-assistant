@@ -24,6 +24,7 @@ from textual.widgets import (
 
 import proof_assistant.tui.screens as tui_screens
 from proof_assistant.tui import ProofAssistantApp
+from proof_assistant.tui.commands import CommandFooter
 from proof_assistant.tui.screens import (
     ChangeReviewScreen,
     ClarificationScreen,
@@ -42,6 +43,7 @@ from proof_assistant.tui.screens import (
     ProjectReviewScreen,
     RecoveryScreen,
     ReportViewerScreen,
+    ShortcutHelpScreen,
     WelcomeScreen,
 )
 from proof_assistant.tui.settings import (
@@ -50,6 +52,7 @@ from proof_assistant.tui.settings import (
     SettingsHomeScreen,
     SettingsWarningConfirmationScreen,
 )
+from proof_assistant.tui.theme import PROOF_DARK_THEME, PROOF_LIGHT_THEME
 from proof_assistant.workflow.contracts import (
     AdaptiveHistoryResetResult,
     BenchmarkKind,
@@ -1014,6 +1017,63 @@ def test_nonselectable_static_output_has_an_explicit_copyable_twin() -> None:
     }
     assert ids == {"source-excerpt"}
     assert "source-excerpt-copy" in source_path.read_text(encoding="utf-8")
+
+
+@async_test
+async def test_permanent_command_footer_help_and_theme_toggle() -> None:
+    service = FakeWorkflowService()
+    app = ProofAssistantApp(service)
+
+    async with app.run_test(size=(120, 42)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        await wait_for(pilot, lambda: bool(app.screen.query(CommandFooter).nodes))
+        assert app.theme == PROOF_DARK_THEME.name
+        assert {"f1", "ctrl+p", "ctrl+t", "ctrl+q", "n", "r", "s"}.issubset(
+            app.screen.active_bindings
+        )
+
+        await pilot.press("ctrl+p")
+        await wait_for(pilot, lambda: app.screen.__class__.__name__ == "CommandPalette")
+        await pilot.press("escape")
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+
+        await pilot.press("f1")
+        await wait_for(pilot, lambda: isinstance(app.screen, ShortcutHelpScreen))
+        reference = app.screen.query_one("#shortcut-reference", TextArea).text
+        assert "F1 / ?" in reference
+        assert "Ctrl+P" in reference
+        assert "Ctrl+T" in reference
+        assert "Ctrl+Enter" in reference
+        assert "Ctrl+S" in reference
+        assert app.screen.query_one(CommandFooter)
+
+        await pilot.press("ctrl+t")
+        assert app.theme == PROOF_LIGHT_THEME.name
+        assert app.get_css_variables()["proof-page-background"] == "#FFFCF0"
+
+        await pilot.press("escape")
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        assert app.theme == PROOF_LIGHT_THEME.name
+        assert app.screen.query_one(CommandFooter)
+
+
+@async_test
+async def test_question_mark_remains_typable_while_f1_help_is_global() -> None:
+    service = FakeWorkflowService()
+    app = ProofAssistantApp(service)
+
+    async with app.run_test(size=(100, 36)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        await pilot.press("n")
+        await wait_for(pilot, lambda: isinstance(app.screen, NewProjectScreen))
+        name = app.screen.query_one("#project-name", Input)
+        name.focus()
+        await pilot.press("question_mark")
+        assert name.value == "?"
+        assert isinstance(app.screen, NewProjectScreen)
+
+        await pilot.press("f1")
+        await wait_for(pilot, lambda: isinstance(app.screen, ShortcutHelpScreen))
 
 
 @async_test
