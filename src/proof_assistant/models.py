@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from typing import Any
+from .json_types import JSONObject
 
 
-def model_id(entry: dict[str, Any]) -> str:
+def model_id(entry: JSONObject) -> str:
     return str(
         entry.get("model")
         or entry.get("id")
@@ -13,12 +13,14 @@ def model_id(entry: dict[str, Any]) -> str:
     )
 
 
-def supported_efforts(entry: dict[str, Any]) -> list[str]:
+def supported_efforts(entry: JSONObject) -> list[str]:
     raw = (
         entry.get("supportedReasoningEfforts")
         or entry.get("supported_reasoning_efforts")
         or []
     )
+    if not isinstance(raw, list):
+        return []
     values: list[str] = []
     for item in raw:
         if isinstance(item, str):
@@ -37,7 +39,7 @@ def supported_efforts(entry: dict[str, Any]) -> list[str]:
 
 
 def validate_model_effort(
-    catalog: list[dict[str, Any]],
+    catalog: list[JSONObject],
     *,
     model: str,
     effort: str,

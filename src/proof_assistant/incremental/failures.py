@@ -268,15 +268,15 @@ def _nodes(
     claim_ids = set(selected) | set(incident_ids)
     result: list[FailureGraphNode] = []
     for claim_id in sorted(claim_ids):
-        row = frozen.get(claim_id)
+        frozen_row = frozen.get(claim_id)
         version = versions.get(claim_id)
         current = store.claim_row(claim_id)
-        if row is not None:
-            kind = str(row["kind"])
-            source_file = str(row["source_file"])
-            statement_start = int(row["statement_start"])
-            statement_end = int(row["statement_end"])
-            state = str(row["state"])
+        if frozen_row is not None:
+            kind = str(frozen_row["kind"])
+            source_file = str(frozen_row["source_file"])
+            statement_start = int(frozen_row["statement_start"])
+            statement_end = int(frozen_row["statement_end"])
+            state = str(frozen_row["state"])
         elif version is not None:
             kind = str(version["kind"])
             source_file = str(version["source_file"])
@@ -339,8 +339,8 @@ def _edges(
 
 def _graph(
     nodes: tuple[FailureGraphNode, ...], edges: tuple[FailureGraphEdge, ...]
-) -> nx.DiGraph:
-    graph = nx.DiGraph()
+) -> nx.DiGraph[str]:
+    graph: nx.DiGraph[str] = nx.DiGraph()
     graph.add_nodes_from(node.claim_id for node in nodes)
     graph.add_edges_from(
         (edge.dependent, edge.dependency)
@@ -351,7 +351,7 @@ def _graph(
 
 
 def _paths(
-    graph: nx.DiGraph,
+    graph: nx.DiGraph[str],
     targets: tuple[str, ...],
     blockers: set[str],
 ) -> tuple[FailurePath, ...]:
@@ -391,7 +391,7 @@ def _paths(
 
 
 def _outline(
-    graph: nx.DiGraph,
+    graph: nx.DiGraph[str],
     *,
     targets: tuple[str, ...],
     node_map: dict[str, FailureGraphNode],
@@ -496,7 +496,7 @@ def _outline(
 
 
 def _components(
-    graph: nx.DiGraph,
+    graph: nx.DiGraph[str],
     *,
     node_map: dict[str, FailureGraphNode],
     blockers: set[str],

@@ -19,8 +19,14 @@ rejection.
 cd "$HOME/src/proof-assistant"
 uv pip install --python "$HOME/.venvs/proof-assistant/bin/python" -e '.[dev]'
 proof-assistant compiler-check
+"$HOME/.venvs/proof-assistant/bin/python" scripts/check_typing_policy.py
+"$HOME/.venvs/proof-assistant/bin/python" -m mypy
 "$HOME/.venvs/proof-assistant/bin/python" -m pytest -q
 ```
+
+Follow [Python 3.13 development style](PYTHON_STYLE.md) for strict typing,
+validated JSON boundaries, selective dataclass slots, and recommendations for
+reducing the remaining dynamic surface.
 
 ## Architectural rules
 
@@ -131,6 +137,8 @@ distribution/import/repository names `proof-assistant` / `proof_assistant` /
 
 ```bash
 git diff --check
+"$HOME/.venvs/proof-assistant/bin/python" scripts/check_typing_policy.py
+"$HOME/.venvs/proof-assistant/bin/python" -m mypy
 "$HOME/.venvs/proof-assistant/bin/python" -m pytest -q
 uv build --python "$HOME/.venvs/proof-assistant/bin/python"
 ```

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fcntl
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
@@ -108,7 +109,7 @@ class LeanAdmissionController(AdmissionController):
         *,
         timeout: float = 60.0,
         ttl_seconds: float = 3600.0,
-    ):
+    ) -> Iterator[AdmissionLease]:
         """Pause new Lean work and admit one crash-recoverable calibration.
 
         Calibration is refused when work is already active or queued. A
@@ -213,15 +214,8 @@ class LeanAdmissionController(AdmissionController):
         if state == "emergency":
             return self._resize(self.minimum, now)
 
-        shrink = (
-            state == "red"
-            or (cpu_percent > 92.0 and not throughput_improved)
-        )
-        grow = (
-            state == "green"
-            and queue_depth > 0
-            and cpu_percent < 75.0
-        )
+        shrink = state == "red" or (cpu_percent > 92.0 and not throughput_improved)
+        grow = state == "green" and queue_depth > 0 and cpu_percent < 75.0
         if shrink:
             self._shrink_samples += 1
             self._grow_samples = 0

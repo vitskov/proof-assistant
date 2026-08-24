@@ -5,7 +5,7 @@ import sqlite3
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from .models import ClaimState, LeanDeclaration, ManuscriptEdge, Snapshot, SourceObject
 
@@ -22,6 +22,20 @@ FAILURE_KINDS = frozenset(
         "UNKNOWN",
     }
 )
+
+
+def _row(cursor: sqlite3.Cursor) -> sqlite3.Row | None:
+    """Narrow sqlite's dynamically typed ``fetchone`` at one audited seam."""
+
+    return cast(sqlite3.Row | None, cursor.fetchone())
+
+
+def _last_row_id(cursor: sqlite3.Cursor) -> int:
+    value = cursor.lastrowid
+    if value is None:
+        raise RuntimeError("SQLite insert did not produce a row id")
+    return value
+
 
 SCHEMA_SQL = """
 PRAGMA foreign_keys = ON;
@@ -531,7 +545,7 @@ class StateStore:
                 environment_hash,
             ),
         )
-        return int(cursor.lastrowid)
+        return _last_row_id(cursor)
 
     def update_run_snapshot(
         self,
@@ -563,14 +577,14 @@ class StateStore:
         )
 
     def latest_run(self) -> sqlite3.Row | None:
-        return self.connection.execute(
-            "SELECT * FROM runs ORDER BY run_id DESC LIMIT 1"
-        ).fetchone()
+        return _row(
+            self.connection.execute("SELECT * FROM runs ORDER BY run_id DESC LIMIT 1")
+        )
 
     def run_row(self, run_id: int) -> sqlite3.Row | None:
-        return self.connection.execute(
-            "SELECT * FROM runs WHERE run_id = ?", (run_id,)
-        ).fetchone()
+        return _row(
+            self.connection.execute("SELECT * FROM runs WHERE run_id = ?", (run_id,))
+        )
 
     def record_run_concurrency(
         self,
@@ -639,8 +653,9 @@ class StateStore:
         }
 
     def latest_failure_run(self) -> sqlite3.Row | None:
-        return self.connection.execute(
-            """
+        return _row(
+            self.connection.execute(
+                """
             SELECT runs.* FROM runs
             WHERE EXISTS (
                 SELECT 1 FROM failure_incidents
@@ -658,8 +673,9 @@ class StateStore:
             )
             ORDER BY runs.run_id DESC LIMIT 1
             """,
-            (str(ClaimState.FAILED_TECHNICAL),),
-        ).fetchone()
+                (str(ClaimState.FAILED_TECHNICAL),),
+            )
+        )
 
     def record_run_scope(
         self,
@@ -857,7 +873,7 @@ class StateStore:
                     int(retryable),
                 ),
             )
-            failure_id = int(cursor.lastrowid)
+            failure_id = _last_row_id(cursor)
             unique_claims = tuple(sorted(set(claim_ids)))
             connection.executemany(
                 """
@@ -986,9 +1002,11 @@ class StateStore:
         return self.get_metadata("current_snapshot")
 
     def snapshot_row(self, snapshot: str) -> sqlite3.Row | None:
-        return self.connection.execute(
-            "SELECT * FROM snapshots WHERE snapshot_commit = ?", (snapshot,)
-        ).fetchone()
+        return _row(
+            self.connection.execute(
+                "SELECT * FROM snapshots WHERE snapshot_commit = ?", (snapshot,)
+            )
+        )
 
     def source_file_rows(self, snapshot: str) -> list[sqlite3.Row]:
         return list(
@@ -1009,15 +1027,19 @@ class StateStore:
         )
 
     def claim_row(self, claim_id: str) -> sqlite3.Row | None:
-        return self.connection.execute(
-            "SELECT * FROM claims WHERE claim_id = ?", (claim_id,)
-        ).fetchone()
+        return _row(
+            self.connection.execute(
+                "SELECT * FROM claims WHERE claim_id = ?", (claim_id,)
+            )
+        )
 
     def claim_version(self, snapshot: str, claim_id: str) -> sqlite3.Row | None:
-        return self.connection.execute(
-            "SELECT * FROM claim_versions WHERE snapshot_commit = ? AND claim_id = ?",
-            (snapshot, claim_id),
-        ).fetchone()
+        return _row(
+            self.connection.execute(
+                "SELECT * FROM claim_versions WHERE snapshot_commit = ? AND claim_id = ?",
+                (snapshot, claim_id),
+            )
+        )
 
     def claim_versions(self, snapshot: str) -> list[sqlite3.Row]:
         return list(
@@ -1271,9 +1293,11 @@ class StateStore:
                 )
 
     def lean_declaration(self, name: str) -> sqlite3.Row | None:
-        return self.connection.execute(
-            "SELECT * FROM lean_declarations WHERE name = ?", (name,)
-        ).fetchone()
+        return _row(
+            self.connection.execute(
+                "SELECT * FROM lean_declarations WHERE name = ?", (name,)
+            )
+        )
 
     def lean_dependencies(self, name: str) -> tuple[str, ...]:
         return tuple(
@@ -1320,9 +1344,11 @@ class StateStore:
         )
 
     def certificate(self, claim_id: str) -> sqlite3.Row | None:
-        return self.connection.execute(
-            "SELECT * FROM certificates WHERE claim_id = ?", (claim_id,)
-        ).fetchone()
+        return _row(
+            self.connection.execute(
+                "SELECT * FROM certificates WHERE claim_id = ?", (claim_id,)
+            )
+        )
 
     def upsert_certificate(self, payload: dict[str, Any]) -> None:
         self.connection.execute(
@@ -1442,9 +1468,11 @@ class StateStore:
         )
 
     def question_row(self, question_id: str) -> sqlite3.Row | None:
-        return self.connection.execute(
-            "SELECT * FROM clarifications WHERE question_id = ?", (question_id,)
-        ).fetchone()
+        return _row(
+            self.connection.execute(
+                "SELECT * FROM clarifications WHERE question_id = ?", (question_id,)
+            )
+        )
 
     def run_claim_rows(self, run_id: int) -> list[sqlite3.Row]:
         return list(

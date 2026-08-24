@@ -28,6 +28,7 @@ from textual.widgets import (
     TextArea,
     Tree,
 )
+from textual.widgets.tree import TreeNode
 
 from proof_assistant.tui.commands import (
     BACK,
@@ -142,6 +143,14 @@ class CopyableText(TextArea):
             )
             minimum = 3 if border_rows else 1
             self.styles.height = max(minimum, min(max_lines, line_count + border_rows))
+
+
+class _ProjectActionButton(Button):
+    """Button carrying a typed project-catalog action payload."""
+
+    def __init__(self, *args: object, payload: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+        self.payload = payload
 
 
 @dataclass(frozen=True)
@@ -307,19 +316,35 @@ class WelcomeScreen(NoticeScreen):
         elif button_id == "settings":
             self.action_settings()
         elif button_id.startswith("resume-"):
-            project = event.button.data
+            project = (
+                event.button.payload
+                if isinstance(event.button, _ProjectActionButton)
+                else None
+            )
             if isinstance(project, ProjectSummary):
                 self.proof_app.resume_project(project)
         elif button_id.startswith("select-existing-main-"):
-            entry = event.button.data
+            entry = (
+                event.button.payload
+                if isinstance(event.button, _ProjectActionButton)
+                else None
+            )
             if isinstance(entry, ProjectCatalogEntry):
                 self.proof_app.show_existing_project_main_selection(entry)
         elif button_id.startswith("delete-project-"):
-            project = event.button.data
+            project = (
+                event.button.payload
+                if isinstance(event.button, _ProjectActionButton)
+                else None
+            )
             if isinstance(project, ProjectSummary):
                 self.proof_app.request_project_deletion(project)
         elif button_id.startswith("open-catalog-"):
-            project = event.button.data
+            project = (
+                event.button.payload
+                if isinstance(event.button, _ProjectActionButton)
+                else None
+            )
             if isinstance(project, Path):
                 self.proof_app.open_location(project)
 
@@ -334,9 +359,12 @@ class WelcomeScreen(NoticeScreen):
                     self.show_notice, f"Could not load projects: {exc}", error=True
                 )
                 return
-            self.proof_app.call_from_thread(self._render_projects, projects)
+            self.proof_app.call_from_thread(self._start_render_projects, projects)
 
         self.run_worker(load, thread=True, exclusive=True, group="catalog")
+
+    def _start_render_projects(self, projects: tuple[ProjectCatalogEntry, ...]) -> None:
+        self.run_worker(self._render_projects(projects), group="catalog-render")
 
     async def _render_projects(self, projects: tuple[ProjectCatalogEntry, ...]) -> None:
         container = self.query_one("#project-list", Vertical)
@@ -361,26 +389,33 @@ class WelcomeScreen(NoticeScreen):
             detail = CopyableText("\n".join(lines), classes="project-summary")
             controls: list[Button] = []
             if entry.resumable:
-                button = Button("Resume", id=f"resume-{index}")
-                button.data = project
+                button = _ProjectActionButton(
+                    "Resume", id=f"resume-{index}", payload=project
+                )
                 controls.append(button)
-                delete_button = Button(
+                delete_button = _ProjectActionButton(
                     "Delete project",
                     id=f"delete-project-{index}",
                     variant="error",
+                    payload=project,
                 )
-                delete_button.data = project
                 controls.append(delete_button)
             elif entry.availability == ProjectAvailability.NEEDS_MAIN_FILE:
-                button = Button("Select main file", id=f"select-existing-main-{index}")
-                button.data = entry
+                button = _ProjectActionButton(
+                    "Select main file",
+                    id=f"select-existing-main-{index}",
+                    payload=entry,
+                )
                 controls.append(button)
             elif entry.availability in {
                 ProjectAvailability.INCOMPLETE,
                 ProjectAvailability.OCCUPIED,
             }:
-                button = Button("Open folder", id=f"open-catalog-{index}")
-                button.data = entry.project_path
+                button = _ProjectActionButton(
+                    "Open folder",
+                    id=f"open-catalog-{index}",
+                    payload=entry.project_path,
+                )
                 controls.append(button)
             await container.mount(Horizontal(detail, *controls, classes="project-row"))
         self.show_notice(f"{len(projects)} project(s) available.")
@@ -2032,9 +2067,9 @@ class FailureDependencyScreen(NoticeScreen):
             else {}
         )
         self._cycle_rows: dict[str, _FailureSelection] = {}
-        self._first_tree_node = None
+        self._first_tree_node: TreeNode[_FailureSelection] | None = None
         self._tree = self._make_tree() if report and not report.has_cycles else None
-        self._component_table = (
+        self._component_table: DataTable[str | Text] | None = (
             self._make_component_table() if report and report.has_cycles else None
         )
 
@@ -2146,9 +2181,9 @@ class FailureDependencyScreen(NoticeScreen):
             )
         return tree
 
-    def _make_component_table(self) -> DataTable:
+    def _make_component_table(self) -> DataTable[str | Text]:
         assert self.report is not None
-        table = DataTable(
+        table: DataTable[str | Text] = DataTable(
             show_row_labels=False,
             cursor_type="row",
             zebra_stripes=True,

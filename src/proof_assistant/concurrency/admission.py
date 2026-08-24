@@ -653,7 +653,7 @@ class AdmissionController:
         *,
         timeout: float | None = None,
         heartbeat: bool = True,
-    ):
+    ) -> Iterator[AdmissionLease]:
         """Acquire, keep alive, and reliably release one admission lease.
 
         Long Codex turns and builds can exceed their initial TTL.  The daemon

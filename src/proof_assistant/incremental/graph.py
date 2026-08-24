@@ -18,14 +18,14 @@ class DependencyCycleError(RuntimeError):
 
 def build_graph(
     claim_ids: Iterable[str], edges: Iterable[ManuscriptEdge]
-) -> nx.DiGraph:
-    graph = nx.DiGraph()
+) -> nx.DiGraph[str]:
+    graph: nx.DiGraph[str] = nx.DiGraph()
     graph.add_nodes_from(sorted(set(claim_ids)))
     graph.add_edges_from((edge.src, edge.dst) for edge in edges if edge.approved)
     return graph
 
 
-def canonical_cycles(graph: nx.DiGraph) -> tuple[tuple[str, ...], ...]:
+def canonical_cycles(graph: nx.DiGraph[str]) -> tuple[tuple[str, ...], ...]:
     cycles: list[tuple[str, ...]] = []
     for component in nx.strongly_connected_components(graph):
         if len(component) > 1:

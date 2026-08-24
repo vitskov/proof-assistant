@@ -8,9 +8,9 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
-from .concurrency import AITaskClass, ConcurrencyRuntimeSpec
+from .concurrency import AITaskClass, ConcurrencyRuntime, ConcurrencyRuntimeSpec
+from .json_types import JSONObject, JSONValue
 from .models import validate_model_effort
 from .protocol import (
     AppServerClient,
@@ -41,7 +41,7 @@ class CodexConfig:
 @dataclass(frozen=True)
 class CodexToolCall:
     name: str
-    arguments: dict[str, Any] | Any
+    arguments: JSONValue
     result: str
     success: bool
 
@@ -53,7 +53,7 @@ class CodexResult:
     turn_id: str | None
     model: str
     effort: str
-    events: list[dict[str, Any]]
+    events: list[JSONObject]
     tool_calls: list[CodexToolCall] = field(default_factory=list)
 
 
@@ -96,11 +96,11 @@ class CodexBackend:
                 extra_args=extra_args,
             )
         self.client = client
-        self._tool_handler: Callable[[str, dict[str, Any]], str] | None = None
+        self._tool_handler: Callable[[str, JSONObject], str] | None = None
         self._tool_names: set[str] = set()
         self._tool_calls: list[CodexToolCall] = []
         self._tool_lock = threading.Lock()
-        self._concurrency_runtime: Any | None = None
+        self._concurrency_runtime: ConcurrencyRuntime | None = None
         self.client.register_request_handler("item/tool/call", self._on_tool_call)
 
         # Dynamic tools are authoritative. We fail closed on any unexpected
@@ -116,13 +116,13 @@ class CodexBackend:
     def close(self) -> None:
         self.client.close()
 
-    def _deny_approval(self, _params: dict[str, Any]) -> dict[str, Any]:
+    def _deny_approval(self, _params: JSONObject) -> JSONObject:
         # Protocol versions have used slightly different response fields. The
         # common decision vocabulary is "decline"/"denied"; returning both is
         # intentionally conservative for an integration smoke-test backend.
         return {"decision": "decline", "approved": False}
 
-    def initialize(self) -> dict[str, Any]:
+    def initialize(self) -> JSONObject:
         response = self.client.request(
             "initialize",
             {
@@ -142,13 +142,15 @@ class CodexBackend:
         if self.config.isolate_external_tools:
             self._validate_external_tool_isolation()
             self._validate_skill_isolation()
-        return response or {}
+        if not isinstance(response, dict):
+            raise CodexProtocolError("initialize returned a non-object response")
+        return response
 
     def _validate_external_tool_isolation(self) -> None:
         """Fail if the child still exposes an MCP/app/plugin capability."""
         cursor: str | None = None
         while True:
-            params: dict[str, Any] = {
+            params: JSONObject = {
                 "limit": 100,
                 "detail": "toolsAndAuthOnly",
             }
@@ -159,14 +161,17 @@ class CodexBackend:
                 params,
                 timeout=self.config.request_timeout,
             )
-            if not isinstance(response, dict) or not isinstance(
-                response.get("data"), list
-            ):
+            if not isinstance(response, dict):
+                raise CodexProtocolError(
+                    "mcpServerStatus/list returned an invalid isolation response"
+                )
+            data = response.get("data")
+            if not isinstance(data, list):
                 raise CodexProtocolError(
                     "mcpServerStatus/list returned an invalid isolation response"
                 )
             exposed: list[str] = []
-            for entry in response["data"]:
+            for entry in data:
                 if not isinstance(entry, dict):
                     raise CodexProtocolError(
                         "mcpServerStatus/list contained an invalid server record"
@@ -203,13 +208,23 @@ class CodexBackend:
             },
             timeout=self.config.request_timeout,
         )
-        if not isinstance(response, dict) or not isinstance(response.get("data"), list):
+        if not isinstance(response, dict):
+            raise CodexProtocolError(
+                "skills/list returned an invalid isolation response"
+            )
+        data = response.get("data")
+        if not isinstance(data, list):
             raise CodexProtocolError(
                 "skills/list returned an invalid isolation response"
             )
         enabled: list[str] = []
-        for entry in response["data"]:
-            if not isinstance(entry, dict) or not isinstance(entry.get("skills"), list):
+        for entry in data:
+            if not isinstance(entry, dict):
+                raise CodexProtocolError(
+                    "skills/list contained an invalid workspace record"
+                )
+            skills = entry.get("skills")
+            if not isinstance(skills, list):
                 raise CodexProtocolError(
                     "skills/list contained an invalid workspace record"
                 )
@@ -218,7 +233,7 @@ class CodexBackend:
                 raise CodexProtocolError(
                     "Codex reported skill discovery errors after isolation"
                 )
-            for skill in entry["skills"]:
+            for skill in skills:
                 if not isinstance(skill, dict):
                     raise CodexProtocolError(
                         "skills/list contained an invalid skill record"
@@ -231,17 +246,22 @@ class CodexBackend:
                 + ", ".join(sorted(enabled))
             )
 
-    def model_catalog(self) -> list[dict[str, Any]]:
+    def model_catalog(self) -> list[JSONObject]:
         response = self.client.request(
             "model/list",
             {"limit": 100},
             timeout=self.config.request_timeout,
         )
+        raw_catalog: JSONValue
         if isinstance(response, dict):
-            return list(response.get("data") or response.get("models") or [])
-        return list(response or [])
+            raw_catalog = response.get("data") or response.get("models") or []
+        else:
+            raw_catalog = response or []
+        if not isinstance(raw_catalog, list):
+            raise CodexProtocolError("model/list returned a non-list catalog")
+        return [entry for entry in raw_catalog if isinstance(entry, dict)]
 
-    def _on_tool_call(self, params: dict[str, Any]) -> dict[str, Any]:
+    def _on_tool_call(self, params: JSONObject) -> JSONObject:
         tool = str(params.get("tool") or "")
         raw_arguments = params.get("arguments", {})
         if self._tool_handler is None:
@@ -274,9 +294,7 @@ class CodexBackend:
         self._record_tool_call(tool, arguments, text, success)
         return dynamic_tool_result(text, success=success)
 
-    def _run_tool_handler_with_admission(
-        self, tool: str, arguments: dict[str, Any]
-    ) -> str:
+    def _run_tool_handler_with_admission(self, tool: str, arguments: JSONObject) -> str:
         """Apply machine resource admission at the common dynamic-tool seam.
 
         RepoProver-derived agents do not all share one Python mixin.  Gating
@@ -323,7 +341,7 @@ class CodexBackend:
     def _record_tool_call(
         self,
         tool: str,
-        arguments: dict[str, Any] | Any,
+        arguments: JSONValue,
         result: str,
         success: bool,
     ) -> None:
@@ -340,14 +358,14 @@ class CodexBackend:
     def _tool_failure(
         self,
         tool: str,
-        arguments: dict[str, Any] | Any,
+        arguments: JSONValue,
         message: str,
-    ) -> dict[str, Any]:
+    ) -> JSONObject:
         self._record_tool_call(tool, arguments, message, False)
         return dynamic_tool_result(message, success=False)
 
     @staticmethod
-    def _extract_thread_id(response: Any) -> str:
+    def _extract_thread_id(response: JSONValue) -> str:
         if not isinstance(response, dict):
             raise CodexProtocolError(f"Unexpected thread/start response: {response!r}")
         thread = response.get("thread")
@@ -360,7 +378,7 @@ class CodexBackend:
         raise CodexProtocolError(f"thread/start returned no thread id: {response!r}")
 
     @staticmethod
-    def _extract_turn_id(response: Any) -> str | None:
+    def _extract_turn_id(response: JSONValue) -> str | None:
         if not isinstance(response, dict):
             return None
         turn = response.get("turn")
@@ -373,11 +391,12 @@ class CodexBackend:
         return None
 
     @staticmethod
-    def _text_from_item(item: dict[str, Any]) -> str:
+    def _text_from_item(item: JSONObject) -> str:
         # v2 agentMessage items normally contain text directly; tolerate common
         # variants so the adapter is not unnecessarily brittle.
-        if isinstance(item.get("text"), str):
-            return item["text"]
+        text = item.get("text")
+        if isinstance(text, str):
+            return text
         content = item.get("content")
         if isinstance(content, str):
             return content
@@ -397,8 +416,8 @@ class CodexBackend:
         *,
         system_prompt: str,
         user_prompt: str,
-        tools: list[dict[str, Any]] | None,
-        tool_handler: Callable[[str, dict[str, Any]], str],
+        tools: list[JSONObject] | None,
+        tool_handler: Callable[[str, JSONObject], str],
     ) -> CodexResult:
         if self.config.concurrency is None:
             with _ACTIVE_TURNS:
@@ -437,7 +456,12 @@ class CodexBackend:
                 marker in message
                 for marker in ("rate limit", "rate-limit", "throttl", "429")
             ):
-                retry_after = getattr(exc, "retry_after", None)
+                raw_retry_after = getattr(exc, "retry_after", None)
+                retry_after = (
+                    float(raw_retry_after)
+                    if isinstance(raw_retry_after, int | float)
+                    else None
+                )
                 runtime.ai.record_throttle(retry_after=retry_after)
             elif isinstance(exc, (TimeoutError, CodexServerExited)) or any(
                 marker in message
@@ -464,8 +488,8 @@ class CodexBackend:
         *,
         system_prompt: str,
         user_prompt: str,
-        tools: list[dict[str, Any]] | None,
-        tool_handler: Callable[[str, dict[str, Any]], str],
+        tools: list[JSONObject] | None,
+        tool_handler: Callable[[str, JSONObject], str],
     ) -> CodexResult:
         self.client.start()
         self.initialize()
@@ -483,7 +507,7 @@ class CodexBackend:
         with self._tool_lock:
             self._tool_calls = []
 
-        thread_params: dict[str, Any] = {
+        thread_params: JSONObject = {
             "cwd": str(self.cwd) if self.cwd else None,
             "approvalPolicy": self.config.approval_policy,
             "sandbox": self.config.sandbox,
@@ -502,7 +526,7 @@ class CodexBackend:
         )
         thread_id = self._extract_thread_id(thread_response)
 
-        turn_params: dict[str, Any] = {
+        turn_params: JSONObject = {
             "threadId": thread_id,
             "input": [{"type": "text", "text": user_prompt}],
             "model": self.config.model,
@@ -513,7 +537,7 @@ class CodexBackend:
         )
         turn_id = self._extract_turn_id(turn_response)
 
-        events: list[dict[str, Any]] = []
+        events: list[JSONObject] = []
         final_chunks: list[str] = []
 
         while True:
@@ -528,7 +552,8 @@ class CodexBackend:
 
             events.append(notification)
             method = str(notification.get("method") or "")
-            params = notification.get("params") or {}
+            raw_params = notification.get("params") or {}
+            params = raw_params if isinstance(raw_params, dict) else {}
 
             if method == "_proof_assistant/server_exited":
                 raise CodexServerExited(

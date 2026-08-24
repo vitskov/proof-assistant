@@ -132,7 +132,7 @@ class CacheLease:
     def __enter__(self) -> Self:
         return self
 
-    def __exit__(self, *_exc) -> None:
+    def __exit__(self, *_exc: object) -> None:
         self.close()
 
 
@@ -155,7 +155,7 @@ class CacheReservation:
     def __enter__(self) -> Self:
         return self
 
-    def __exit__(self, *_exc) -> None:
+    def __exit__(self, *_exc: object) -> None:
         self.close()
 
 
@@ -1772,7 +1772,7 @@ class DependencyDepotClaim:
         """Make every acquired depot claim usable with deterministic cleanup."""
         return self
 
-    def __exit__(self, *_exc) -> None:
+    def __exit__(self, *_exc: object) -> None:
         self.close()
 
     @property
@@ -1948,23 +1948,27 @@ def claim_dependency_depot(
     # READY marker. If no depot exists, callers race non-blockingly for the
     # exclusive builder lease; losers return to waiting in shared mode.
     deadline = time.monotonic() + timeout
+    lease: CacheLease | None = None
     while True:
         remaining = max(0.0, deadline - time.monotonic())
-        lease = acquire_cache_lease(
+        shared_lease = acquire_cache_lease(
             layout, lease_name, exclusive=False, timeout=remaining
         )
         ready = dependency_depot_ready(target)
         if ready:
+            lease = shared_lease
             break
-        lease.close()
-        lease = try_cache_lease(layout, lease_name, exclusive=True)
-        if lease is not None:
+        shared_lease.close()
+        exclusive_lease = try_cache_lease(layout, lease_name, exclusive=True)
+        if exclusive_lease is not None:
+            lease = exclusive_lease
             ready = dependency_depot_ready(target)
             break
         if time.monotonic() >= deadline:
             raise CacheLocationError(
                 f"Timed out waiting for active cache lease: {lease_name}"
             )
+    assert lease is not None
     claim = DependencyDepotClaim(
         project=root,
         layout=layout,

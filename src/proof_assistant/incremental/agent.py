@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping, Sequence
+import sqlite3
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from ..concurrency import ConcurrencyRuntimeSpec
+from ..integration import RepoProverAgent
+from ..json_types import JSONObject
 from .diagnostics import (
     CLARIFICATION_CATEGORIES,
     CLARIFICATION_DIAGNOSTICS,
@@ -34,7 +37,7 @@ SEMANTIC_EDGE_KINDS = frozenset(
 )
 
 
-AGENT_TOOLS: list[dict[str, Any]] = [
+AGENT_TOOLS: list[JSONObject] = [
     {
         "type": "function",
         "function": {
@@ -207,7 +210,7 @@ class IncrementalAgentContext:
 
     def _claim(
         self, store: StateStore, claim_id: str, *, require_allowed: bool = False
-    ):
+    ) -> sqlite3.Row:
         if require_allowed and claim_id not in self.allowed_claims:
             raise ValueError(f"Claim is outside this proof batch: {claim_id}")
         row = store.claim_row(claim_id)
@@ -215,7 +218,7 @@ class IncrementalAgentContext:
             raise ValueError(f"Unknown current manuscript claim: {claim_id}")
         return row
 
-    def claim_get(self, arguments: dict[str, Any]) -> str:
+    def claim_get(self, arguments: JSONObject) -> str:
         claim_id = str(arguments.get("claim_id") or "")
         with StateStore(self.database) as store:
             row = self._claim(store, claim_id)
@@ -237,7 +240,7 @@ class IncrementalAgentContext:
                 sort_keys=True,
             )
 
-    def claim_list_dependencies(self, arguments: dict[str, Any]) -> str:
+    def claim_list_dependencies(self, arguments: JSONObject) -> str:
         claim_id = str(arguments.get("claim_id") or "")
         with StateStore(self.database) as store:
             self._claim(store, claim_id)
@@ -255,14 +258,14 @@ class IncrementalAgentContext:
             ]
             return json.dumps(dependencies, sort_keys=True)
 
-    def certificate_query(self, arguments: dict[str, Any]) -> str:
+    def certificate_query(self, arguments: JSONObject) -> str:
         claim_id = str(arguments.get("claim_id") or "")
         with StateStore(self.database) as store:
             self._claim(store, claim_id)
             row = store.certificate(claim_id)
             return json.dumps(dict(row) if row else None, sort_keys=True)
 
-    def git_diff_claim(self, arguments: dict[str, Any]) -> str:
+    def git_diff_claim(self, arguments: JSONObject) -> str:
         claim_id = str(arguments.get("claim_id") or "")
         with StateStore(self.database) as store:
             self._claim(store, claim_id)
@@ -286,7 +289,7 @@ class IncrementalAgentContext:
                 sort_keys=True,
             )
 
-    def claim_propose_dependency(self, arguments: dict[str, Any]) -> str:
+    def claim_propose_dependency(self, arguments: JSONObject) -> str:
         claim_id = str(arguments.get("claim_id") or "")
         dependency = str(arguments.get("depends_on") or "")
         kind = str(arguments.get("kind") or "")
@@ -333,7 +336,7 @@ class IncrementalAgentContext:
             )
         return f"Recorded {claim_id} -> {dependency} ({kind})"
 
-    def claim_mark_formalized(self, arguments: dict[str, Any]) -> str:
+    def claim_mark_formalized(self, arguments: JSONObject) -> str:
         claim_id = str(arguments.get("claim_id") or "")
         declaration = str(arguments.get("lean_declaration") or "")
         result = str(arguments.get("result") or "")
@@ -376,7 +379,7 @@ class IncrementalAgentContext:
                 )
         return "Correspondence recorded for independent host validation"
 
-    def clarification_request(self, arguments: dict[str, Any]) -> str:
+    def clarification_request(self, arguments: JSONObject) -> str:
         claim_id = str(arguments.get("claim_id") or "")
         category = str(arguments.get("category") or "")
         passage = str(arguments.get("passage") or "").strip()
@@ -407,6 +410,7 @@ class IncrementalAgentContext:
             for item in diagnostics
         ):
             raise ValueError("Clarification diagnostics are invalid")
+        resolution_text = [item for item in resolutions if isinstance(item, str)]
         missing_diagnostics = REQUIRED_CLARIFICATION_DIAGNOSTICS - set(diagnostics)
         if missing_diagnostics:
             raise ValueError(
@@ -443,7 +447,7 @@ class IncrementalAgentContext:
                 category=category,
                 passage=passage,
                 problem=problem,
-                possible_resolutions=resolutions,
+                possible_resolutions=resolution_text,
                 blocking_claims=blocking,
                 run_id=self.run_id,
             )
@@ -463,7 +467,7 @@ class IncrementalAgentContext:
             )
         return f"Created clarification {question_id}; the host will preserve completed work"
 
-    def claim_report_unresolved(self, arguments: dict[str, Any]) -> str:
+    def claim_report_unresolved(self, arguments: JSONObject) -> str:
         claim_id = str(arguments.get("claim_id") or "")
         message = str(arguments.get("message") or "").strip()
         if not message:
@@ -513,32 +517,44 @@ class IncrementalAgentContext:
 class IncrementalToolsMixin:
     _incremental_context: IncrementalAgentContext
 
-    def register_tools(self, defs: dict[str, dict], handlers: dict[str, Any]) -> None:
+    def register_tools(
+        self,
+        defs: dict[str, JSONObject],
+        handlers: dict[str, Callable[[JSONObject], str]],
+    ) -> None:
         super().register_tools(defs, handlers)  # type: ignore[misc]
         self._register_tools_from_list(AGENT_TOOLS, defs, handlers)
 
-    def _handle_claim_get(self, arguments: dict[str, Any]) -> str:
+    def _register_tools_from_list(
+        self,
+        tools: Sequence[JSONObject],
+        defs: dict[str, JSONObject],
+        handlers: dict[str, Callable[[JSONObject], str]],
+    ) -> None:
+        super()._register_tools_from_list(tools, defs, handlers)  # type: ignore[misc]
+
+    def _handle_claim_get(self, arguments: JSONObject) -> str:
         return self._incremental_context.claim_get(arguments)
 
-    def _handle_claim_list_dependencies(self, arguments: dict[str, Any]) -> str:
+    def _handle_claim_list_dependencies(self, arguments: JSONObject) -> str:
         return self._incremental_context.claim_list_dependencies(arguments)
 
-    def _handle_certificate_query(self, arguments: dict[str, Any]) -> str:
+    def _handle_certificate_query(self, arguments: JSONObject) -> str:
         return self._incremental_context.certificate_query(arguments)
 
-    def _handle_git_diff_claim(self, arguments: dict[str, Any]) -> str:
+    def _handle_git_diff_claim(self, arguments: JSONObject) -> str:
         return self._incremental_context.git_diff_claim(arguments)
 
-    def _handle_claim_propose_dependency(self, arguments: dict[str, Any]) -> str:
+    def _handle_claim_propose_dependency(self, arguments: JSONObject) -> str:
         return self._incremental_context.claim_propose_dependency(arguments)
 
-    def _handle_claim_mark_formalized(self, arguments: dict[str, Any]) -> str:
+    def _handle_claim_mark_formalized(self, arguments: JSONObject) -> str:
         return self._incremental_context.claim_mark_formalized(arguments)
 
-    def _handle_clarification_request(self, arguments: dict[str, Any]) -> str:
+    def _handle_clarification_request(self, arguments: JSONObject) -> str:
         return self._incremental_context.clarification_request(arguments)
 
-    def _handle_claim_report_unresolved(self, arguments: dict[str, Any]) -> str:
+    def _handle_claim_report_unresolved(self, arguments: JSONObject) -> str:
         return self._incremental_context.claim_report_unresolved(arguments)
 
 
@@ -584,7 +600,7 @@ def create_incremental_agent(
     *,
     context: IncrementalAgentContext,
     claims: Sequence[str],
-):
+) -> RepoProverAgent:
     try:
         from repoprover.agents.contributor import ContributorAgent, ContributorTask
     except ImportError as exc:
@@ -614,7 +630,7 @@ def create_incremental_agent(
             )
             return f"{INCREMENTAL_SYSTEM_PROMPT}\n{policy}\n{counterexamples}\n"
 
-        def build_user_prompt(self, **_kwargs: Any) -> str:
+        def build_user_prompt(self, **_kwargs: object) -> str:
             rendered = "\n".join(f"- `{claim}`" for claim in claims)
             return f"""\
 Verify or reconcile exactly this ready dependency-frontier batch:
@@ -640,7 +656,7 @@ def write_batch_context(
     claims: Sequence[str],
     pause_on_ambiguity: bool,
     counterexample_search: bool,
-    concurrency: Mapping[str, Any],
+    concurrency: Mapping[str, object],
     admission_timeout: float,
 ) -> Path:
     path = workspace / ".repoprover-agent" / "CURRENT_BATCH.json"

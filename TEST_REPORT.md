@@ -10,16 +10,46 @@ calibration, and a provider-backed two-claim manuscript verification.
 
 | Gate | Result |
 |---|---|
-| complete automated suite | **393 passed** in 137.18 seconds |
+| complete automated suite | **433 passed** on macOS in 133.94 seconds |
+| Cortex Linux suite | **433 passed** in 99.64 seconds |
 | supported installer | **passed**; compiler compile/run and 393 tests in 123.92 seconds |
 | Ruff lint and format | **passed** |
+| strict mypy | **passed**; 64 source files |
+| explicit `Any` policy | **passed**; 98/98 AST uses, 11 boundary modules `Any`-free |
 | Python `compileall` | **passed** |
 | `git diff --check` | **passed** |
-| clean Python 3.13 wheel | **passed** |
+| clean Python 3.13 wheel | **passed**; `py.typed` and downstream strict mypy |
 | real Lean calibration | **passed**; no Codex traffic |
 | real manuscript verification | **verified**, 2/2 current certificates |
 | RepoProver checkout | exact commit, clean and unchanged |
 | upstream RepoProver PR | **NOT CREATED** |
+
+## Python 3.13 roadmap acceptance
+
+Strict mypy now checks all 64 package source files in CI. A companion policy
+gate caps the remaining 98 explicit AST-level `Any` uses and requires 11
+protocol, backend, JSON, task, Lean, workflow, and catalog boundary modules to
+remain `Any`-free. The original roadmap inventory contained 225 textual `Any`
+occurrences; the implemented tree contains 121, including comments, while the
+highest-traffic request/response and persistence seams now validate recursive
+`JSONValue` data before it reaches application logic.
+
+The universal wheel and source distribution both contain `py.typed`. The wheel
+was installed into a fresh external CPython 3.13.15 environment, passed the
+native compiler compile-and-execute command, and exposed precise public types
+to a separate strict-mypy consumer.
+
+Three immutable, high-volume incremental records were selected for
+`slots=True` after measurement. For 100,000 representative instances on the
+tested Mac, peak traced allocation fell from 24.42 to 19.07 MiB for
+`SourceObject`, 11.45 to 7.63 MiB for `ManuscriptEdge`, and 12.21 to 8.39 MiB
+for `LeanDeclaration`. Construction throughput did not change materially, so
+the accepted optimization claim is memory reduction only.
+
+The same source tree passed compiler preflight, a clean uv-managed Python 3.13
+installation, Ruff, strict mypy, the typing policy, and all 433 tests on Cortex
+(Ubuntu, Linux 6.8.0-136, x86_64). This clean run did not reproduce the earlier
+host-specific Linux behavior.
 
 ## Fresh-project and state-isolation regressions
 

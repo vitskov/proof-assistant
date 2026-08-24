@@ -826,7 +826,8 @@ class ConcurrencyResourcesScreen(_SettingsEditorScreen):
         self.show_notice(f"Benchmark failed: {detail}", error=True)
 
     def _reset_lean_calibration(self) -> None:
-        if self.project is None:
+        project = self.project
+        if project is None:
             self.show_notice(
                 "Open Settings from a project dashboard to reset its Lean profile.",
                 error=True,
@@ -834,13 +835,11 @@ class ConcurrencyResourcesScreen(_SettingsEditorScreen):
             return
         self.query_one(
             "#benchmark-result", TextArea
-        ).text = f"Resetting the exact Lean calibration for {self.project}…"
+        ).text = f"Resetting the exact Lean calibration for {project}…"
 
         def reset() -> None:
             try:
-                result = self.proof_app.service.reset_project_lean_calibration(
-                    self.project
-                )
+                result = self.proof_app.service.reset_project_lean_calibration(project)
             except Exception as exc:
                 self.proof_app.call_from_thread(
                     self._record_reset_error,

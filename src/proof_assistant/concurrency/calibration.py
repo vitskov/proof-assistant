@@ -357,7 +357,12 @@ class _LeanReplProbe:
                         f"Lean REPL calibration timed out after {self.timeout:g}s"
                     )
                 for key, _events in ready:
-                    chunk = os.read(key.fileobj.fileno(), 65536)
+                    descriptor = (
+                        key.fileobj
+                        if isinstance(key.fileobj, int)
+                        else key.fileobj.fileno()
+                    )
+                    chunk = os.read(descriptor, 65536)
                     if key.data == "stderr":
                         self.stderr.extend(chunk)
                         if len(self.stderr) > 131072:
@@ -394,7 +399,9 @@ class _LeanReplProbe:
         try:
             root = self.psutil.Process(process.pid)
             processes = [root, *root.children(recursive=True)]
-            rss = sum(item.memory_info().rss for item in processes if item.is_running())
+            rss = sum(
+                int(item.memory_info().rss) for item in processes if item.is_running()
+            )
         except (self.psutil.Error, OSError) as exc:
             raise LeanCalibrationError(
                 f"Could not sample Lean REPL RSS: {exc}"

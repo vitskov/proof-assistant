@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -63,7 +63,7 @@ class ConcurrencyRuntimeSpec:
         resources: HardwareResources | None = None,
         clock: Any = time.time,
         calibrated_repl_p95_gib: float | None = None,
-        jitter=None,
+        jitter: Callable[[float], float] | None = None,
     ) -> ConcurrencyRuntime:
         layout = CacheLayout.discover(self.cache_home)
         resolved = self.resolve(environ=environ)
@@ -199,7 +199,7 @@ class ConcurrencyRuntime:
         resources: HardwareResources | None = None,
         clock: Any = time.time,
         calibrated_repl_p95_gib: float | None = None,
-        jitter=None,
+        jitter: Callable[[float], float] | None = None,
         calibration_profile: CalibrationProfile | None = None,
     ) -> ConcurrencyRuntime:
         resources = resources or detect_hardware()

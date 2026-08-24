@@ -205,7 +205,12 @@ class TelemetryCollector:
         except Exception:
             pass
         try:
-            loads = tuple(float(value) for value in self.load_average())
+            raw_loads = self.load_average()
+            loads = (
+                (float(raw_loads[0]), float(raw_loads[1]), float(raw_loads[2]))
+                if len(raw_loads) >= 3
+                else None
+            )
         except OSError:
             loads = None
         snapshot = TelemetrySnapshot(

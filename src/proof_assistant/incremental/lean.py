@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 from collections.abc import Mapping, Sequence
 from importlib.resources import files
 from pathlib import Path
-from typing import Any
 
+from ..json_types import JSONObject, json_object, load_json
 from .io import atomic_write_bytes, atomic_write_json, canonical_hash, sha256_path
 from .models import LeanDeclaration
 
@@ -25,7 +24,14 @@ def install_dependency_extractor(project: Path) -> Path:
     return destination
 
 
-def _declaration_from_payload(payload: dict[str, Any]) -> LeanDeclaration:
+def _required_string(payload: JSONObject, key: str) -> str:
+    value = payload.get(key)
+    if not isinstance(value, str):
+        raise LeanExtractionError(f"Lean extractor returned invalid {key}")
+    return value
+
+
+def _declaration_from_payload(payload: JSONObject) -> LeanDeclaration:
     required = {
         "name",
         "kind",
@@ -50,10 +56,12 @@ def _declaration_from_payload(payload: dict[str, Any]) -> LeanDeclaration:
     ):
         raise LeanExtractionError("Lean extractor returned invalid axioms")
     value_expr = payload["value_expr"]
+    if value_expr is not None and not isinstance(value_expr, str):
+        raise LeanExtractionError("Lean extractor returned invalid value_expr")
     return LeanDeclaration(
-        name=str(payload["name"]),
-        kind=str(payload["kind"]),
-        type_hash=canonical_hash(payload["type_expr"]),
+        name=_required_string(payload, "name"),
+        kind=_required_string(payload, "kind"),
+        type_hash=canonical_hash(_required_string(payload, "type_expr")),
         value_hash=None if value_expr is None else canonical_hash(value_expr),
         direct_dependencies=tuple(sorted(set(dependencies))),
         axioms=tuple(sorted(set(axioms))),
@@ -87,10 +95,13 @@ def run_dependency_extractor(
             "Lean dependency extractor returned no unique JSON payload"
         )
     try:
-        payload = json.loads(lines[0].split(OUTPUT_PREFIX, 1)[1])
-    except json.JSONDecodeError as exc:
+        payload = json_object(
+            load_json(lines[0].split(OUTPUT_PREFIX, 1)[1]),
+            path="Lean extractor payload",
+        )
+    except ValueError as exc:
         raise LeanExtractionError(f"Lean dependency JSON is malformed: {exc}") from exc
-    if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+    if payload.get("schema_version") != 1:
         raise LeanExtractionError("Lean dependency extractor schema mismatch")
     raw_declarations = payload.get("declarations")
     if not isinstance(raw_declarations, list):
@@ -111,8 +122,9 @@ def run_dependency_extractor(
         raise LeanExtractionError(
             "Lean dependency extractor returned a non-object declaration"
         )
-    lean_version = str(payload.get("lean_version") or "unknown")
-    export = {
+    raw_lean_version = payload.get("lean_version")
+    lean_version = raw_lean_version if isinstance(raw_lean_version, str) else "unknown"
+    export: JSONObject = {
         "schema_version": 1,
         "lean_version": lean_version,
         "declarations": [item.export() for item in declarations],
@@ -127,19 +139,21 @@ def mathlib_revision(project: Path) -> str | None:
     if not manifest.is_file():
         return None
     try:
-        payload = json.loads(manifest.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        payload = json_object(load_json(manifest.read_text(encoding="utf-8")))
+    except (OSError, ValueError):
         return None
-    packages = payload.get("packages", []) if isinstance(payload, dict) else []
+    packages = payload.get("packages", [])
+    if not isinstance(packages, list):
+        return None
     for package in packages:
         if isinstance(package, dict) and package.get("name") == "mathlib":
             revision = package.get("rev") or package.get("version")
-            return str(revision) if revision else None
+            return revision if isinstance(revision, str) and revision else None
     return None
 
 
-def environment_fingerprint(project: Path) -> tuple[str, dict[str, Any]]:
-    inputs: dict[str, Any] = {}
+def environment_fingerprint(project: Path) -> tuple[str, JSONObject]:
+    inputs: JSONObject = {}
     for name in (
         "lean-toolchain",
         "lakefile.lean",

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -100,7 +101,7 @@ class NodeResourceControllers:
         node_id: str,
         lean_limit: int,
         build_limit: int,
-        clock=None,
+        clock: Callable[[], float] | None = None,
     ) -> NodeResourceControllers:
         if not node_id:
             raise ValueError("node identifier must not be empty")

@@ -708,7 +708,7 @@ class ProgressEvent:
     completed: int | None = None
     total: int | None = None
     claim_id: str | None = None
-    details: Mapping[str, Any] = field(default_factory=dict)
+    details: Mapping[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

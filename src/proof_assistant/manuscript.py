@@ -11,7 +11,12 @@ from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+from .integration import RepoProverAgent
+
+if TYPE_CHECKING:
+    from .cache import DependencyDepotClaim
 
 MANUSCRIPT_SCHEMA_VERSION = 1
 TASK_MAX_BYTES = 1024 * 1024
@@ -550,7 +555,7 @@ def prepare_manuscript_workspace(
     )
 
 
-def create_manuscript_agent(workspace: Path):
+def create_manuscript_agent(workspace: Path) -> RepoProverAgent:
     """Construct a free-form agent while keeping RepoProver optional at import."""
     try:
         from repoprover.agents.contributor import ContributorAgent, ContributorTask
@@ -565,7 +570,7 @@ def create_manuscript_agent(workspace: Path):
         def get_system_prompt(self) -> str:
             return MANUSCRIPT_SYSTEM_PROMPT
 
-        def build_user_prompt(self, **_kwargs) -> str:
+        def build_user_prompt(self, **_kwargs: object) -> str:
             sources = "\n".join(f"- `{item}`" for item in self._latex_sources)
             return f"""\
 Execute the complete free-form verification task stored in
@@ -647,11 +652,12 @@ def bootstrap_lean_workspace(
     *,
     env: Mapping[str, str],
     timeout: float,
-    depot_claim: Any | None = None,
+    depot_claim: DependencyDepotClaim | None = None,
 ) -> list[CommandRecord]:
     """Fetch/build the dependencies required by RepoProver's Lean REPL."""
     records: list[CommandRecord] = []
 
+    initial_commands: tuple[tuple[tuple[str, ...], bool], ...]
     if depot_claim is not None and depot_claim.ready:
         initial_commands = ((("lake", "build", "repl"), True),)
     else:

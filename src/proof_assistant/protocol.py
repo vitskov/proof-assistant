@@ -6,10 +6,11 @@ import queue
 import re
 import subprocess
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+
+from .json_types import JSONObject, JSONValue, json_object, load_json
 
 
 class CodexProtocolError(RuntimeError):
@@ -62,8 +63,8 @@ def isolated_tool_config_args(
             f"an isolated backend: {detail or f'exit {result.returncode}'}"
         )
     try:
-        entries = json.loads(result.stdout)
-    except json.JSONDecodeError as exc:
+        entries = load_json(result.stdout)
+    except ValueError as exc:
         raise CodexProtocolError(
             "codex mcp list --json returned malformed JSON"
         ) from exc
@@ -142,11 +143,19 @@ def isolated_skill_config_args(
     finally:
         probe.close()
 
-    if not isinstance(response, dict) or not isinstance(response.get("data"), list):
+    if not isinstance(response, dict):
+        raise CodexProtocolError("skills/list returned an invalid isolation response")
+    data = response.get("data")
+    if not isinstance(data, list):
         raise CodexProtocolError("skills/list returned an invalid isolation response")
     paths: set[str] = set()
-    for entry in response["data"]:
-        if not isinstance(entry, dict) or not isinstance(entry.get("skills"), list):
+    for entry in data:
+        if not isinstance(entry, dict):
+            raise CodexProtocolError(
+                "skills/list contained an invalid workspace record"
+            )
+        skills = entry.get("skills")
+        if not isinstance(skills, list):
             raise CodexProtocolError(
                 "skills/list contained an invalid workspace record"
             )
@@ -155,12 +164,17 @@ def isolated_skill_config_args(
             raise CodexProtocolError(
                 "Codex reported skill discovery errors; refusing an unverified child"
             )
-        for skill in entry["skills"]:
-            if not isinstance(skill, dict) or not isinstance(skill.get("path"), str):
+        for skill in skills:
+            if not isinstance(skill, dict):
                 raise CodexProtocolError(
                     "skills/list contained an invalid skill record"
                 )
-            paths.add(skill["path"])
+            path = skill.get("path")
+            if not isinstance(path, str):
+                raise CodexProtocolError(
+                    "skills/list contained an invalid skill record"
+                )
+            paths.add(path)
 
     selectors = ",".join(
         f"{{path={json.dumps(path)},enabled=false}}" for path in sorted(paths)
@@ -171,8 +185,8 @@ def isolated_skill_config_args(
 @dataclass
 class _Pending:
     event: threading.Event
-    result: Any = None
-    error: Any = None
+    result: JSONValue = None
+    error: JSONValue = None
 
 
 class AppServerClient:
@@ -198,8 +212,8 @@ class AppServerClient:
         self._reader: threading.Thread | None = None
         self._next_id = 1
         self._pending: dict[int, _Pending] = {}
-        self._notifications: queue.Queue[dict[str, Any]] = queue.Queue()
-        self._handlers: dict[str, Callable[[dict[str, Any]], Any]] = {}
+        self._notifications: queue.Queue[JSONObject] = queue.Queue()
+        self._handlers: dict[str, Callable[[JSONObject], JSONValue]] = {}
         self._state_lock = threading.Lock()
         self._write_lock = threading.Lock()
 
@@ -274,15 +288,15 @@ class AppServerClient:
                     pass
 
     def register_request_handler(
-        self, method: str, handler: Callable[[dict[str, Any]], Any]
+        self, method: str, handler: Callable[[JSONObject], JSONValue]
     ) -> None:
         self._handlers[method] = handler
 
-    def _send(self, payload: dict[str, Any]) -> None:
+    def _send(self, payload: Mapping[str, object]) -> None:
         proc = self.proc
         if proc is None or proc.stdin is None or proc.poll() is not None:
             raise CodexServerExited("codex app-server is not running")
-        line = json.dumps(payload, separators=(",", ":"))
+        line = json.dumps(json_object(payload), separators=(",", ":"))
         with self._write_lock:
             proc.stdin.write(line + "\n")
             proc.stdin.flush()
@@ -290,10 +304,10 @@ class AppServerClient:
     def request(
         self,
         method: str,
-        params: dict[str, Any] | None = None,
+        params: Mapping[str, object] | None = None,
         *,
         timeout: float = 120.0,
-    ) -> Any:
+    ) -> JSONValue:
         self.start()
         with self._state_lock:
             request_id = self._next_id
@@ -309,11 +323,11 @@ class AppServerClient:
             raise CodexProtocolError(f"{method}: {pending.error}")
         return pending.result
 
-    def notify(self, method: str, params: dict[str, Any] | None = None) -> None:
+    def notify(self, method: str, params: Mapping[str, object] | None = None) -> None:
         self.start()
         self._send({"method": method, "params": params or {}})
 
-    def next_notification(self, timeout: float | None = None) -> dict[str, Any]:
+    def next_notification(self, timeout: float | None = None) -> JSONObject:
         return self._notifications.get(timeout=timeout)
 
     def _reader_loop(self) -> None:
@@ -325,19 +339,27 @@ class AppServerClient:
                 if not raw:
                     continue
                 try:
-                    msg = json.loads(raw)
-                except json.JSONDecodeError:
+                    decoded = load_json(raw)
+                except ValueError:
                     # Codex should emit JSONL on stdout, but ignoring non-JSON here
                     # is safer than killing an otherwise recoverable session.
                     continue
+                if not isinstance(decoded, dict):
+                    continue
+                msg = decoded
 
                 if (
                     "id" in msg
                     and "method" not in msg
                     and ("result" in msg or "error" in msg)
                 ):
-                    with self._state_lock:
-                        pending = self._pending.pop(msg["id"], None)
+                    response_id = msg["id"]
+                    pending = None
+                    if isinstance(response_id, int) and not isinstance(
+                        response_id, bool
+                    ):
+                        with self._state_lock:
+                            pending = self._pending.pop(response_id, None)
                     if pending is not None:
                         pending.result = msg.get("result")
                         pending.error = msg.get("error")
@@ -364,7 +386,7 @@ class AppServerClient:
                 }
             )
 
-    def _handle_server_request(self, msg: dict[str, Any]) -> None:
+    def _handle_server_request(self, msg: JSONObject) -> None:
         method = str(msg["method"])
         request_id = msg["id"]
         handler = self._handlers.get(method)
@@ -380,7 +402,7 @@ class AppServerClient:
             )
             return
         try:
-            result = handler(msg.get("params") or {})
+            result = handler(json_object(msg.get("params") or {}, path="$.params"))
             self._send({"id": request_id, "result": result})
         except Exception as exc:
             self._send(

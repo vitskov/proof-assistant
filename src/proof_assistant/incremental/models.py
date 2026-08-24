@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from enum import StrEnum
-from typing import Any
+
+from ..json_types import JSONObject, json_object
 
 SCHEMA_VERSION = 1
 
@@ -52,8 +53,8 @@ class TaskSpec:
     free_form: str = ""
     source_format: str = "text"
 
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+    def to_dict(self) -> JSONObject:
+        return json_object(asdict(self))
 
 
 @dataclass(frozen=True)
@@ -73,7 +74,7 @@ class Snapshot:
     files: tuple[SourceFile, ...]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class SourceObject:
     claim_id: str
     kind: str
@@ -96,11 +97,11 @@ class SourceObject:
     proof_text: str
     references: tuple[str, ...]
 
-    def export(self) -> dict[str, Any]:
-        return asdict(self)
+    def export(self) -> JSONObject:
+        return json_object(asdict(self))
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ManuscriptEdge:
     src: str
     dst: str
@@ -109,7 +110,7 @@ class ManuscriptEdge:
     approved: bool = True
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class LeanDeclaration:
     name: str
     kind: str
@@ -118,8 +119,8 @@ class LeanDeclaration:
     direct_dependencies: tuple[str, ...]
     axioms: tuple[str, ...]
 
-    def export(self) -> dict[str, Any]:
-        return asdict(self)
+    def export(self) -> JSONObject:
+        return json_object(asdict(self))
 
 
 @dataclass(frozen=True)
@@ -127,4 +128,4 @@ class Diagnostic:
     category: str
     message: str
     claim_id: str | None = None
-    details: dict[str, Any] = field(default_factory=dict)
+    details: JSONObject = field(default_factory=dict)

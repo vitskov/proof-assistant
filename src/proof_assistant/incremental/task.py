@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
-from typing import Any
 
 import yaml
 
+from ..json_types import JSONObject, JSONTypeError, json_object
 from ..manuscript import ManuscriptInputError, read_task_file
 from .models import TaskPolicy, TaskSpec
 
@@ -19,7 +19,7 @@ DEFAULT_TASK_INSTRUCTIONS = (
 
 def task_document(instructions: str | None = None) -> str:
     """Return the canonical project-owned verification task document."""
-    payload: dict[str, Any] = {
+    payload: JSONObject = {
         "schema": 1,
         "mode": "theorem",
         "targets": [],
@@ -40,18 +40,28 @@ def parse_task_text(
     """Validate task YAML text without requiring an external task file."""
     digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
     try:
-        payload = yaml.safe_load(text)
+        decoded: object = yaml.safe_load(text)
+        payload = json_object(decoded, path=source_name)
     except yaml.YAMLError as exc:
         raise ManuscriptInputError(f"Invalid structured task YAML: {exc}") from exc
-    if not isinstance(payload, dict) or payload.get("schema") != 1:
+    except JSONTypeError as exc:
+        raise ManuscriptInputError(f"Invalid structured task YAML: {exc}") from exc
+    if payload.get("schema") != 1:
         raise ManuscriptInputError(f"{source_name} must be an object with `schema: 1`")
     return digest, _task_spec_from_payload(payload)
 
 
-def _task_spec_from_payload(payload: dict[str, Any]) -> TaskSpec:
+def _policy_value(payload: JSONObject, key: str, default: bool) -> bool:
+    value = payload.get(key, default)
+    if not isinstance(value, bool):
+        raise ManuscriptInputError(f"Task policy `{key}` must be true or false")
+    return value
+
+
+def _task_spec_from_payload(payload: JSONObject) -> TaskSpec:
     """Construct a validated task spec from a schema-1 mapping."""
     mode = payload.get("mode", "theorem")
-    if mode not in {"theorem", "argument-audit"}:
+    if not isinstance(mode, str) or mode not in {"theorem", "argument-audit"}:
         raise ManuscriptInputError("Task mode must be `theorem` or `argument-audit`")
     targets = payload.get("targets", [])
     if not isinstance(targets, list) or not all(
@@ -72,10 +82,14 @@ def _task_spec_from_payload(payload: dict[str, Any]) -> TaskSpec:
     unknown = sorted(set(raw_policy) - allowed)
     if unknown:
         raise ManuscriptInputError("Unknown task policy keys: " + ", ".join(unknown))
-    for key, value in raw_policy.items():
-        if not isinstance(value, bool):
-            raise ManuscriptInputError(f"Task policy `{key}` must be true or false")
-    policy = TaskPolicy(**raw_policy)
+    policy = TaskPolicy(
+        pause_on_ambiguity=_policy_value(raw_policy, "pause_on_ambiguity", True),
+        preserve_certified=_policy_value(raw_policy, "preserve_certified", True),
+        counterexample_search=_policy_value(raw_policy, "counterexample_search", True),
+        require_statement_correspondence_review=_policy_value(
+            raw_policy, "require_statement_correspondence_review", False
+        ),
+    )
     notes = payload.get("instructions", "")
     if notes is None:
         notes = ""

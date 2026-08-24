@@ -65,14 +65,14 @@ def certify_current_correspondence(
         if declaration.value_hash is None:
             rejected.append((claim_id, "Lean declaration has no proof/value body"))
             continue
-        uncertified_dependencies = [
-            dependency
-            for dependency in dependencies.get(claim_id, [])
+        uncertified_dependencies: list[str] = []
+        for dependency in dependencies.get(claim_id, []):
+            dependency_row = store.claim_row(dependency)
             if (
-                store.claim_row(dependency) is None
-                or store.claim_row(dependency)["status"] != ClaimState.CERTIFIED
-            )
-        ]
+                dependency_row is None
+                or dependency_row["status"] != ClaimState.CERTIFIED
+            ):
+                uncertified_dependencies.append(dependency)
         if (
             uncertified_dependencies
             and str(correspondence["status"]) != "counterexample"

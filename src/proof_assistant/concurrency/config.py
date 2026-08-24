@@ -10,11 +10,12 @@ from __future__ import annotations
 import fcntl
 import os
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field, fields, replace
 from enum import StrEnum
 from pathlib import Path
 from types import MappingProxyType
+from typing import cast
 
 import yaml
 
@@ -273,6 +274,8 @@ def _coerce_patch_value(field_path: str, value: object) -> object:
         return _coerce_auto_int(value, field_path)
     enum_type = _ENUM_FIELDS.get(field_path)
     if enum_type is not None:
+        if not isinstance(value, str):
+            raise ConcurrencyConfigError(f"{field_path} must be a string")
         try:
             return enum_type(value)
         except (TypeError, ValueError) as exc:
@@ -307,13 +310,15 @@ def patch_from_mapping(payload: Mapping[str, object]) -> ConcurrencyConfigPatch:
                 f"Unknown concurrency.{section} setting(s): "
                 + ", ".join(unknown_section)
             )
-        arguments[section] = patch_type(
+        constructor = cast(Callable[..., object], patch_type)
+        arguments[section] = constructor(
             **{
                 key: _coerce_patch_value(f"{section}.{key}", value)
                 for key, value in raw.items()
             }
         )
-    return ConcurrencyConfigPatch(**arguments)
+    constructor = cast(Callable[..., ConcurrencyConfigPatch], ConcurrencyConfigPatch)
+    return constructor(**arguments)
 
 
 def patch_to_mapping(patch: ConcurrencyConfigPatch) -> dict[str, object]:
@@ -449,7 +454,9 @@ class MachineConfigStore:
                 temporary_path.unlink(missing_ok=True)
 
 
-def _iter_patch_values(patch: ConcurrencyConfigPatch):
+def _iter_patch_values(
+    patch: ConcurrencyConfigPatch,
+) -> Iterator[tuple[str, object]]:
     for name in ("mode", "resource_profile", "telemetry_enabled"):
         value = getattr(patch, name)
         if value is not None:
@@ -462,7 +469,7 @@ def _iter_patch_values(patch: ConcurrencyConfigPatch):
                 yield f"{section}.{item.name}", value
 
 
-def _config_leaf_values(config: ConcurrencyConfig):
+def _config_leaf_values(config: ConcurrencyConfig) -> Iterator[tuple[str, object]]:
     yield "mode", config.mode
     yield "resource_profile", config.resource_profile
     yield "telemetry_enabled", config.telemetry_enabled
@@ -473,11 +480,15 @@ def _config_leaf_values(config: ConcurrencyConfig):
 
 
 def _set_leaf(config: ConcurrencyConfig, path: str, value: object) -> ConcurrencyConfig:
+    replace_config = cast(Callable[..., ConcurrencyConfig], replace)
     if "." not in path:
-        return replace(config, **{path: value})
+        return replace_config(config, **{path: value})
     section, name = path.split(".", 1)
     section_value = getattr(config, section)
-    return replace(config, **{section: replace(section_value, **{name: value})})
+    replace_section = cast(Callable[..., object], replace)
+    return replace_config(
+        config, **{section: replace_section(section_value, **{name: value})}
+    )
 
 
 def _positive_integer(value: object, path: str) -> int:
@@ -654,7 +665,7 @@ def resolve_concurrency_config(
     machine_revision = 0
     if isinstance(machine, MachineConcurrencySettings):
         machine_revision = machine.revision
-        machine_patch = machine.patch
+        machine_patch: ConcurrencyConfigPatch | None = machine.patch
     else:
         machine_patch = machine
     layers = (

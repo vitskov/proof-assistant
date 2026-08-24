@@ -6,7 +6,7 @@ import shutil
 import subprocess
 import threading
 import traceback
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -37,6 +37,7 @@ from ..concurrency import (
 from ..environment import configure_lean_runtime, default_lean_memory_limit_gb
 from ..integration import run_repoprover_agent
 from ..manuscript import (
+    CommandRecord,
     bootstrap_lean_workspace,
     command_records_text,
     commit_bootstrap_state,
@@ -342,7 +343,9 @@ class _ConcurrencyMonitor:
 
 
 @contextmanager
-def _monitor_concurrency(runtime: ConcurrencyRuntime, spec: ConcurrencyRuntimeSpec):
+def _monitor_concurrency(
+    runtime: ConcurrencyRuntime, spec: ConcurrencyRuntimeSpec
+) -> Iterator[_ConcurrencyMonitor]:
     monitor = _ConcurrencyMonitor(runtime, spec)
     monitor.start()
     try:
@@ -360,7 +363,7 @@ def _run_lake_build(
     timeout: float,
     owner: str,
     full_build: bool,
-):
+) -> CommandRecord:
     request = runtime.build.request(
         owner,
         full_build=full_build,
@@ -370,13 +373,13 @@ def _run_lake_build(
         return run_command(argv, cwd=cwd, env=env, timeout=timeout)
 
 
-def _run_lean_operation(
+def _run_lean_operation[OperationT](
     runtime: ConcurrencyRuntime,
-    operation: Callable[[], object],
+    operation: Callable[[], OperationT],
     *,
     owner: str,
     timeout: float,
-):
+) -> OperationT:
     request = runtime.lean.request(
         owner,
         ttl_seconds=max(120.0, min(timeout, 600.0)),
@@ -1217,7 +1220,7 @@ def verify_project(
                                     command=("lake", "build"),
                                     exit_code=result.build_returncode,
                                     timed_out=result.build_timed_out,
-                                )
+                                ),
                             )
                             if result.build_log
                             else ()

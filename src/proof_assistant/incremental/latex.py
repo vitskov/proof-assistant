@@ -365,10 +365,12 @@ def _resolve_include_path(
                 found[resolved] = choice
                 break
     if len(found) > 1:
-        choices = ", ".join(path.relative_to(root).as_posix() for path in sorted(found))
+        rendered_choices = ", ".join(
+            path.relative_to(root).as_posix() for path in sorted(found)
+        )
         raise LatexIndexError(
             f"Ambiguous \\{macro} path in {macro_source}: {raw_path!r} "
-            f"matches {choices}"
+            f"matches {rendered_choices}"
         )
     if found:
         resolved = next(iter(found))
@@ -488,6 +490,8 @@ def extract_file(
         ordinal += 1
         start, end = _body_span(node)
         statement = source[start:end]
+        proof_start: int | None
+        proof_end: int | None
         proof_node = _proof_for(source, node, proof_environments)
         if proof_node is not None:
             proof_start, proof_end = _body_span(proof_node)

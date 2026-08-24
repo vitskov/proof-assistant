@@ -1,9 +1,26 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from pathlib import Path
+from typing import Protocol
 
 from .backend import CodexBackend, CodexConfig, CodexResult
+from .json_types import JSONObject
+
+
+class RepoProverAgent(Protocol):
+    """The narrow structural interface used from optional RepoProver agents."""
+
+    repo_root: str | Path
+    agent_type: object
+
+    def get_system_prompt(self) -> str: ...
+
+    def build_user_prompt(self, **run_kwargs: object) -> str: ...
+
+    def get_tools(self) -> list[JSONObject]: ...
+
+    def handle_tool_call(self, name: str, arguments: JSONObject) -> str: ...
 
 
 @dataclass
@@ -13,9 +30,9 @@ class RepoProverCodexRun:
 
 
 def run_repoprover_agent(
-    agent: Any,
+    agent: RepoProverAgent,
     *,
-    run_kwargs: dict[str, Any],
+    run_kwargs: dict[str, object],
     codex: CodexConfig,
 ) -> RepoProverCodexRun:
     """Run one already-constructed RepoProver agent through Codex.

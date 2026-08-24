@@ -5,13 +5,15 @@ import json
 import os
 import tempfile
 from pathlib import Path
-from typing import Any
+
+from ..json_types import as_json_value
 
 
-def canonical_json_bytes(value: Any) -> bytes:
+def canonical_json_bytes(value: object) -> bytes:
+    validated = as_json_value(value)
     return (
         json.dumps(
-            value,
+            validated,
             ensure_ascii=False,
             separators=(",", ":"),
             sort_keys=True,
@@ -20,7 +22,7 @@ def canonical_json_bytes(value: Any) -> bytes:
     ).encode("utf-8")
 
 
-def canonical_hash(value: Any) -> str:
+def canonical_hash(value: object) -> str:
     return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
 
 
@@ -44,7 +46,7 @@ def atomic_write_text(path: Path, content: str) -> None:
     atomic_write_bytes(path, content.encode("utf-8"))
 
 
-def atomic_write_json(path: Path, value: Any) -> None:
+def atomic_write_json(path: Path, value: object) -> None:
     atomic_write_bytes(path, canonical_json_bytes(value))
 
 

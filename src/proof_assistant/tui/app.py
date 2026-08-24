@@ -784,16 +784,18 @@ class ProofAssistantApp(App[None]):
                 self.current_snapshot is not None
                 and self.current_snapshot.clarifications
             ):
-                screen = ClarificationScreen(self.current_snapshot)
-                self.switch_screen(screen)
+                clarification_screen = ClarificationScreen(self.current_snapshot)
+                self.switch_screen(clarification_screen)
                 self.call_after_refresh(
-                    screen.show_notice, "No stable manuscript changes detected yet."
+                    clarification_screen.show_notice,
+                    "No stable manuscript changes detected yet.",
                 )
             else:
-                screen = DashboardScreen(self._snapshot_for_project(project))
-                self.switch_screen(screen)
+                dashboard_screen = DashboardScreen(self._snapshot_for_project(project))
+                self.switch_screen(dashboard_screen)
                 self.call_after_refresh(
-                    screen.show_notice, "No stable manuscript changes detected."
+                    dashboard_screen.show_notice,
+                    "No stable manuscript changes detected.",
                 )
             return
         snapshot = WorkflowSnapshot(
@@ -836,16 +838,18 @@ class ProofAssistantApp(App[None]):
                     chosen_settings,
                 )
             except Exception as exc:
-                observation = getattr(exc, "observation", None)
-                if isinstance(observation, VerificationJobObservation):
+                attached_observation = getattr(exc, "observation", None)
+                if isinstance(attached_observation, VerificationJobObservation):
                     self.call_from_thread(
                         self._activate_observation,
                         progress_screen,
-                        observation,
+                        attached_observation,
                         "An active job has different requested settings; attached "
                         "to the backend-owned job without replacing it.",
                     )
-                    self._poll_verification(project, progress_screen, observation)
+                    self._poll_verification(
+                        project, progress_screen, attached_observation
+                    )
                     return
                 self.call_from_thread(
                     self._record_polling_error,

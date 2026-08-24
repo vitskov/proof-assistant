@@ -33,6 +33,8 @@ This index separates ordinary use from implementation and maintenance details.
 
 - [Development and testing](DEVELOPMENT.md) — local development, regression
   tests, integration checks, and release checks.
+- [Python 3.13 development style](PYTHON_STYLE.md) — strict typing, validated
+  data boundaries, measured runtime optimization, and future recommendations.
 - [Working as an AI agent](AI_AGENTS.md) — mandatory safety constraints,
   repository map, task workflow, and handoff requirements for coding agents.
 - [Maintainer handoff](../CODEX_HANDOFF.md) — compact invariants and validation

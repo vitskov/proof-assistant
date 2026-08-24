@@ -5,7 +5,7 @@ from .models import ClaimState, SourceObject, TaskSpec
 __all__ = ["ClaimState", "IncrementalSession", "SourceObject", "TaskSpec"]
 
 
-def __getattr__(name: str):
+def __getattr__(name: str) -> object:
     """Load the session lazily so neutral submodules remain independently usable."""
 
     if name == "IncrementalSession":

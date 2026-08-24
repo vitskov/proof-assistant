@@ -22,7 +22,14 @@ dependencies = [
 
 [project.optional-dependencies]
 repoprover = ["repoprover>=0.1.0"]
-dev = ["pytest>=8", "ruff>=0.12"]
+dev = [
+    "mypy>=1.20,<2",
+    "pytest>=8",
+    "ruff>=0.12",
+    "types-networkx>=3.6",
+    "types-psutil>=7.2",
+    "types-PyYAML>=6",
+]
 
 [project.scripts]
 proof-assistant = "proof_assistant.cli:main"
@@ -32,6 +39,7 @@ repoprover-codex = "proof_assistant.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
+"proof_assistant" = ["py.typed"]
 "proof_assistant.lean" = ["*.lean"]
 
 [tool.pytest.ini_options]
@@ -40,3 +48,17 @@ testpaths = ["tests"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP"]
 ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.13"
+files = ["src/proof_assistant"]
+strict = true
+show_error_codes = true
+
+[[tool.mypy.overrides]]
+module = ["pylatexenc.*", "repoprover.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["proof_assistant.manuscript", "proof_assistant.incremental.agent"]
+allow_subclassing_any = true

@@ -9,6 +9,7 @@ import sys
 from collections.abc import Callable
 from dataclasses import asdict
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from . import __version__
 from .backend import CodexBackend, CodexConfig
@@ -48,7 +49,14 @@ from .environment import (
     default_lean_memory_limit_gb,
     select_native_compiler,
 )
+from .json_types import JSONObject
 from .models import model_id, supported_efforts
+
+if TYPE_CHECKING:
+    from .incremental.models import ManuscriptEdge, SourceObject
+    from .incremental.session import IncrementalSession
+    from .integration import RepoProverAgent, RepoProverCodexRun
+    from .manuscript import ManuscriptWorkspace
 
 _ACTIVE_CLEANUPS: list[Callable[[], None]] = []
 
@@ -82,7 +90,7 @@ def _run_status_is_terminal(path: Path) -> bool:
 
 
 def _write_manuscript_failure(
-    paths,
+    paths: ManuscriptWorkspace,
     *,
     started_at: str,
     outcome: str,
@@ -111,11 +119,11 @@ def _write_manuscript_failure(
     return exit_code
 
 
-def _cache_layout(args) -> CacheLayout:
+def _cache_layout(args: argparse.Namespace) -> CacheLayout:
     return CacheLayout.discover(getattr(args, "cache_home", None))
 
 
-def _concurrency_patch(args) -> ConcurrencyConfigPatch | None:
+def _concurrency_patch(args: argparse.Namespace) -> ConcurrencyConfigPatch | None:
     raw_mode = getattr(args, "concurrency", None)
     mode = None
     if raw_mode is not None:
@@ -160,7 +168,7 @@ def _concurrency_patch(args) -> ConcurrencyConfigPatch | None:
 
 
 def _concurrency_spec(
-    args, *, project: str | Path | None = None
+    args: argparse.Namespace, *, project: str | Path | None = None
 ) -> ConcurrencyRuntimeSpec:
     raw_project = project if project is not None else getattr(args, "project", None)
     return ConcurrencyRuntimeSpec(
@@ -172,7 +180,7 @@ def _concurrency_spec(
     )
 
 
-def _backend(args) -> CodexBackend:
+def _backend(args: argparse.Namespace) -> CodexBackend:
     return CodexBackend(
         CodexConfig(
             executable=args.codex,
@@ -184,7 +192,7 @@ def _backend(args) -> CodexBackend:
     )
 
 
-def cmd_doctor(args) -> int:
+def cmd_doctor(args: argparse.Namespace) -> int:
     path = shutil.which(args.codex)
     if not path:
         print(f"ERROR: {args.codex!r} is not on PATH", file=sys.stderr)
@@ -214,7 +222,7 @@ def cmd_doctor(args) -> int:
         backend.close()
 
 
-def cmd_models(args) -> int:
+def cmd_models(args: argparse.Namespace) -> int:
     backend = _backend(args)
     try:
         backend.client.start()
@@ -227,8 +235,8 @@ def cmd_models(args) -> int:
         backend.close()
 
 
-def cmd_smoke(args) -> int:
-    tool = {
+def cmd_smoke(args: argparse.Namespace) -> int:
+    tool: JSONObject = {
         "type": "function",
         "function": {
             "name": "echo",
@@ -241,9 +249,9 @@ def cmd_smoke(args) -> int:
             },
         },
     }
-    seen = []
+    seen: list[tuple[str, JSONObject]] = []
 
-    def handler(name, arguments):
+    def handler(name: str, arguments: JSONObject) -> str:
         seen.append((name, arguments))
         if name != "echo":
             return f"Error: unknown tool {name}"
@@ -276,7 +284,7 @@ def cmd_smoke(args) -> int:
     return 0
 
 
-def cmd_compiler_check(_args) -> int:
+def cmd_compiler_check(_args: argparse.Namespace) -> int:
     try:
         check = configure_lean_runtime()
     except EnvironmentCheckError as exc:
@@ -290,7 +298,7 @@ def cmd_compiler_check(_args) -> int:
     return 0
 
 
-def cmd_cache_path(args) -> int:
+def cmd_cache_path(args: argparse.Namespace) -> int:
     try:
         layout = _cache_layout(args)
     except CacheLocationError as exc:
@@ -300,7 +308,7 @@ def cmd_cache_path(args) -> int:
     return 0
 
 
-def cmd_cache_init(args) -> int:
+def cmd_cache_init(args: argparse.Namespace) -> int:
     try:
         layout = _cache_layout(args)
         config, check = initialize_cache(
@@ -328,7 +336,7 @@ def cmd_cache_init(args) -> int:
     return 0
 
 
-def cmd_cache_doctor(args) -> int:
+def cmd_cache_doctor(args: argparse.Namespace) -> int:
     try:
         layout = _cache_layout(args)
         missing = [path for path in layout.directories if not path.is_dir()]
@@ -363,7 +371,7 @@ def cmd_cache_doctor(args) -> int:
     return 0
 
 
-def cmd_cache_attach(args) -> int:
+def cmd_cache_attach(args: argparse.Namespace) -> int:
     try:
         layout = _cache_layout(args)
         target = attach_project_cache(args.project, layout)
@@ -375,7 +383,7 @@ def cmd_cache_attach(args) -> int:
     return 0
 
 
-def cmd_cache_status(args) -> int:
+def cmd_cache_status(args: argparse.Namespace) -> int:
     try:
         layout = _cache_layout(args)
         layout.create()
@@ -400,7 +408,7 @@ def cmd_cache_status(args) -> int:
     return 0
 
 
-def cmd_cache_gc(args) -> int:
+def cmd_cache_gc(args: argparse.Namespace) -> int:
     try:
         layout = _cache_layout(args)
         layout.create()
@@ -427,7 +435,7 @@ def cmd_cache_gc(args) -> int:
     return 0
 
 
-def cmd_cache_prepare(args) -> int:
+def cmd_cache_prepare(args: argparse.Namespace) -> int:
     """Prepare and validate one Lean project without starting Codex."""
     from .manuscript import bootstrap_lean_workspace, command_records_text
 
@@ -531,7 +539,10 @@ def _target_declaration(source: str, theorem_name: str) -> str | None:
 
 
 def _verify_repoprover_proof(
-    agent, wrapped, lean_path: Path, theorem_name: str
+    agent: RepoProverAgent,
+    wrapped: RepoProverCodexRun,
+    lean_path: Path,
+    theorem_name: str,
 ) -> tuple[str, str]:
     """Return a semantic outcome and supporting detail for one PROVE run."""
     calls = wrapped.codex.tool_calls
@@ -562,7 +573,7 @@ def _verify_repoprover_proof(
     return "proved", verification
 
 
-def cmd_repoprover_prove(args) -> int:
+def cmd_repoprover_prove(args: argparse.Namespace) -> int:
     """Run one RepoProver PROVE agent through the Codex backend."""
     try:
         from repoprover.agents.contributor import ContributorAgent, ContributorTask
@@ -634,7 +645,11 @@ def cmd_repoprover_prove(args) -> int:
             progress=lambda message: print(message, file=sys.stderr),
         )
         cache_session.__enter__()
-        _hold_cleanup(lambda session=cache_session: session.__exit__(None, None, None))
+
+        def close_cache_session() -> None:
+            cache_session.__exit__(None, None, None)
+
+        _hold_cleanup(close_cache_session)
         depot_claim = claim_dependency_depot(
             project,
             cache_layout,
@@ -718,7 +733,7 @@ def cmd_repoprover_prove(args) -> int:
     }[outcome]
 
 
-def cmd_manuscript_run(args) -> int:
+def cmd_manuscript_run(args: argparse.Namespace) -> int:
     """Run a free-form, file-specified manuscript verification task."""
     from .manuscript import (
         ManuscriptInputError,
@@ -814,7 +829,11 @@ def cmd_manuscript_run(args) -> int:
             progress=cache_progress,
         )
         managed_lake = cache_session.__enter__()
-        _hold_cleanup(lambda session=cache_session: session.__exit__(None, None, None))
+
+        def close_cache_session() -> None:
+            cache_session.__exit__(None, None, None)
+
+        _hold_cleanup(close_cache_session)
         depot_claim = claim_dependency_depot(
             paths.workspace,
             cache_layout,
@@ -1056,7 +1075,7 @@ def cmd_manuscript_run(args) -> int:
     return evaluation.exit_code
 
 
-def cmd_manuscript_init(args) -> int:
+def cmd_manuscript_init(args: argparse.Namespace) -> int:
     from .incremental.session import IncrementalSession
 
     project = Path(args.project).expanduser().resolve()
@@ -1083,7 +1102,7 @@ def cmd_manuscript_init(args) -> int:
     return 0
 
 
-def cmd_manuscript_verify(args) -> int:
+def cmd_manuscript_verify(args: argparse.Namespace) -> int:
     from .incremental.orchestration import VerifyOptions, verify_project
     from .incremental.session import IncrementalSession
 
@@ -1123,7 +1142,7 @@ def cmd_manuscript_verify(args) -> int:
     return result.exit_code
 
 
-def cmd_manuscript_status(args) -> int:
+def cmd_manuscript_status(args: argparse.Namespace) -> int:
     from .incremental.session import IncrementalSession
 
     try:
@@ -1150,7 +1169,9 @@ def cmd_manuscript_status(args) -> int:
     return 0
 
 
-def _incremental_objects_and_edges(session):
+def _incremental_objects_and_edges(
+    session: IncrementalSession,
+) -> tuple[tuple[SourceObject, ...], tuple[ManuscriptEdge, ...]]:
     from .incremental.models import ManuscriptEdge, SourceObject
     from .incremental.store import StateStore
 
@@ -1196,7 +1217,7 @@ def _incremental_objects_and_edges(session):
     return objects, edges
 
 
-def cmd_manuscript_graph(args) -> int:
+def cmd_manuscript_graph(args: argparse.Namespace) -> int:
     from .incremental.graph import graph_to_dot, manuscript_graph_export
     from .incremental.io import atomic_write_json, atomic_write_text
     from .incremental.session import IncrementalSession
@@ -1223,7 +1244,7 @@ def cmd_manuscript_graph(args) -> int:
     return 0
 
 
-def cmd_manuscript_questions(args) -> int:
+def cmd_manuscript_questions(args: argparse.Namespace) -> int:
     from .incremental.locking import project_lock
     from .incremental.models import ClaimState
     from .incremental.session import IncrementalSession
@@ -1279,7 +1300,7 @@ def cmd_manuscript_questions(args) -> int:
     return 0
 
 
-def cmd_manuscript_diff(args) -> int:
+def cmd_manuscript_diff(args: argparse.Namespace) -> int:
     from .incremental.session import IncrementalSession
     from .incremental.store import StateStore
 
@@ -1299,7 +1320,7 @@ def cmd_manuscript_diff(args) -> int:
     return 0
 
 
-def cmd_manuscript_invalidate(args) -> int:
+def cmd_manuscript_invalidate(args: argparse.Namespace) -> int:
     from .incremental.graph import affected_claims
     from .incremental.locking import project_lock
     from .incremental.models import ClaimState
@@ -1337,7 +1358,7 @@ def cmd_manuscript_invalidate(args) -> int:
     return 0
 
 
-def cmd_manuscript_audit(args) -> int:
+def cmd_manuscript_audit(args: argparse.Namespace) -> int:
     from .incremental.models import LeanDeclaration
     from .incremental.reports import dependency_audit
     from .incremental.session import IncrementalSession
@@ -1369,7 +1390,7 @@ def cmd_manuscript_audit(args) -> int:
     return 0
 
 
-def cmd_manuscript_correspondence(args) -> int:
+def cmd_manuscript_correspondence(args: argparse.Namespace) -> int:
     from .incremental.locking import project_lock
     from .incremental.models import ClaimState
     from .incremental.session import IncrementalSession
@@ -1442,7 +1463,7 @@ def cmd_manuscript_correspondence(args) -> int:
     return 0
 
 
-def cmd_tui(args) -> int:
+def cmd_tui(args: argparse.Namespace) -> int:
     """Launch the replaceable Textual interface over the workflow contract."""
     from .tui import run_tui
     from .workflow.service import ProofAssistantWorkflow
@@ -1454,7 +1475,7 @@ def cmd_tui(args) -> int:
     return int(run_tui(service))
 
 
-def cmd_project_worker(args) -> int:
+def cmd_project_worker(args: argparse.Namespace) -> int:
     """Internal detached worker; public clients use the workflow job contract."""
 
     from .workflow.service import ProofAssistantWorkflow
@@ -1483,8 +1504,9 @@ def cmd_project_worker(args) -> int:
     return service._run_verification_job(project, args.job_id, args.lease_fd)
 
 
-def cmd_benchmark(args) -> int:
-    from .workflow import BenchmarkKind, ProofAssistantWorkflow
+def cmd_benchmark(args: argparse.Namespace) -> int:
+    from .workflow import BenchmarkKind
+    from .workflow.service import ProofAssistantWorkflow
 
     service = ProofAssistantWorkflow(
         cache_home=args.cache_home,

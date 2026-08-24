@@ -327,7 +327,9 @@ class VerificationJobStore:
                     json.dumps(dict(event.details), sort_keys=True, default=str),
                 ),
             )
-            sequence = int(cursor.lastrowid)
+            sequence = cursor.lastrowid
+            if sequence is None:
+                raise RuntimeError("SQLite event insert did not produce a sequence")
         self.heartbeat(job_id)
         return ProgressEvent(
             sequence,

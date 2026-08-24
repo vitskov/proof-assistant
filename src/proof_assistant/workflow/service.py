@@ -2,23 +2,25 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
-import json
 import os
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import TypeVar
 
 from ..backend import CodexBackend, CodexConfig
 from ..cache import CacheLayout
 from ..concurrency import (
     AIConcurrencyPatch,
     AITaskClass,
+    AutoInt,
     AutoValue,
     BudgetPolicy,
     BuildConcurrencyPatch,
@@ -26,6 +28,7 @@ from ..concurrency import (
     CalibrationProfile,
     CalibrationStore,
     CodexPlan,
+    ConcurrencyConfig,
     ConcurrencyConfigPatch,
     ConcurrencyMode,
     ConcurrencyRuntime,
@@ -36,6 +39,7 @@ from ..concurrency import (
     MachineConcurrencySettings,
     MachineConfigStore,
     QueueDepths,
+    ResolvedConcurrencyConfig,
     ResourceProfile,
     SchedulerConcurrencyPatch,
     TelemetryCollector,
@@ -71,6 +75,7 @@ from ..incremental.locking import (
 from ..incremental.models import (
     ClaimState,
     ManuscriptEdge,
+    SourceObject,
     TaskPolicy,
     TaskSpec,
 )
@@ -89,6 +94,7 @@ from ..incremental.task import (
     parse_task_text,
     task_document,
 )
+from ..json_types import JSONObject, json_object, load_json
 from ..presentation.clarifications import (
     ClarificationNarrator,
     ClarificationPresenter,
@@ -116,6 +122,7 @@ from .contracts import (
     BenchmarkResult,
     CalibrationResetResult,
     CancellationReport,
+    CancellationToken,
     ChangeImpactPlan,
     ClaimChangeKind,
     ClaimImpact,
@@ -159,6 +166,8 @@ from .contracts import (
 )
 from .jobs import VerificationJobStore, request_fingerprint
 from .preferences import LocalPreferenceStore
+
+_EnumT = TypeVar("_EnumT", bound=StrEnum)
 
 
 class StaleChangePlanError(RuntimeError):
@@ -251,18 +260,45 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
-def _task_from_dict(payload: dict[str, Any]) -> TaskSpec:
-    raw_policy = payload.get("policy") or {}
+def _task_from_dict(payload: JSONObject) -> TaskSpec:
+    raw_policy_value = payload.get("policy") or {}
+    if not isinstance(raw_policy_value, dict):
+        raise ValueError("Persisted task policy must be an object")
+    raw_targets = payload.get("targets", [])
+    if not isinstance(raw_targets, list) or not all(
+        isinstance(item, str) for item in raw_targets
+    ):
+        raise ValueError("Persisted task targets must be a string list")
+
+    def text_field(key: str, default: str) -> str:
+        value = payload.get(key, default)
+        if not isinstance(value, str):
+            raise ValueError(f"Persisted task {key} must be a string")
+        return value
+
+    def policy_field(key: str, default: bool) -> bool:
+        value = raw_policy_value.get(key, default)
+        if not isinstance(value, bool):
+            raise ValueError(f"Persisted task policy {key} must be a boolean")
+        return value
+
     return TaskSpec(
-        mode=str(payload.get("mode", "theorem")),
-        targets=tuple(str(item) for item in payload.get("targets", ())),
-        policy=TaskPolicy(**raw_policy),
-        free_form=str(payload.get("free_form", "")),
-        source_format=str(payload.get("source_format", "yaml")),
+        mode=text_field("mode", "theorem"),
+        targets=tuple(raw_targets),
+        policy=TaskPolicy(
+            pause_on_ambiguity=policy_field("pause_on_ambiguity", True),
+            preserve_certified=policy_field("preserve_certified", True),
+            counterexample_search=policy_field("counterexample_search", True),
+            require_statement_correspondence_review=policy_field(
+                "require_statement_correspondence_review", False
+            ),
+        ),
+        free_form=text_field("free_form", ""),
+        source_format=text_field("source_format", "yaml"),
     )
 
 
-def _target_set(task: TaskSpec, objects: tuple[Any, ...]) -> set[str]:
+def _target_set(task: TaskSpec, objects: tuple[SourceObject, ...]) -> set[str]:
     if task.targets:
         return set(task.targets)
     theorem_kinds = {
@@ -411,7 +447,7 @@ class ProofAssistantWorkflow:
             project_path=str(project.resolve()) if project is not None else None,
         )
 
-    def _resolved_concurrency(self):
+    def _resolved_concurrency(self) -> ResolvedConcurrencyConfig:
         return self._concurrency_spec().resolve()
 
     def _runtime(self) -> ConcurrencyRuntime:
@@ -444,11 +480,11 @@ class ProofAssistantWorkflow:
         )
 
     @staticmethod
-    def _auto_view(value: object) -> int | None:
-        return None if value == AutoValue.AUTO else int(value)
+    def _auto_view(value: AutoInt) -> int | None:
+        return value if isinstance(value, int) else None
 
     @classmethod
-    def _configured_view(cls, config) -> ConcurrencySettingsView:
+    def _configured_view(cls, config: ConcurrencyConfig) -> ConcurrencySettingsView:
         return ConcurrencySettingsView(
             mode=config.mode.value,
             resource_profile=config.resource_profile.value,
@@ -476,7 +512,7 @@ class ProofAssistantWorkflow:
         )
 
     @staticmethod
-    def _legacy_view(config) -> LegacySettingsView:
+    def _legacy_view(config: ConcurrencyConfig) -> LegacySettingsView:
         return LegacySettingsView(
             proof_jobs=config.legacy.jobs,
             batch_size=config.legacy.batch_size,
@@ -640,7 +676,7 @@ class ProofAssistantWorkflow:
             )
 
     @staticmethod
-    def _enum_value(enum_type, value: str):
+    def _enum_value(enum_type: type[_EnumT], value: str) -> _EnumT:
         normalized = value.casefold().replace("-", "_").replace(" ", "_")
         return enum_type(normalized)
 
@@ -660,7 +696,7 @@ class ProofAssistantWorkflow:
                 "Adaptive/Auto or Fixed/Manual consistently"
             )
 
-        def automatic(value: int | None):
+        def automatic(value: int | None) -> AutoInt:
             return AutoValue.AUTO if value is None else value
 
         return ConcurrencyConfigPatch(
@@ -1438,7 +1474,10 @@ class ProofAssistantWorkflow:
                     )
                     for row in store.manuscript_edges()
                 )
-                old_task_payload = json.loads(store.get_metadata("task_spec") or "{}")
+                old_task_payload = json_object(
+                    load_json(store.get_metadata("task_spec") or "{}"),
+                    path="persisted task",
+                )
                 old_task_sha = store.get_metadata("task_sha256")
                 main_file_changed = bool(store.get_metadata("pending_main_file_change"))
                 certificates = {
@@ -1636,7 +1675,7 @@ class ProofAssistantWorkflow:
         settings: VerificationSettings,
         *,
         progress: ProgressSink | None = None,
-        cancellation: Any | None = None,
+        cancellation: CancellationToken | None = None,
     ) -> WorkflowSnapshot:
         project = validate_managed_project_path(project)
         current = self.plan_changes(project)
@@ -1670,7 +1709,7 @@ class ProofAssistantWorkflow:
             },
         )
 
-        def event_hook(phase: str, message: str, details: dict[str, Any]) -> None:
+        def event_hook(phase: str, message: str, details: dict[str, object]) -> None:
             try:
                 mapped = ProgressPhase(phase)
             except ValueError:
@@ -1950,8 +1989,10 @@ class ProofAssistantWorkflow:
                 # authority. A transient provenance-write failure must never
                 # unlock or terminate it; the child will still record its PID,
                 # heartbeat, progress, and terminal state.
-                started_job = store.job(job.job_id)
-            assert started_job is not None
+                fallback_job = store.job(job.job_id)
+                if fallback_job is None:
+                    raise VerificationJobNotFoundError(job.job_id)
+                started_job = fallback_job
             return store.observe(started_job, started=True, attached=False)
         finally:
             if not transferred:
@@ -2012,11 +2053,15 @@ class ProofAssistantWorkflow:
         )
         heartbeat_thread.start()
         try:
+
+            def record_progress(event: ProgressEvent) -> None:
+                store.append_event(job_id, event)
+
             snapshot = self.confirm_and_verify(
                 store.project,
                 job.plan_id,
                 job.settings,
-                progress=lambda event: store.append_event(job_id, event),
+                progress=record_progress,
                 cancellation=_JobCancellationFlag(store, job_id),
             )
             if snapshot.state == WorkflowState.INTERRUPTED:
@@ -2302,17 +2347,21 @@ class ProofAssistantWorkflow:
             pass
 
     @staticmethod
-    def _read_workflow_state(project: Path) -> dict[str, Any]:
+    def _read_workflow_state(project: Path) -> JSONObject:
         try:
-            payload = json.loads(
-                (project / ".repoprover" / "workflow.json").read_text(encoding="utf-8")
+            return json_object(
+                load_json(
+                    (project / ".repoprover" / "workflow.json").read_text(
+                        encoding="utf-8"
+                    )
+                ),
+                path="workflow state",
             )
-            return payload if isinstance(payload, dict) else {}
-        except (OSError, json.JSONDecodeError):
+        except (OSError, ValueError):
             return {}
 
     @staticmethod
-    def _checkpoint(cancellation: Any | None) -> None:
+    def _checkpoint(cancellation: CancellationToken | None) -> None:
         if cancellation is not None:
             cancellation.raise_if_cancelled()
 
@@ -2322,7 +2371,7 @@ class ProofAssistantWorkflow:
         phase: ProgressPhase,
         message: str,
         *,
-        details: dict[str, Any] | None = None,
+        details: Mapping[str, object] | None = None,
     ) -> None:
         if sink is None:
             return

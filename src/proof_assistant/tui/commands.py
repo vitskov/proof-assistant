@@ -138,7 +138,7 @@ DETACH_JOB = CommandSpec(
 
 # Alternative help is intentionally non-priority: typing '?' in an editable field
 # remains ordinary text input, while F1 always opens the reference screen.
-GLOBAL_BINDINGS = [
+GLOBAL_BINDINGS: list[Binding | tuple[str, str] | tuple[str, str, str]] = [
     HELP.binding(priority=True),
     Binding("question_mark", "show_shortcuts", show=False),
     COMMAND_PALETTE.binding(priority=True),

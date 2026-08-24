@@ -1,15 +1,30 @@
 from __future__ import annotations
 
-import json
 import os
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TypedDict
 
 from ..incremental.io import atomic_write_json
+from ..json_types import JSONValue, load_json
 from .paths import default_projects_root
 
 CATALOG_SCHEMA_VERSION = 1
+
+
+class _CatalogPayload(TypedDict):
+    schema_version: int
+    projects: list[JSONValue]
+
+
+def _catalog_project_path(item: JSONValue) -> Path | None:
+    if not isinstance(item, dict):
+        return None
+    value = item.get("project_path")
+    if not isinstance(value, str):
+        return None
+    return Path(value).expanduser().resolve(strict=False)
 
 
 @dataclass(frozen=True)
@@ -41,34 +56,42 @@ class ProjectCatalog:
     def _record_from_project(project: Path) -> CatalogProject | None:
         config_path = project / ".repoprover" / "config.json"
         try:
-            payload = json.loads(config_path.read_text(encoding="utf-8"))
+            payload = load_json(config_path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                return None
             source = Path(str(payload["manuscript"])).expanduser().resolve()
             project_id = str(payload.get("project_id") or project.resolve())
             name = str(payload.get("name") or project.name)
             workflow_path = project / ".repoprover" / "workflow.json"
             try:
-                workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
+                decoded_workflow = load_json(workflow_path.read_text(encoding="utf-8"))
+                workflow = (
+                    decoded_workflow if isinstance(decoded_workflow, dict) else {}
+                )
+            except (OSError, ValueError):
                 workflow = {}
             last_opened = str(
                 workflow.get("updated_at")
                 or payload.get("last_opened_at")
                 or payload["created_at"]
             )
-        except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        except (OSError, KeyError, TypeError, ValueError):
             return None
         return CatalogProject(project_id, name, project.resolve(), source, last_opened)
 
-    def _load(self) -> dict[str, Any]:
+    def _load(self) -> _CatalogPayload:
         try:
-            payload = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            decoded = load_json(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
             return {"schema_version": CATALOG_SCHEMA_VERSION, "projects": []}
-        if payload.get("schema_version") != CATALOG_SCHEMA_VERSION or not isinstance(
-            payload.get("projects"), list
+        if not isinstance(decoded, dict):
+            return {"schema_version": CATALOG_SCHEMA_VERSION, "projects": []}
+        projects = decoded.get("projects")
+        if decoded.get("schema_version") != CATALOG_SCHEMA_VERSION or not isinstance(
+            projects, list
         ):
             return {"schema_version": CATALOG_SCHEMA_VERSION, "projects": []}
-        return payload
+        return {"schema_version": CATALOG_SCHEMA_VERSION, "projects": projects}
 
     def candidate_paths(self) -> tuple[Path, ...]:
         """Return every path the catalog must account for, valid or not.
@@ -81,8 +104,9 @@ class ProjectCatalog:
 
         paths: set[Path] = set()
         for item in self._load()["projects"]:
-            if isinstance(item, dict) and isinstance(item.get("project_path"), str):
-                paths.add(Path(item["project_path"]).expanduser().resolve(strict=False))
+            candidate = _catalog_project_path(item)
+            if candidate is not None:
+                paths.add(candidate)
         root = default_projects_root()
         if self.discover_default_root and root.is_dir():
             paths.update(
@@ -98,10 +122,7 @@ class ProjectCatalog:
         projects = [
             item
             for item in payload["projects"]
-            if isinstance(item, dict)
-            and isinstance(item.get("project_path"), str)
-            and Path(item["project_path"]).expanduser().resolve(strict=False)
-            != resolved
+            if _catalog_project_path(item) not in {None, resolved}
         ]
         projects.append({"project_path": str(resolved)})
         atomic_write_json(
@@ -128,10 +149,7 @@ class ProjectCatalog:
         retained = [
             item
             for item in payload["projects"]
-            if isinstance(item, dict)
-            and isinstance(item.get("project_path"), str)
-            and Path(item["project_path"]).expanduser().resolve(strict=False)
-            != record.project_path
+            if _catalog_project_path(item) not in {None, record.project_path}
         ]
         retained.append(
             {
@@ -153,14 +171,12 @@ class ProjectCatalog:
 
         resolved = project.expanduser().resolve(strict=False)
         payload = self._load()
-        retained: list[Any] = []
+        retained: list[JSONValue] = []
         for item in payload["projects"]:
-            if not isinstance(item, dict) or not isinstance(
-                item.get("project_path"), str
-            ):
+            candidate = _catalog_project_path(item)
+            if candidate is None:
                 retained.append(item)
                 continue
-            candidate = Path(item["project_path"]).expanduser().resolve(strict=False)
             if candidate != resolved:
                 retained.append(item)
         atomic_write_json(
@@ -168,9 +184,9 @@ class ProjectCatalog:
             {"schema_version": CATALOG_SCHEMA_VERSION, "projects": retained},
         )
 
-    def _write(self, records: object) -> None:
+    def _write(self, records: Iterable[CatalogProject]) -> None:
         values = sorted(
-            list(records),
+            records,
             key=lambda item: (item.last_opened_at, item.name),
             reverse=True,
         )

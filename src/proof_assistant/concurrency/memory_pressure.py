@@ -46,9 +46,7 @@ class MemoryPressurePolicy:
         if not all(0.0 < value < 1.0 for value in ratios):
             raise ValueError("memory-pressure ratios must be between zero and one")
         if not (
-            self.macos_emergency_ratio
-            < self.macos_red_ratio
-            < self.macos_yellow_ratio
+            self.macos_emergency_ratio < self.macos_red_ratio < self.macos_yellow_ratio
         ):
             raise ValueError("invalid macOS memory-pressure thresholds")
         if not (
@@ -150,9 +148,7 @@ class MemoryPressureClassifier:
             )
         return MemoryPressureSource.PORTABLE_FALLBACK
 
-    def _stabilize(
-        self, candidate: PressureState, *, immediate: bool
-    ) -> PressureState:
+    def _stabilize(self, candidate: PressureState, *, immediate: bool) -> PressureState:
         if self._pressure is None:
             self._pressure = candidate
             return candidate
@@ -193,14 +189,14 @@ class MemoryPressureClassifier:
             and swap_out_rate_bytes_per_second >= threshold
         )
         if active_swap_out:
+            assert swap_out_rate_bytes_per_second is not None
             self._high_swap_out_samples += 1
             paging_floor = PressureState.YELLOW
             if self.os_name == "Linux" and self._high_swap_out_samples >= 2:
                 paging_floor = PressureState.RED
             candidate = _more_severe(candidate, paging_floor)
             reasons.append(
-                "active swap-out "
-                f"{swap_out_rate_bytes_per_second / MIB:.1f} MiB/s"
+                f"active swap-out {swap_out_rate_bytes_per_second / MIB:.1f} MiB/s"
             )
         else:
             self._high_swap_out_samples = 0
