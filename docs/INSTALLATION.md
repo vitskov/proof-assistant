@@ -98,7 +98,12 @@ Add the command to the current shell:
 export PATH="$HOME/.venvs/proof-assistant/bin:$PATH"
 ```
 
-Add that export to the appropriate shell startup file if it should persist.
+The installer also adds this path automatically to the startup files for the
+shell named by `$SHELL`: `.zprofile`/`.zshrc` for zsh, `.bash_profile`/`.bashrc`
+for bash, `~/.config/fish/config.fish` for fish, or `~/.profile` for other
+POSIX shells. Existing entries are not duplicated. Open a new terminal, or
+source the relevant file, for the command to become available in the current
+shell.
 
 The cache keeps its historical `repoprover-codex` directory name on purpose.
 Changing the default during the product rename would create a second shared

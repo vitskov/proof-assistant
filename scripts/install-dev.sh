@@ -171,4 +171,44 @@ fi
 "${venv_path}/bin/proof-assistant" cache init
 "${venv_path}/bin/python" -m pytest -q "${project_root}/tests"
 
+configure_shell_path() {
+  local shell_name="${SHELL##*/}"
+  local path_dir="${venv_path}/bin"
+  local quoted_path config path_line
+  local configs=()
+
+  # Use shell-specific startup files. Login shells and interactive shells can
+  # read different files, so configure both where that distinction exists.
+  printf -v quoted_path '%q' "${path_dir}"
+  case "${shell_name}" in
+    zsh)
+      configs=("${HOME}/.zprofile" "${HOME}/.zshrc")
+      path_line="case \":\$PATH:\" in *\":${quoted_path}:\"*) ;; *) export PATH=${quoted_path}:\"\$PATH\";; esac"
+      ;;
+    bash)
+      configs=("${HOME}/.bash_profile" "${HOME}/.bashrc")
+      path_line="case \":\$PATH:\" in *\":${quoted_path}:\"*) ;; *) export PATH=${quoted_path}:\"\$PATH\";; esac"
+      ;;
+    fish)
+      config="${HOME}/.config/fish/config.fish"
+      configs=("${config}")
+      printf -v quoted_path '%q' "${path_dir}"
+      path_line="fish_add_path --path ${quoted_path}"
+      ;;
+    *)
+      configs=("${HOME}/.profile")
+      path_line="case \":\$PATH:\" in *\":${quoted_path}:\"*) ;; *) export PATH=${quoted_path}:\"\$PATH\";; esac"
+      ;;
+  esac
+
+  for config in "${configs[@]}"; do
+    mkdir -p "$(dirname "${config}")"
+    if ! grep -Fqx "${path_line}" "${config}" 2>/dev/null; then
+      printf '\n# Added by Proof Assistant installer\n%s\n' "${path_line}" >> "${config}"
+    fi
+  done
+  echo "Added proof-assistant to ${shell_name} startup path (${configs[*]})"
+}
+
+configure_shell_path
 echo "Development environment ready: ${venv_path}"

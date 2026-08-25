@@ -24,7 +24,19 @@ def _relax_hardware_gate(env: dict[str, str]) -> dict[str, str]:
 def _fake_command_path(root: Path) -> Path:
     commands = root / "commands"
     commands.mkdir()
-    required = ("awk", "bash", "chmod", "cp", "dirname", "env", "getconf", "mkdir", "sh", "uname")
+    required = (
+        "awk",
+        "bash",
+        "chmod",
+        "cp",
+        "dirname",
+        "env",
+        "getconf",
+        "grep",
+        "mkdir",
+        "sh",
+        "uname",
+    )
     # sysctl is only exercised on the macOS branch of the hardware gate; it is
     # not guaranteed to exist on every Linux test host.
     optional = ("sysctl",)
@@ -491,8 +503,20 @@ def test_missing_uv_bootstraps_with_curl_and_uses_exact_installed_binary(tmp_pat
     assert "installed:--version" in calls
     assert "installed:pip install --python" in calls
     assert f"PATH={install_dir}:" in calls
-    assert not (home / ".profile").exists()
-    assert not (home / ".bashrc").exists()
+    startup_files = [
+        home / ".zprofile",
+        home / ".zshrc",
+        home / ".bash_profile",
+        home / ".bashrc",
+        home / ".profile",
+        home / ".config/fish/config.fish",
+    ]
+    configured = [
+        path.read_text(encoding="utf-8")
+        for path in startup_files
+        if path.exists()
+    ]
+    assert any("proof-assistant" in text for text in configured)
 
 
 def test_bootstrapped_uv_creates_python_environment_before_install_and_checks(
@@ -594,3 +618,41 @@ def test_uncreatable_uv_install_directory_exits_two_before_download(tmp_path):
     assert result.returncode == 2
     assert "Cannot create the uv install directory" in result.stderr
     assert "curl:" not in log.read_text(encoding="utf-8")
+
+
+def test_installer_configures_the_detected_shell_startup_path(tmp_path):
+    result, _log, home, _install_dir = _bootstrap_harness(tmp_path)
+    assert result.returncode == 0, result.stderr
+    startup_files = [
+        home / ".zprofile",
+        home / ".zshrc",
+        home / ".bash_profile",
+        home / ".bashrc",
+        home / ".profile",
+        home / ".config/fish/config.fish",
+    ]
+    configured = [
+        path.read_text(encoding="utf-8")
+        for path in startup_files
+        if path.exists()
+    ]
+    assert any(".venvs/proof-assistant/bin" in text for text in configured)
+
+
+def test_installer_does_not_duplicate_shell_startup_path(tmp_path):
+    result, _log, home, _install_dir = _bootstrap_harness(tmp_path)
+    assert result.returncode == 0, result.stderr
+    startup_files = [
+        home / ".zprofile",
+        home / ".zshrc",
+        home / ".bash_profile",
+        home / ".bashrc",
+        home / ".profile",
+        home / ".config/fish/config.fish",
+    ]
+    configured = [
+        path.read_text(encoding="utf-8")
+        for path in startup_files
+        if path.exists()
+    ]
+    assert all(text.count("Added by Proof Assistant installer") == 1 for text in configured)
