@@ -39,7 +39,7 @@ def _fake_command_path(root: Path) -> Path:
     )
     # sysctl is only exercised on the macOS branch of the hardware gate; it is
     # not guaranteed to exist on every Linux test host.
-    optional = ("sysctl",)
+    optional = ("sysctl", "lscpu")
     for name in required:
         target = shutil.which(name)
         assert target is not None
@@ -298,6 +298,8 @@ _GETCONF_STUB = (
     "exit 1\n"
 )
 
+_GETCONF_MISSING_STUB = "#!/bin/sh\nexit 1\n"
+
 
 def test_system_check_rejects_unsupported_operating_system(tmp_path):
     env = _stub_path_env(
@@ -343,7 +345,10 @@ def test_system_check_rejects_linux_with_old_glibc(tmp_path):
 def test_system_check_rejects_linux_when_glibc_cannot_be_detected(tmp_path):
     env = _stub_path_env(
         tmp_path,
-        {"uname": _UNAME_STUB.format(os_name="Linux", os_release="5.4.0")},
+        {
+            "uname": _UNAME_STUB.format(os_name="Linux", os_release="5.4.0"),
+            "getconf": _GETCONF_MISSING_STUB,
+        },
     )
     result = subprocess.run(
         [str(INSTALLER)], text=True, capture_output=True, check=False, env=env

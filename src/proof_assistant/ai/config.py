@@ -54,8 +54,12 @@ def default_provider_config_path(
     *, environ: Mapping[str, str] | None = None, home: Path | None = None
 ) -> Path:
     source = os.environ if environ is None else environ
+    explicit_xdg = source.get("XDG_CONFIG_HOME") if environ is not None else None
     root = Path(
-        source.get("XDG_CONFIG_HOME") or (home or Path.home()) / ".config"
+        explicit_xdg
+        or ((home / ".config") if home is not None else None)
+        or source.get("XDG_CONFIG_HOME")
+        or Path.home() / ".config"
     ).expanduser()
     return root / "proof-assistant" / "providers.json"
 

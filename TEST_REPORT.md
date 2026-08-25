@@ -13,8 +13,8 @@ made no OpenAI, Anthropic, or Gemini API request.
 
 | Gate | Result |
 |---|---|
-| supported disposable installer | **passed**; **550 tests passed in 155.72 seconds** |
-| complete automated suite | **passed independently**; **550 tests passed in 161.15 seconds** |
+| supported disposable installer | **passed**; **550 tests passed in 154.45 seconds** |
+| complete automated suite | **passed independently**; **550 tests passed in 159.16 seconds** |
 | provider security tests | **32 passed**; included in the 550-test suite |
 | provider TUI tests | **6 passed**; included in the 550-test suite |
 | Ruff lint and format | **passed** |
@@ -283,9 +283,9 @@ The supported installer ran in a disposable location outside Dropbox with
 Python 3.13.15 and uv 0.9.26. It installed the editable development package and
 test dependencies, compiled and executed its native C preflight with
 `/usr/bin/clang`, initialized the managed cache, and completed all 550 tests in
-155.72 seconds. Ruff lint/format, strict mypy over 72 source files, Python
+154.45 seconds. Ruff lint/format, strict mypy over 72 source files, Python
 `compileall`, and `git diff --check` also passed. A separate final full-suite
-run completed all 550 tests in 161.15 seconds.
+run completed all 550 tests in 159.16 seconds.
 
 No real AI turn or API request was part of this installer acceptance. No new
 final release commit SHA is recorded in this pre-commit report.
@@ -301,8 +301,8 @@ environments, caches, or machine-private files.
 
 | Artifact | SHA-256 |
 |---|---|
-| `proof_assistant-0.1.0-py3-none-any.whl` | `e3d6e820136afd7d831dac1c677f0ccb7b54776a8f0cd3e567544ec30d6727dd` |
-| `proof_assistant-0.1.0.tar.gz` | `ebb4497974a64a3c50ffb303ded075906f1806f7f9a070152ce6e91d14368e97` |
+| `proof_assistant-0.1.0-py3-none-any.whl` | `0607712c201e4db98fa0782b9208c8a93eaeb0fe78abc51e9540cec6376c0e2d` |
+| `proof_assistant-0.1.0.tar.gz` | `97002d9a3f3ce383a77ca2f0116566825ca7ac514c539f5db8062c26648ae46d` |
 
 ### Earlier 2026-08-23 package acceptance
 
