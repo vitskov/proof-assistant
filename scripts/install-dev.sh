@@ -36,17 +36,24 @@ case "${os_name}" in
     ;;
   Linux)
     glibc_version="$(getconf GNU_LIBC_VERSION 2>/dev/null | awk '{print $2}' || true)"
-    if [[ -n "${glibc_version}" ]]; then
-      glibc_major="${glibc_version%%.*}"
-      glibc_minor="${glibc_version#*.}"
-      glibc_minor="${glibc_minor%%.*}"
-      if [[ "${glibc_major}" -lt 2 ]] \
-        || { [[ "${glibc_major}" -eq 2 ]] && [[ "${glibc_minor}" -lt 31 ]]; }; then
-        echo "ERROR: glibc 2.31 (Ubuntu 20.04-equivalent) or newer is required; detected glibc ${glibc_version}" >&2
-        exit 2
-      fi
+    if [[ -z "${glibc_version}" ]]; then
+      echo "ERROR: Unable to determine glibc version; glibc 2.31 (Ubuntu 20.04-equivalent) or newer is required." >&2
+      exit 2
     fi
-    cpu_cores="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 0)"
+    glibc_major="${glibc_version%%.*}"
+    glibc_minor="${glibc_version#*.}"
+    glibc_minor="${glibc_minor%%.*}"
+    if [[ "${glibc_major}" -lt 2 ]] \
+      || { [[ "${glibc_major}" -eq 2 ]] && [[ "${glibc_minor}" -lt 31 ]]; }; then
+      echo "ERROR: glibc 2.31 (Ubuntu 20.04-equivalent) or newer is required; detected glibc ${glibc_version}" >&2
+      exit 2
+    fi
+    if ! command -v lscpu >/dev/null 2>&1; then
+      echo "ERROR: Cannot determine physical CPU cores because lscpu is unavailable." >&2
+      exit 2
+    fi
+    cpu_cores="$(lscpu -p=socket,core 2>/dev/null | awk -F, \
+      '!/^#/ && NF >= 2 { cores[$1 ":" $2] = 1 } END { print length(cores) + 0 }')"
     memory_bytes="$(awk '/^MemTotal:/ { print $2 * 1024 }' /proc/meminfo 2>/dev/null || echo 0)"
     ;;
   *)
@@ -172,7 +179,8 @@ fi
 "${venv_path}/bin/python" -m pytest -q "${project_root}/tests"
 
 configure_shell_path() {
-  local shell_name="${SHELL##*/}"
+  local shell_name="${SHELL:-sh}"
+  shell_name="${shell_name##*/}"
   local path_dir="${venv_path}/bin"
   local quoted_path config path_line
   local configs=()

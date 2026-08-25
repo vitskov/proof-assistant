@@ -340,6 +340,18 @@ def test_system_check_rejects_linux_with_old_glibc(tmp_path):
     assert "detected glibc 2.27" in result.stderr
 
 
+def test_system_check_rejects_linux_when_glibc_cannot_be_detected(tmp_path):
+    env = _stub_path_env(
+        tmp_path,
+        {"uname": _UNAME_STUB.format(os_name="Linux", os_release="5.4.0")},
+    )
+    result = subprocess.run(
+        [str(INSTALLER)], text=True, capture_output=True, check=False, env=env
+    )
+    assert result.returncode == 2
+    assert "Unable to determine glibc version" in result.stderr
+
+
 def test_system_check_rejects_too_few_cpu_cores(tmp_path):
     env = _stub_path_env(
         tmp_path,
