@@ -14,13 +14,40 @@ def _write_executable(path: Path, text: str) -> None:
     path.chmod(0o755)
 
 
+def _relax_hardware_gate(env: dict[str, str]) -> dict[str, str]:
+    """Disable the CPU/RAM floor for tests unrelated to the hardware gate."""
+    env["PROOF_ASSISTANT_MIN_CPU_CORES"] = "1"
+    env["PROOF_ASSISTANT_MIN_MEMORY_GIB"] = "1"
+    return env
+
+
 def _fake_command_path(root: Path) -> Path:
     commands = root / "commands"
     commands.mkdir()
-    for name in ("bash", "chmod", "cp", "dirname", "env", "mkdir", "sh"):
+    required = (
+        "awk",
+        "bash",
+        "chmod",
+        "cp",
+        "dirname",
+        "env",
+        "getconf",
+        "grep",
+        "mkdir",
+        "sh",
+        "uname",
+    )
+    # sysctl is only exercised on the macOS branch of the hardware gate; it is
+    # not guaranteed to exist on every Linux test host.
+    optional = ("sysctl",)
+    for name in required:
         target = shutil.which(name)
         assert target is not None
         (commands / name).symlink_to(target)
+    for name in optional:
+        target = shutil.which(name)
+        if target is not None:
+            (commands / name).symlink_to(target)
     return commands
 
 
@@ -152,6 +179,10 @@ def _bootstrap_harness(
             "FAKE_UV_TEMPLATE": str(installed_template),
             "PROOF_ASSISTANT_VENV": str(home / ".venvs/proof-assistant"),
             "PROOF_ASSISTANT_CACHE_HOME": str(home / ".cache/repoprover-codex"),
+            # Bootstrap tests exercise uv discovery, not the hardware gate;
+            # relax the floor so they pass regardless of the test host's specs.
+            "PROOF_ASSISTANT_MIN_CPU_CORES": "1",
+            "PROOF_ASSISTANT_MIN_MEMORY_GIB": "1",
         }
     )
     if custom_install_dir is not None:
@@ -181,7 +212,7 @@ def test_installer_always_checks_compiler_before_tests():
 
 def test_installer_rejects_dropbox_environment_before_creation(tmp_path):
     forbidden = tmp_path / "Dropbox" / "forbidden-venv"
-    env = os.environ.copy()
+    env = _relax_hardware_gate(os.environ.copy())
     env["PROOF_ASSISTANT_VENV"] = str(forbidden)
     result = subprocess.run(
         [str(INSTALLER)],
@@ -198,7 +229,7 @@ def test_installer_rejects_dropbox_environment_before_creation(tmp_path):
 
 def test_installer_rejects_dropbox_cache_before_creation(tmp_path):
     forbidden = tmp_path / "Dropbox" / "lean-cache"
-    env = os.environ.copy()
+    env = _relax_hardware_gate(os.environ.copy())
     env["PROOF_ASSISTANT_CACHE_HOME"] = str(forbidden)
     env["PROOF_ASSISTANT_VENV"] = str(Path.home() / ".venvs" / "proof-assistant")
     result = subprocess.run(
@@ -217,7 +248,7 @@ def test_installer_rejects_dropbox_cache_before_creation(tmp_path):
 def test_installer_rejects_cache_outside_home_before_creation(tmp_path):
     venv = tmp_path / "external-venv"
     forbidden = tmp_path / "forbidden-cache"
-    env = os.environ.copy()
+    env = _relax_hardware_gate(os.environ.copy())
     env["PROOF_ASSISTANT_CACHE_HOME"] = str(forbidden)
     env["PROOF_ASSISTANT_VENV"] = str(venv)
     result = subprocess.run(
@@ -232,6 +263,162 @@ def test_installer_rejects_cache_outside_home_before_creation(tmp_path):
     assert "caches must reside inside the user home" in result.stderr
     assert not venv.exists()
     assert not forbidden.exists()
+
+
+def _stub_path_env(tmp_path: Path, stubs: dict[str, str]) -> dict[str, str]:
+    """Prepend fake OS-query binaries to PATH; everything else stays real."""
+    stub_dir = tmp_path / "stub-bin"
+    stub_dir.mkdir()
+    for name, script in stubs.items():
+        _write_executable(stub_dir / name, script)
+    env = os.environ.copy()
+    env["PATH"] = f"{stub_dir}{os.pathsep}{env['PATH']}"
+    return env
+
+
+_UNAME_STUB = (
+    "#!/bin/sh\n"
+    'if [ "$1" = "-s" ]; then echo "{os_name}"; exit 0; fi\n'
+    'if [ "$1" = "-r" ]; then echo "{os_release}"; exit 0; fi\n'
+    "exit 1\n"
+)
+
+_SYSCTL_STUB = (
+    "#!/bin/sh\n"
+    'case "$2" in\n'
+    '  hw.physicalcpu|hw.ncpu) echo "{cores}" ;;\n'
+    "  hw.memsize) echo \"{mem_bytes}\" ;;\n"
+    "  *) exit 1 ;;\n"
+    "esac\n"
+)
+
+_GETCONF_STUB = (
+    "#!/bin/sh\n"
+    'if [ "$1" = "GNU_LIBC_VERSION" ]; then echo "glibc {glibc}"; exit 0; fi\n'
+    "exit 1\n"
+)
+
+
+def test_system_check_rejects_unsupported_operating_system(tmp_path):
+    env = _stub_path_env(
+        tmp_path,
+        {"uname": _UNAME_STUB.format(os_name="SunOS", os_release="5.11")},
+    )
+    result = subprocess.run(
+        [str(INSTALLER)], text=True, capture_output=True, check=False, env=env
+    )
+    assert result.returncode == 2
+    assert "Unsupported operating system: SunOS" in result.stderr
+
+
+def test_system_check_rejects_macos_older_than_monterey(tmp_path):
+    env = _stub_path_env(
+        tmp_path,
+        {"uname": _UNAME_STUB.format(os_name="Darwin", os_release="20.6.0")},
+    )
+    result = subprocess.run(
+        [str(INSTALLER)], text=True, capture_output=True, check=False, env=env
+    )
+    assert result.returncode == 2
+    assert "macOS 12 Monterey (Darwin 21) or newer is required" in result.stderr
+    assert "detected Darwin 20.6.0" in result.stderr
+
+
+def test_system_check_rejects_linux_with_old_glibc(tmp_path):
+    env = _stub_path_env(
+        tmp_path,
+        {
+            "uname": _UNAME_STUB.format(os_name="Linux", os_release="5.4.0"),
+            "getconf": _GETCONF_STUB.format(glibc="2.27"),
+        },
+    )
+    result = subprocess.run(
+        [str(INSTALLER)], text=True, capture_output=True, check=False, env=env
+    )
+    assert result.returncode == 2
+    assert "glibc 2.31" in result.stderr
+    assert "detected glibc 2.27" in result.stderr
+
+
+def test_system_check_rejects_linux_when_glibc_cannot_be_detected(tmp_path):
+    env = _stub_path_env(
+        tmp_path,
+        {"uname": _UNAME_STUB.format(os_name="Linux", os_release="5.4.0")},
+    )
+    result = subprocess.run(
+        [str(INSTALLER)], text=True, capture_output=True, check=False, env=env
+    )
+    assert result.returncode == 2
+    assert "Unable to determine glibc version" in result.stderr
+
+
+def test_system_check_rejects_too_few_cpu_cores(tmp_path):
+    env = _stub_path_env(
+        tmp_path,
+        {
+            "uname": _UNAME_STUB.format(os_name="Darwin", os_release="21.6.0"),
+            "sysctl": _SYSCTL_STUB.format(cores=2, mem_bytes=17179869184),
+        },
+    )
+    result = subprocess.run(
+        [str(INSTALLER)], text=True, capture_output=True, check=False, env=env
+    )
+    assert result.returncode == 2
+    assert "at least 4 CPU cores are required; detected 2" in result.stderr
+
+
+def test_system_check_rejects_too_little_memory(tmp_path):
+    env = _stub_path_env(
+        tmp_path,
+        {
+            "uname": _UNAME_STUB.format(os_name="Darwin", os_release="21.6.0"),
+            "sysctl": _SYSCTL_STUB.format(cores=8, mem_bytes=4 * 1024**3),
+        },
+    )
+    result = subprocess.run(
+        [str(INSTALLER)], text=True, capture_output=True, check=False, env=env
+    )
+    assert result.returncode == 2
+    assert "at least 16 GiB of RAM is required; detected 4 GiB" in result.stderr
+
+
+def test_system_check_honors_custom_minimums(tmp_path):
+    env = _stub_path_env(
+        tmp_path,
+        {
+            "uname": _UNAME_STUB.format(os_name="Darwin", os_release="21.6.0"),
+            "sysctl": _SYSCTL_STUB.format(cores=2, mem_bytes=4 * 1024**3),
+        },
+    )
+    env["PROOF_ASSISTANT_MIN_CPU_CORES"] = "1"
+    env["PROOF_ASSISTANT_MIN_MEMORY_GIB"] = "1"
+    env["PROOF_ASSISTANT_VENV"] = str(tmp_path / "Dropbox" / "venv")
+    result = subprocess.run(
+        [str(INSTALLER)], text=True, capture_output=True, check=False, env=env
+    )
+    # Falls through the (relaxed) hardware gate straight into the next check.
+    assert result.returncode == 2
+    assert "must not reside in Dropbox" in result.stderr
+
+
+def test_system_check_passes_and_recommends_more_hardware_below_recommended_tier(
+    tmp_path,
+):
+    env = _stub_path_env(
+        tmp_path,
+        {
+            "uname": _UNAME_STUB.format(os_name="Darwin", os_release="21.6.0"),
+            "sysctl": _SYSCTL_STUB.format(cores=4, mem_bytes=16 * 1024**3),
+        },
+    )
+    env["PROOF_ASSISTANT_VENV"] = str(tmp_path / "Dropbox" / "venv")
+    result = subprocess.run(
+        [str(INSTALLER)], text=True, capture_output=True, check=False, env=env
+    )
+    assert result.returncode == 2
+    assert "must not reside in Dropbox" in result.stderr
+    assert "System check: Darwin 21.6.0, 4 CPU cores, 16 GiB RAM" in result.stdout
+    assert "8+ CPU cores and 32+ GiB RAM are recommended" in result.stderr
 
 
 def test_installer_keeps_existing_cache_path_and_supports_legacy_overrides():
@@ -259,7 +446,7 @@ def test_uv_bootstrap_never_uses_privilege_or_system_package_managers():
 
 def test_installer_honors_legacy_environment_override(tmp_path):
     forbidden = tmp_path / "Dropbox" / "legacy-venv"
-    env = os.environ.copy()
+    env = _relax_hardware_gate(os.environ.copy())
     env.pop("PROOF_ASSISTANT_VENV", None)
     env["REPOPROVER_CODEX_VENV"] = str(forbidden)
     result = subprocess.run(
@@ -328,8 +515,20 @@ def test_missing_uv_bootstraps_with_curl_and_uses_exact_installed_binary(tmp_pat
     assert "installed:--version" in calls
     assert "installed:pip install --python" in calls
     assert f"PATH={install_dir}:" in calls
-    assert not (home / ".profile").exists()
-    assert not (home / ".bashrc").exists()
+    startup_files = [
+        home / ".zprofile",
+        home / ".zshrc",
+        home / ".bash_profile",
+        home / ".bashrc",
+        home / ".profile",
+        home / ".config/fish/config.fish",
+    ]
+    configured = [
+        path.read_text(encoding="utf-8")
+        for path in startup_files
+        if path.exists()
+    ]
+    assert any("proof-assistant" in text for text in configured)
 
 
 def test_bootstrapped_uv_creates_python_environment_before_install_and_checks(
@@ -431,3 +630,41 @@ def test_uncreatable_uv_install_directory_exits_two_before_download(tmp_path):
     assert result.returncode == 2
     assert "Cannot create the uv install directory" in result.stderr
     assert "curl:" not in log.read_text(encoding="utf-8")
+
+
+def test_installer_configures_the_detected_shell_startup_path(tmp_path):
+    result, _log, home, _install_dir = _bootstrap_harness(tmp_path)
+    assert result.returncode == 0, result.stderr
+    startup_files = [
+        home / ".zprofile",
+        home / ".zshrc",
+        home / ".bash_profile",
+        home / ".bashrc",
+        home / ".profile",
+        home / ".config/fish/config.fish",
+    ]
+    configured = [
+        path.read_text(encoding="utf-8")
+        for path in startup_files
+        if path.exists()
+    ]
+    assert any(".venvs/proof-assistant/bin" in text for text in configured)
+
+
+def test_installer_does_not_duplicate_shell_startup_path(tmp_path):
+    result, _log, home, _install_dir = _bootstrap_harness(tmp_path)
+    assert result.returncode == 0, result.stderr
+    startup_files = [
+        home / ".zprofile",
+        home / ".zshrc",
+        home / ".bash_profile",
+        home / ".bashrc",
+        home / ".profile",
+        home / ".config/fish/config.fish",
+    ]
+    configured = [
+        path.read_text(encoding="utf-8")
+        for path in startup_files
+        if path.exists()
+    ]
+    assert all(text.count("Added by Proof Assistant installer") == 1 for text in configured)
