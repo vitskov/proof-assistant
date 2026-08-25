@@ -143,6 +143,23 @@ def test_external_tools_are_disabled_in_child_config(monkeypatch):
     ]
 
 
+def test_external_tool_probe_can_replace_parent_environment(monkeypatch):
+    observed = {}
+    monkeypatch.setenv("OPENAI_API_KEY", "must-not-cross")
+
+    def fake_run(*args, **kwargs):
+        observed.update(kwargs["env"])
+        return subprocess.CompletedProcess(args[0], 0, stdout="[]", stderr="")
+
+    monkeypatch.setattr(protocol.subprocess, "run", fake_run)
+    isolated_tool_config_args(
+        "codex",
+        env={"HOME": "/safe/home", "PATH": "/safe/bin"},
+        inherit_environment=False,
+    )
+    assert observed == {"HOME": "/safe/home", "PATH": "/safe/bin"}
+
+
 def test_unsafe_mcp_server_name_fails_closed(monkeypatch):
     listing = '[{"name":"unsafe.name","enabled":true}]'
 
@@ -158,9 +175,10 @@ def test_local_skills_are_disabled_by_path_in_child_config(monkeypatch, tmp_path
     class FakeProbe:
         instance = None
 
-        def __init__(self, executable, *, cwd, env, extra_args):
+        def __init__(self, executable, *, cwd, env, inherit_environment, extra_args):
             self.executable = executable
             self.cwd = cwd
+            self.inherit_environment = inherit_environment
             self.extra_args = extra_args
             self.closed = False
             FakeProbe.instance = self
@@ -212,4 +230,5 @@ def test_local_skills_are_disabled_by_path_in_child_config(monkeypatch, tmp_path
         '{path="/opt/codex/b/SKILL.md",enabled=false}]',
     ]
     assert FakeProbe.instance.extra_args[:4] == external_args
+    assert FakeProbe.instance.inherit_environment is True
     assert FakeProbe.instance.closed is True

@@ -12,7 +12,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..backend import CodexConfig
+from ..ai import TaskKind
+from ..ai.execution import AIBackendConfig
 from ..cache import (
     COLD_DEPOT_RESERVE_GB,
     WARM_PROJECT_RESERVE_GB,
@@ -74,8 +75,10 @@ from .store import StateStore
 @dataclass(frozen=True)
 class VerifyOptions:
     model: str
+    ai_driver: str = "codex_cli"
     effort: str = "high"
     codex: str = "codex"
+    provider_config_path: str | None = None
     cache_home: str | None = None
     jobs: int = 2
     batch_size: int = 8
@@ -88,8 +91,17 @@ class VerifyOptions:
     concurrency: ConcurrencyRuntimeSpec = field(default_factory=ConcurrencyRuntimeSpec)
 
     def validate(self) -> None:
+        from ..ai import DriverId
+
+        try:
+            DriverId(self.ai_driver)
+        except ValueError as exc:
+            choices = ", ".join(driver.value for driver in DriverId)
+            raise ValueError(
+                f"Unknown AI driver {self.ai_driver!r}; choose one of: {choices}"
+            ) from exc
         if not self.model:
-            raise ValueError("A Codex model is required")
+            raise ValueError("An explicit AI model is required")
         if not 1 <= self.jobs <= 128:
             raise ValueError("--jobs must be between 1 and 128")
         if self.batch_size < 1:
@@ -548,14 +560,24 @@ def _run_batch_worker(job: BatchJob) -> BatchResult:
                         wrapped = run_repoprover_agent(
                             agent,
                             run_kwargs={},
-                            codex=CodexConfig(
-                                executable=job.options.codex,
+                            ai=AIBackendConfig(
+                                driver=job.options.ai_driver,
+                                executable=(
+                                    job.options.codex
+                                    if job.options.ai_driver == "codex_cli"
+                                    else None
+                                ),
                                 model=job.options.model,
-                                effort=job.options.effort,
+                                difficulty=job.options.effort,
                                 request_timeout=job.options.request_timeout,
                                 turn_timeout=job.options.turn_timeout,
-                                sandbox="read-only",
                                 concurrency=job.options.concurrency,
+                                task_kind=TaskKind.PROOF,
+                                provider_config_path=(
+                                    Path(job.options.provider_config_path)
+                                    if job.options.provider_config_path
+                                    else None
+                                ),
                             ),
                         )
                         final_text = wrapped.codex.final_text
@@ -1017,6 +1039,11 @@ def verify_project(
                         "lean_version": lean_version,
                         "mathlib_revision": mathlib_revision(session.project),
                         "native_compiler": compiler,
+                        "ai": {
+                            "driver": options.ai_driver,
+                            "model": options.model,
+                            "difficulty": options.effort,
+                        },
                         "concurrency": initial_concurrency,
                     },
                 )

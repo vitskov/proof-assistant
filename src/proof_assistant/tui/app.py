@@ -12,6 +12,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from textual.app import App
+from textual.screen import ModalScreen
 from textual.worker import Worker, get_current_worker
 
 from proof_assistant.tui.commands import GLOBAL_BINDINGS
@@ -36,6 +37,7 @@ from proof_assistant.tui.screens import (
     WelcomeScreen,
 )
 from proof_assistant.tui.settings import (
+    AIProviderSettingsScreen,
     ConcurrencyResourcesScreen,
     LegacySettingsScreen,
     SettingsHomeScreen,
@@ -57,6 +59,7 @@ from proof_assistant.workflow.contracts import (
     ProjectDeletionResult,
     ProjectDestinationInspection,
     ProjectSummary,
+    ProviderSetupSnapshot,
     ReportDocument,
     SourceInspection,
     VerificationJobObservation,
@@ -217,6 +220,12 @@ class ProofAssistantApp(App[None]):
     #settings-resolution { height: 12; border: round $proof-panel-border; }
     #benchmark-result { height: 8; border: round $proof-panel-border; }
     #legacy-settings-summary { height: 16; border: round $proof-panel-border; }
+    #ai-provider-summary {
+        height: 26; border: round $proof-focus;
+        background: $proof-info-background;
+    }
+    #ai-auth-next-step { height: 8; border: round $proof-panel-border; }
+    #ai-task-policies { height: 18; border: round $proof-panel-border; }
     .settings-benchmark-toolbar { height: auto; }
     .settings-benchmark-toolbar Button { width: auto; margin-bottom: 1; }
     SettingsWarningConfirmationScreen {
@@ -230,6 +239,14 @@ class ProofAssistantApp(App[None]):
         height: 1fr; min-height: 7;
         background: $proof-warning-background; color: $proof-warning-text;
     }
+    AIInstallConfirmationScreen, AIAccountVerificationConfirmationScreen {
+        align: center middle; background: $proof-overlay;
+    }
+    #ai-install-dialog, #ai-account-check-dialog {
+        width: 96%; max-width: 104; height: 92%; max-height: 32;
+        border: round $warning; background: $proof-dialog-background; padding: 1 2;
+    }
+    #ai-install-commands { height: 1fr; min-height: 8; }
     ShortcutHelpScreen {
         align: center middle; background: $proof-overlay;
     }
@@ -255,7 +272,9 @@ class ProofAssistantApp(App[None]):
         self.service = service
         self.location_opener = location_opener or _default_location_opener
         self.current_snapshot: WorkflowSnapshot | None = None
-        self._settings_return_snapshot: WorkflowSnapshot | None = None
+        self._settings_overlay_active = False
+        self._ai_setup_snapshot: ProviderSetupSnapshot | None = None
+        self._ai_setup_supported = callable(getattr(service, "get_ai_setup", None))
         self._active_observation: VerificationJobObservation | None = None
         self._observer_worker: Worker[None] | None = None
         self._progress_screen: ProgressScreen | None = None
@@ -267,7 +286,41 @@ class ProofAssistantApp(App[None]):
         for theme in PROOF_THEMES:
             self.register_theme(theme)
         self.theme = DEFAULT_PROOF_THEME
-        self.push_screen(WelcomeScreen())
+        self.push_screen(WelcomeScreen(ai_setup_supported=self._ai_setup_supported))
+        if self._ai_setup_supported:
+            self._probe_ai_setup_on_startup()
+
+    def _probe_ai_setup_on_startup(self) -> None:
+        """Probe through the workflow service without delaying Textual startup."""
+
+        def probe() -> None:
+            try:
+                snapshot = self.service.get_ai_setup()
+            except Exception as exc:
+                self.call_from_thread(self._record_ai_setup_error, str(exc))
+                return
+            self.call_from_thread(self._route_after_startup_ai_probe, snapshot)
+
+        self.run_worker(probe, thread=True, exclusive=True, group="ai-startup")
+
+    def _record_ai_setup_error(self, detail: str) -> None:
+        if isinstance(self.screen, WelcomeScreen):
+            self.screen.record_ai_setup_error(detail)
+
+    def _route_after_startup_ai_probe(self, snapshot: ProviderSetupSnapshot) -> None:
+        self.record_ai_setup(snapshot)
+        # Revision zero identifies setup that has never been confirmed. A later
+        # outage must not hide durable projects or their reports from the user.
+        if not snapshot.primary_ready and snapshot.settings.revision == 0:
+            self.switch_screen(AIProviderSettingsScreen(snapshot, first_run=True))
+            return
+        if isinstance(self.screen, WelcomeScreen):
+            self.screen.record_ai_setup(snapshot)
+
+    def record_ai_setup(self, snapshot: ProviderSetupSnapshot) -> None:
+        """Cache only the sanitized provider DTO used by landing/navigation UI."""
+
+        self._ai_setup_snapshot = snapshot
 
     def action_show_shortcuts(self) -> None:
         if isinstance(self.screen, ShortcutHelpScreen):
@@ -282,8 +335,66 @@ class ProofAssistantApp(App[None]):
             else PROOF_DARK_THEME.name
         )
 
+    def _dismiss_modal_before_global_navigation(self) -> bool:
+        """Make global navigation cancel-first for confirmation and help dialogs."""
+
+        screen = self.screen
+        if not isinstance(screen, ModalScreen):
+            return False
+        screen.dismiss(None)
+        return True
+
+    def action_main_menu(self) -> None:
+        """Return to the landing screen without changing backend-owned work."""
+
+        if self._dismiss_modal_before_global_navigation():
+            return
+        if (
+            isinstance(self.screen, AIProviderSettingsScreen)
+            and self.screen.first_run
+            and (
+                self._ai_setup_snapshot is None
+                or not self._ai_setup_snapshot.primary_ready
+            )
+        ):
+            self.screen.show_notice(
+                "Finish primary AI setup before starting a new project.", error=True
+            )
+            return
+        if self._settings_overlay_active:
+            self.pop_screen()
+            self._settings_overlay_active = False
+        self.show_welcome()
+
+    def action_global_settings(self) -> None:
+        """Open machine settings from every ordinary screen."""
+
+        if self._dismiss_modal_before_global_navigation():
+            return
+        if isinstance(self.screen, (SettingsHomeScreen, AIProviderSettingsScreen)):
+            return
+        screen_snapshot = getattr(self.screen, "snapshot", None)
+        machine_snapshot = (
+            screen_snapshot
+            if isinstance(screen_snapshot, MachineSettingsSnapshot)
+            else None
+        )
+        project = None
+        if (
+            not isinstance(self.screen, WelcomeScreen)
+            and self.current_snapshot is not None
+        ):
+            project = self.current_snapshot.project.project_path
+        self.show_settings(machine_snapshot, project=project)
+
     def show_welcome(self) -> None:
-        self.switch_screen(WelcomeScreen())
+        self._detach_active_verification_client()
+        self.switch_screen(
+            WelcomeScreen(
+                self._ai_setup_snapshot,
+                ai_setup_supported=self._ai_setup_supported,
+            )
+        )
 
     def show_settings(
         self,
@@ -294,11 +405,41 @@ class ProofAssistantApp(App[None]):
     ) -> None:
         """Open machine settings with optional project calibration context."""
 
-        if return_to_project is not None:
-            self._settings_return_snapshot = (
-                self.current_snapshot if return_to_project else None
+        del return_to_project  # Settings now preserves the exact underlying screen.
+        self._open_settings_screen(SettingsHomeScreen(snapshot, project=project))
+
+    def _open_settings_screen(
+        self,
+        screen: (
+            SettingsHomeScreen
+            | AIProviderSettingsScreen
+            | ConcurrencyResourcesScreen
+            | LegacySettingsScreen
+        ),
+    ) -> None:
+        """Push settings once, then replace only pages within that overlay."""
+
+        if self._settings_overlay_active:
+            self.switch_screen(screen)
+            return
+        self._detach_active_verification_client()
+        self.push_screen(screen)
+        self._settings_overlay_active = True
+
+    def show_ai_provider_settings(
+        self,
+        snapshot: ProviderSetupSnapshot | None = None,
+        *,
+        project: Path | None = None,
+    ) -> None:
+        """Open provider setup using the latest sanitized backend snapshot."""
+
+        self._open_settings_screen(
+            AIProviderSettingsScreen(
+                snapshot or self._ai_setup_snapshot,
+                project=project,
             )
-        self.switch_screen(SettingsHomeScreen(snapshot, project=project))
+        )
 
     def show_concurrency_settings(
         self,
@@ -306,7 +447,9 @@ class ProofAssistantApp(App[None]):
         *,
         project: Path | None = None,
     ) -> None:
-        self.switch_screen(ConcurrencyResourcesScreen(snapshot, project=project))
+        self._open_settings_screen(
+            ConcurrencyResourcesScreen(snapshot, project=project)
+        )
 
     def show_legacy_settings(
         self,
@@ -314,15 +457,14 @@ class ProofAssistantApp(App[None]):
         *,
         project: Path | None = None,
     ) -> None:
-        self.switch_screen(LegacySettingsScreen(snapshot, project=project))
+        self._open_settings_screen(LegacySettingsScreen(snapshot, project=project))
 
     def close_settings(self) -> None:
-        if self._settings_return_snapshot is not None:
-            snapshot = self._settings_return_snapshot
-            self._settings_return_snapshot = None
-            self.show_snapshot(snapshot)
-        else:
+        if not self._settings_overlay_active:
             self.show_welcome()
+            return
+        self._settings_overlay_active = False
+        self.pop_screen()
 
     def show_new_project(self, draft: NewProjectDraft | None = None) -> None:
         self.switch_screen(NewProjectScreen(draft))
@@ -913,12 +1055,23 @@ class ProofAssistantApp(App[None]):
     def detach_verification_observer(self) -> None:
         """Stop this client's polling without changing the detached job."""
 
-        if self._observer_worker is not None:
-            self._observer_worker.cancel()
+        self._detach_active_verification_client()
+        self.show_welcome()
+
+    def _detach_active_verification_client(self) -> None:
+        """Detach only this TUI observer, preserving the durable backend job."""
+
+        screen = self._progress_screen
+        worker = self._observer_worker
+        # Clear identity first: callbacks already queued on the UI thread are then
+        # harmless, including a terminal callback racing with global navigation.
         self._observer_worker = None
         self._active_observation = None
         self._progress_screen = None
-        self.show_welcome()
+        if worker is not None:
+            worker.cancel()
+        if screen is not None:
+            screen.record_client_detached()
 
     def _attach_to_verification(
         self,
@@ -1018,7 +1171,7 @@ class ProofAssistantApp(App[None]):
                     )
                     return
                 if not worker.is_cancelled:
-                    self.call_from_thread(self._finish_observed_job, snapshot)
+                    self.call_from_thread(self._finish_observed_job, screen, snapshot)
                 return
 
             delay = max(0.01, min(5.0, observation.poll_after_seconds))
@@ -1056,7 +1209,11 @@ class ProofAssistantApp(App[None]):
                 None,
             )
 
-    def _finish_observed_job(self, snapshot: WorkflowSnapshot) -> None:
+    def _finish_observed_job(
+        self, screen: ProgressScreen, snapshot: WorkflowSnapshot
+    ) -> None:
+        if self._progress_screen is not screen:
+            return
         self._active_observation = None
         self._observer_worker = None
         self._progress_screen = None

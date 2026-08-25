@@ -91,8 +91,7 @@ def test_native_query_validates_exit_status_and_output(returncode, stdout, expec
         return SimpleNamespace(returncode=returncode, stdout=stdout)
 
     assert (
-        query_macos_memory_pressure_level(os_name="Darwin", runner=runner)
-        == expected
+        query_macos_memory_pressure_level(os_name="Darwin", runner=runner) == expected
     )
     assert observed[0][0] == [
         "/usr/sbin/sysctl",
@@ -110,9 +109,7 @@ def test_native_query_tolerates_absent_or_timed_out_sysctl(error):
     def runner(*args, **kwargs):
         raise error
 
-    assert (
-        query_macos_memory_pressure_level(os_name="Darwin", runner=runner) is None
-    )
+    assert query_macos_memory_pressure_level(os_name="Darwin", runner=runner) is None
 
 
 def test_native_query_is_not_attempted_off_darwin():
@@ -287,11 +284,15 @@ def test_linux_allocation_ratio_and_sustained_swap_out_preserve_strong_response(
         pressure_policy=_policy(),
     )
     allocation = SimpleNamespace(total_memory_bytes=20, available_memory_bytes=18)
-    assert collector.sample(memory_allocation=allocation).pressure == PressureState.GREEN
+    assert (
+        collector.sample(memory_allocation=allocation).pressure == PressureState.GREEN
+    )
 
     fake.swap_out = 1_020
     clock.advance()
-    assert collector.sample(memory_allocation=allocation).pressure == PressureState.GREEN
+    assert (
+        collector.sample(memory_allocation=allocation).pressure == PressureState.GREEN
+    )
     fake.swap_out = 1_040
     clock.advance()
     sustained = collector.sample(memory_allocation=allocation)

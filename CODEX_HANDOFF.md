@@ -7,7 +7,7 @@ documentation under `docs/` is authoritative.
 
 Proof Assistant is a persistent, incremental formal referee for multi-file
 LaTeX manuscripts. It combines a replaceable Textual interface, UI-neutral
-workflow/project services, isolated Codex/RepoProver proof workers, and
+workflow/project services, isolated AI/RepoProver proof workers, and
 independent Lean certification.
 
 Current identity:
@@ -24,6 +24,7 @@ source               $HOME/src/proof-assistant
 environment          $HOME/.venvs/proof-assistant
 new projects         $HOME/proof-assistant/<project-name>
 cache                $HOME/.cache/repoprover-codex
+provider settings    $HOME/.config/proof-assistant/providers.json
 ```
 
 The cache name intentionally does not follow the product rename. Reusing it
@@ -37,10 +38,21 @@ prevents duplication of the shared multi-gigabyte Mathlib dependency depot.
 - External manuscript sources may be in Dropbox; warn and use stable staged
   import.
 - Every installer must compile and execute a native test program.
-- Authentication stays inside Codex CLI. Never read/print `auth.json` or turn
-  its credential into an API key.
-- Verification Codex children start with MCP servers, apps, plugins, bundled
-  skills, and local skills disabled, then verify this fail-closed.
+- CLI authentication stays inside Codex, Claude Code, or Copilot CLI. Never
+  read/print provider auth files or turn a subscription credential into an API
+  key.
+- API credentials come only from the selected provider environment variable or
+  OS keyring. They never enter machine settings, projects, arguments, logs, or
+  reports.
+- `proof_assistant.ai` is the source of truth for provider settings, catalog
+  provenance, task/model policy, setup, and execution. Reuse RepoProver
+  prompts/tool schemas/handlers, not its legacy raw-key/provider layer.
+- Codex children disable and fail-closed-check MCP servers, apps, plugins, and
+  skills. Claude/Copilot receive only the ephemeral Proof Assistant MCP tools
+  with general mutation tools disabled. Direct API tools return through the
+  same allowlisted host.
+- Automatic Copilot inspection must not consume quota. Only the explicit,
+  consented tiny no-tools probe may record account readiness.
 - Never push to, open a pull request against, or create an issue in
   `facebookresearch/repoprover`.
 - Never publish Proof Assistant without explicit user authorization.
@@ -48,6 +60,13 @@ prevents duplication of the shared multi-gigabyte Mathlib dependency depot.
 ## User workflow contract
 
 Bare `proof-assistant` (or `proof-assistant tui`) launches the TUI.
+
+First startup probes the machine-wide primary AI driver through the workflow
+service. If its revision is zero and it is not ready, the TUI requires provider
+setup before new project work. Provider status DTOs contain no secret values.
+**F2** returns to the main menu and **F3** opens Settings from every ordinary
+screen; modal navigation is cancel-first, and leaving progress detaches only
+the observer rather than cancelling the backend job.
 
 For a new project it selects an external source folder, creates a managed
 project outside Dropbox, and creates a project-owned `VERIFY.yaml`. The user
@@ -101,15 +120,15 @@ workflow + workspace + presentation services
         | validated specs, inventories, plans, results
         v
 proof_assistant.incremental
-        | Git/SQLite/graphs/Codex workers/certificates
+        | Git/SQLite/graphs/provider-neutral AI workers/certificates
         v
 Lean kernel
 ```
 
 The backend must not import Textual. The TUI must not copy source, write
-SQLite, calculate invalidation, invoke Codex directly, or assign certificate
-state. Filesystem notifications only wake the observer; stable full inventories
-and staged re-hashing establish source identity.
+SQLite, calculate invalidation, invoke a provider directly, or assign
+certificate state. Filesystem notifications only wake the observer; stable full
+inventories and staged re-hashing establish source identity.
 
 Detached-worker launch arguments carry the launcher's exact catalog and
 machine-settings paths. A legacy/direct hidden worker falls back to a
@@ -117,7 +136,7 @@ project-local worker catalog, never the interactive user's production catalog.
 Secrets remain in the child environment and are never serialized into the
 durable launch command.
 
-Codex may improve clarification wording under a validated schema, but the host
+AI may improve clarification wording under a validated schema, but the host
 owns the claim, source path/span, quotation, diagnostics, affected graph, and
 possible-resolution facts. Invalid output falls back deterministically.
 
@@ -142,7 +161,7 @@ possible-resolution facts. Invalid output falls back deterministically.
 - Yellow memory pressure allows at most one full build machine-wide so it
   cannot create either build storms or a permanent no-progress state. Red and
   emergency pressure block new builds.
-- Every managed Codex turn—including reviewers and diagnostics—shares the AI
+- Every managed AI turn—including reviewers and diagnostics—shares the AI
   controller. Every dynamic `lean_check` and recognized `lake build`, plus host
   bootstrap, extraction, merge, and certification work, passes through its
   corresponding controller.
@@ -195,6 +214,7 @@ proof-assistant compiler-check
 proof-assistant cache doctor
 proof-assistant doctor
 proof-assistant models
+proof-assistant ai status
 "$HOME/.venvs/proof-assistant/bin/python" -m pytest -q
 git diff --check
 ```

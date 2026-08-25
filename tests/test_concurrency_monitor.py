@@ -57,7 +57,9 @@ class GreenTelemetry:
             queues=QueueDepths(),
         )
 
-    def sample(self, *, queues: QueueDepths, memory_allocation=None) -> TelemetrySnapshot:
+    def sample(
+        self, *, queues: QueueDepths, memory_allocation=None
+    ) -> TelemetrySnapshot:
         return replace(self.snapshot, queues=queues)
 
 

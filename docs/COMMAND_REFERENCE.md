@@ -39,8 +39,10 @@ proof-assistant manuscript verify --project PROJECT [OPTIONS]
 
 Important options:
 
-- `--model MODEL` and `--effort EFFORT` select an exact pair advertised by
-  `models`;
+- `--ai-driver codex_cli|claude_cli|copilot_cli|openai_api|anthropic_api|gemini_api`
+  selects the proof-agent driver for this run;
+- `--model MODEL` and `--effort EFFORT` select the provider model/difficulty;
+  inspect the exact catalog with `proof-assistant ai models DRIVER`;
 - `--concurrency auto|adaptive|fixed` selects adaptive automatic admission or
   fixed reproducible limits;
 - `--ai-concurrency N`, `--lean-pool N`, and `--max-builds N` set independent
@@ -53,7 +55,7 @@ Important options:
 - `--jobs N` controls logical proof-batch worker fan-out (legacy default: `2`),
   while machine AI admission remains authoritative;
 - `--batch-size N` bounds claims assigned to one turn;
-- `--turn-timeout SECONDS` applies to each Codex turn (`86400` is one day);
+- `--turn-timeout SECONDS` applies to each AI turn (`86400` is one day);
 - `--setup-timeout SECONDS` bounds Lean/cache preparation; and
 - `--lean-memory-limit-gb GB` bounds configured Lean worker memory where
   supported.
@@ -80,7 +82,45 @@ Use these only when you understand their review/state consequences. The TUI
 routes ordinary clarification and source-change handling through higher-level
 workflow contracts.
 
-## Installation and provider diagnostics
+## AI provider setup
+
+Provider policy is machine-wide. `setup` is an alias for `ai`.
+
+```bash
+proof-assistant ai status [--driver DRIVER]
+proof-assistant ai models DRIVER
+proof-assistant ai select DRIVER [--model MODEL] [--difficulty LEVEL]
+proof-assistant ai install CLI_DRIVER [--yes]
+proof-assistant ai credential API_DRIVER [--stdin | --delete]
+proof-assistant ai verify-account copilot_cli [--yes]
+```
+
+Driver IDs are `codex_cli`, `claude_cli`, `copilot_cli`, `openai_api`,
+`anthropic_api`, and `gemini_api`. Difficulty values are `auto`, `none`, `low`,
+`medium`, `high`, `xhigh`, and `max`; each model accepts only the subset printed
+by its catalog.
+
+- `ai status` probes install/auth/catalog readiness and prints only sanitized
+  values.
+- `ai models` labels the catalog `live_account`, `curated_fallback`, or
+  `unavailable`.
+- `ai select` persists the primary driver and optional provider defaults.
+- `ai install` prints the exact allowlisted user-local plan and changes
+  nothing unless `--yes` approves that plan.
+- `ai credential` uses a hidden prompt by default. `--stdin` consumes one line
+  for controlled automation; a key is never accepted in an argument. The value
+  goes to the OS keyring, not the provider settings file.
+- `ai verify-account copilot_cli` sends nothing unless `--yes` explicitly
+  approves one tiny no-tools entitlement request.
+
+Native CLI login remains separate: run `codex login`, `claude auth login`, or
+`copilot login` as directed, then recheck. API environment variables are
+`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, and `GEMINI_API_KEY`.
+
+See [AI providers and first-time setup](AI_PROVIDERS.md) for catalog,
+precedence, authentication, and isolation details.
+
+## Installation and Codex compatibility diagnostics
 
 ```bash
 proof-assistant compiler-check
@@ -91,7 +131,8 @@ proof-assistant smoke --model MODEL --effort EFFORT
 
 - `compiler-check` compiles and executes a native C program.
 - `doctor` checks Codex app-server initialization and model listing.
-- `models` prints exact model IDs and supported reasoning effort.
+- top-level `models` prints Codex model IDs and supported reasoning effort;
+  use `ai models DRIVER` for provider-neutral setup.
 - `smoke` runs one real client-defined dynamic-tool round trip.
 
 The `smoke` and `repoprover-prove` commands accept the same concurrency
@@ -156,7 +197,7 @@ This is an advanced integration diagnostic, not the normal manuscript UI.
 | 11 | partial/inconclusive; not evidence of falsity |
 | 12 | kernel-checked counterexample outcome |
 | 20 | setup/project/cache failure |
-| 21 | Codex provider/authentication/protocol failure |
+| 21 | AI provider/authentication/protocol failure |
 | 22 | Lean build/extraction/merge failure |
 
 The TUI converts these outcomes into typed workflow states and appropriate

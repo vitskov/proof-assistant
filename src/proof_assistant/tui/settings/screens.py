@@ -6,6 +6,7 @@ only render immutable backend DTOs and submit revision-checked requests.
 
 from __future__ import annotations
 
+import shlex
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -36,13 +37,103 @@ from proof_assistant.workflow.contracts import (
     BenchmarkKind,
     BenchmarkResult,
     ConcurrencySettingsView,
+    CredentialSource,
+    Difficulty,
+    DriverId,
+    DriverStatus,
+    InstallPlan,
+    InstallResult,
     MachineSettingsSnapshot,
     MachineSettingsUpdateRequest,
+    ProviderConfig,
+    ProviderSetupSnapshot,
+    SecretSubmission,
     SettingsChangePreview,
+    TaskModelPolicy,
 )
 
 if TYPE_CHECKING:
     from proof_assistant.tui.app import ProofAssistantApp
+
+
+_DRIVER_LABELS: dict[DriverId, str] = {
+    DriverId.CODEX_CLI: "OpenAI Codex CLI",
+    DriverId.CLAUDE_CLI: "Anthropic Claude Code CLI",
+    DriverId.COPILOT_CLI: "GitHub Copilot CLI",
+    DriverId.OPENAI_API: "OpenAI API",
+    DriverId.ANTHROPIC_API: "Anthropic API",
+    DriverId.GEMINI_API: "Google Gemini API",
+}
+_API_DRIVERS = {
+    DriverId.OPENAI_API,
+    DriverId.ANTHROPIC_API,
+    DriverId.GEMINI_API,
+}
+_AUTO_MODEL = "__proof_assistant_auto_model__"
+
+
+def _driver_label(driver: DriverId) -> str:
+    return _DRIVER_LABELS.get(driver, driver.value)
+
+
+def _status_for(snapshot: ProviderSetupSnapshot, driver: DriverId) -> DriverStatus:
+    return next(item for item in snapshot.statuses if item.driver is driver)
+
+
+def _provider_summary(snapshot: ProviderSetupSnapshot) -> str:
+    lines = [
+        "Machine-wide AI provider setup",
+        f"Configuration revision: {snapshot.settings.revision}",
+        f"Primary driver: {_driver_label(snapshot.primary_driver)}",
+        f"Primary ready: {'yes' if snapshot.primary_ready else 'NO'}",
+        f"Status: {snapshot.detail}",
+        "",
+    ]
+    for status in snapshot.statuses:
+        preference = snapshot.settings.config.preference_for(status.driver)
+        catalog = status.catalog
+        primary = " [PRIMARY]" if status.driver is snapshot.primary_driver else ""
+        lines.extend(
+            (
+                f"{_driver_label(status.driver)}{primary}",
+                f"  Driver ID: {status.driver.value}",
+                f"  Transport: {status.transport.value}",
+                f"  Installation: {status.installation.value}",
+                f"  Authentication: {status.authentication.value}",
+                f"  Credential source: {preference.credential_source.value}",
+                f"  Executable: {status.executable or 'not applicable / not found'}",
+                f"  Version: {status.version or 'not available'}",
+                f"  Catalog: {catalog.source.value if catalog else 'unavailable'}",
+                f"  Catalog contract: "
+                f"{'approved' if catalog and catalog.contract_approved else 'not ready'}",
+            )
+        )
+        if catalog is not None:
+            lines.append(f"  Catalog detail: {catalog.detail}")
+            if catalog.models:
+                lines.append("  Available models and exact difficulties:")
+                for model in catalog.models:
+                    difficulties = ", ".join(item.value for item in model.difficulties)
+                    lines.append(
+                        f"    - {model.display_name} [{model.model_id}]: {difficulties}"
+                    )
+            else:
+                lines.append("  Available models: none reported")
+        lines.extend((f"  Next step: {status.detail or 'none'}", ""))
+    return "\n".join(lines).rstrip()
+
+
+def _task_policy_summary(policies: tuple[TaskModelPolicy, ...]) -> str:
+    if not policies:
+        return "Task-specific defaults are loading…"
+    lines = ["Task-specific model policy (resolved by the backend)"]
+    for policy in policies:
+        lines.append(
+            f"{policy.task.value}: {_driver_label(policy.driver)} / "
+            f"{policy.model or 'provider default'} / {policy.difficulty.value} "
+            f"[{policy.model_source.value}]\n  {policy.explanation}"
+        )
+    return "\n".join(lines)
 
 
 def _auto(value: int | None) -> str:
@@ -211,6 +302,800 @@ def _legacy_text(snapshot: MachineSettingsSnapshot) -> str:
     )
 
 
+class AIInstallConfirmationScreen(ModalScreen[bool]):
+    """Cancel-first review of the exact backend-produced installation plan."""
+
+    BINDINGS = [CANCEL.binding(), CONFIRM.binding()]
+
+    def __init__(self, plan: InstallPlan) -> None:
+        super().__init__()
+        self.plan = plan
+
+    def compose(self) -> ComposeResult:
+        commands = (
+            "\n".join(
+                f"{index}. {shlex.join(command.argv)}\n"
+                f"   timeout: {command.timeout_seconds:g} seconds"
+                for index, command in enumerate(self.plan.commands, start=1)
+            )
+            or "No command is required."
+        )
+        with VerticalScroll(id="ai-install-dialog"):
+            yield CopyableText("Review AI driver installation", classes="title")
+            yield CopyableText(
+                f"Driver: {_driver_label(self.plan.driver)}\n"
+                f"Plan state: {self.plan.state.value}\n"
+                f"Expected executable: {self.plan.expected_executable or 'none'}\n"
+                f"User install bin: {self.plan.installer_bin or 'none'}\n"
+                f"Detail: {self.plan.detail}",
+                id="ai-install-detail",
+                soft_wrap=False,
+            )
+            yield CopyableText(
+                "Exact allowlisted commands\n" + commands,
+                id="ai-install-commands",
+                soft_wrap=False,
+                expand=True,
+            )
+            yield CopyableText(
+                "Installation changes this machine. Cancel is focused by default. "
+                "Continue only after reviewing every command above.",
+                classes="warning",
+            )
+            with Horizontal(classes="toolbar"):
+                yield Button(
+                    "Cancel — install nothing",
+                    id="ai-install-cancel",
+                    variant="primary",
+                )
+                yield Button(
+                    "Install reviewed driver",
+                    id="ai-install-confirm",
+                    variant="warning",
+                    disabled=self.plan.state.value != "available",
+                )
+        yield CommandFooter()
+
+    def on_mount(self) -> None:
+        self.set_timer(0.01, self._focus_cancel)
+
+    def _focus_cancel(self) -> None:
+        nodes = self.query("#ai-install-cancel").nodes
+        if not nodes:
+            self.set_timer(0.01, self._focus_cancel)
+            return
+        nodes[0].focus()
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+
+    def action_confirm(self) -> None:
+        if self.plan.state.value == "available":
+            self.dismiss(True)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "ai-install-cancel":
+            self.action_cancel()
+        elif event.button.id == "ai-install-confirm":
+            self.action_confirm()
+
+
+class AIAccountVerificationConfirmationScreen(ModalScreen[bool]):
+    """Explicit consent for Copilot's necessarily billable account probe."""
+
+    BINDINGS = [CANCEL.binding(), CONFIRM.binding()]
+
+    def compose(self) -> ComposeResult:
+        with VerticalScroll(id="ai-account-check-dialog"):
+            yield CopyableText("Verify GitHub Copilot account?", classes="title")
+            yield CopyableText(
+                "GitHub Copilot CLI has no documented non-billable authentication "
+                "status command. This check sends one tiny harmless model request "
+                "through the backend. It may count against your Copilot allowance. "
+                "It is never run automatically.",
+                classes="warning",
+            )
+            with Horizontal(classes="toolbar"):
+                yield Button(
+                    "Cancel — send nothing",
+                    id="ai-account-check-cancel",
+                    variant="primary",
+                )
+                yield Button(
+                    "Send one tiny request",
+                    id="ai-account-check-confirm",
+                    variant="warning",
+                )
+        yield CommandFooter()
+
+    def on_mount(self) -> None:
+        self.set_timer(0.01, self._focus_cancel)
+
+    def _focus_cancel(self) -> None:
+        nodes = self.query("#ai-account-check-cancel").nodes
+        if not nodes:
+            self.set_timer(0.01, self._focus_cancel)
+            return
+        nodes[0].focus()
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+
+    def action_confirm(self) -> None:
+        self.dismiss(True)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "ai-account-check-cancel":
+            self.action_cancel()
+        elif event.button.id == "ai-account-check-confirm":
+            self.action_confirm()
+
+
+class AIProviderSettingsScreen(NoticeScreen):
+    """Provider setup client over sanitized, UI-neutral workflow DTOs."""
+
+    BINDINGS = [BACK.binding(), REFRESH.binding(), SAVE.binding()]
+
+    def __init__(
+        self,
+        snapshot: ProviderSetupSnapshot | None = None,
+        *,
+        project: Path | None = None,
+        first_run: bool = False,
+    ) -> None:
+        super().__init__()
+        self.snapshot = snapshot
+        self.project = project
+        self.first_run = first_run
+        self._policies: tuple[TaskModelPolicy, ...] = ()
+
+    def compose(self) -> ComposeResult:
+        snapshot = self.snapshot
+        configured_driver = (
+            snapshot.primary_driver if snapshot is not None else DriverId.CODEX_CLI
+        )
+        yield Header()
+        with VerticalScroll(id="page"):
+            yield CopyableText(
+                "Set up your primary AI driver" if self.first_run else "AI Providers",
+                classes="title",
+            )
+            yield CopyableText(
+                "Proof Assistant needs one ready primary AI driver before a new "
+                "verification can start. Installation, authentication checks, "
+                "model discovery, configuration, and credentials are handled by "
+                "the backend—not by this terminal screen."
+                if self.first_run
+                else "Provider settings are machine-wide. Every displayed status "
+                "is a sanitized backend observation; no credential values are "
+                "returned to or retained by this screen."
+            )
+            yield TextArea(
+                _provider_summary(snapshot)
+                if snapshot is not None
+                else "Probing provider setup through the backend…",
+                read_only=True,
+                soft_wrap=False,
+                id="ai-provider-summary",
+            )
+
+            yield CopyableText("Choose and configure", classes="section")
+            yield Label("Primary AI driver")
+            yield Select(
+                tuple((_driver_label(driver), driver.value) for driver in DriverId),
+                value=configured_driver.value,
+                allow_blank=False,
+                id="ai-primary-driver",
+                disabled=snapshot is None,
+            )
+            yield Label("Provider to inspect/configure")
+            yield Select(
+                tuple((_driver_label(driver), driver.value) for driver in DriverId),
+                value=configured_driver.value,
+                allow_blank=False,
+                id="ai-configure-driver",
+                disabled=snapshot is None,
+            )
+            yield Label("Model for this provider")
+            yield Select(
+                (("Automatic task-specific choice", _AUTO_MODEL),),
+                value=_AUTO_MODEL,
+                allow_blank=False,
+                id="ai-provider-model",
+                disabled=snapshot is None,
+            )
+            yield Label("Reasoning / difficulty for this provider")
+            yield Select(
+                (("Auto", "auto"),),
+                value="auto",
+                allow_blank=False,
+                id="ai-provider-difficulty",
+                disabled=snapshot is None,
+            )
+            yield Label("API credential source")
+            yield Select(
+                (
+                    ("Environment variable", CredentialSource.ENVIRONMENT.value),
+                    (
+                        "OS credential store / keyring",
+                        CredentialSource.CREDENTIAL_STORE.value,
+                    ),
+                ),
+                value=CredentialSource.ENVIRONMENT.value,
+                allow_blank=False,
+                id="ai-credential-source",
+                disabled=True,
+            )
+            with Horizontal(classes="toolbar"):
+                yield Button(
+                    "Save provider settings",
+                    id="save-ai-settings",
+                    variant="success",
+                    disabled=snapshot is None,
+                )
+                yield Button("Recheck all providers", id="recheck-ai-providers")
+                yield Button(
+                    "Review installation…",
+                    id="install-ai-driver",
+                    disabled=True,
+                )
+                yield Button(
+                    "Verify Copilot account…",
+                    id="verify-ai-account",
+                    disabled=True,
+                    variant="warning",
+                )
+
+            yield CopyableText("Authentication", classes="section")
+            yield TextArea(
+                "Select a provider to see its exact authentication next step.",
+                read_only=True,
+                soft_wrap=False,
+                id="ai-auth-next-step",
+            )
+            yield CopyableText(
+                "CLI login commands above are selectable and copyable. Run them in "
+                "your shell, then choose Recheck all providers. Proof Assistant does "
+                "not automate interactive account login.",
+                classes="muted",
+            )
+            yield Label("API key (stored once in the OS credential store)")
+            yield Input(
+                placeholder="Paste key; it is cleared immediately on Store",
+                password=True,
+                id="ai-api-key",
+                disabled=True,
+            )
+            with Horizontal(classes="toolbar"):
+                yield Button(
+                    "Store key securely",
+                    id="store-ai-key",
+                    disabled=True,
+                )
+                yield Button(
+                    "Remove stored key",
+                    id="delete-ai-key",
+                    disabled=True,
+                    variant="warning",
+                )
+
+            yield CopyableText("Task-specific defaults", classes="section")
+            yield TextArea(
+                _task_policy_summary(self._policies),
+                read_only=True,
+                soft_wrap=False,
+                id="ai-task-policies",
+            )
+            with Horizontal(classes="toolbar"):
+                yield Button(
+                    "Continue to projects" if self.first_run else "Main menu",
+                    id="ai-setup-continue",
+                    variant="primary",
+                    disabled=(
+                        self.first_run
+                        and (snapshot is None or not snapshot.primary_ready)
+                    ),
+                )
+                yield Button(
+                    "Settings",
+                    id="ai-provider-back",
+                    disabled=self.first_run
+                    and (snapshot is None or not snapshot.primary_ready),
+                )
+            yield CopyableText(
+                "Loading provider state…" if snapshot is None else snapshot.detail,
+                id="status-line",
+                classes="muted",
+            )
+        yield CommandFooter()
+
+    def on_mount(self) -> None:
+        if self.snapshot is not None:
+            self._render_selected_provider()
+            self._load_task_policies()
+        else:
+            self.refresh_setup()
+
+    def action_back(self) -> None:
+        if self.first_run:
+            if self.snapshot is None or not self.snapshot.primary_ready:
+                self.show_notice(
+                    "Choose a ready primary AI driver before continuing to new projects.",
+                    error=True,
+                )
+                return
+            self.proof_app.show_welcome()
+            return
+        self.proof_app.show_settings(project=self.project)
+
+    def action_refresh(self) -> None:
+        self.refresh_setup()
+
+    def action_save(self) -> None:
+        self._save_settings()
+
+    def on_select_changed(self, event: Select.Changed) -> None:
+        if event.select.id == "ai-configure-driver" and self.snapshot is not None:
+            self._render_selected_provider()
+        elif event.select.id == "ai-provider-model" and self.snapshot is not None:
+            self._render_difficulties()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        button_id = event.button.id
+        if button_id == "save-ai-settings":
+            self._save_settings()
+        elif button_id == "recheck-ai-providers":
+            self.refresh_setup()
+        elif button_id == "install-ai-driver":
+            self._preview_install()
+        elif button_id == "verify-ai-account":
+            self._review_account_verification()
+        elif button_id == "store-ai-key":
+            self._store_credential()
+        elif button_id == "delete-ai-key":
+            self._delete_credential()
+        elif button_id == "ai-setup-continue":
+            if self.snapshot is not None and self.snapshot.primary_ready:
+                if self.first_run:
+                    self.proof_app.show_welcome()
+                else:
+                    self.proof_app.action_main_menu()
+            else:
+                self.show_notice("The primary AI driver is not ready yet.", error=True)
+        elif button_id == "ai-provider-back":
+            self.action_back()
+
+    def _selected_driver(self) -> DriverId:
+        value = _select_value(self.query_one("#ai-configure-driver", Select))
+        return DriverId(value)
+
+    def refresh_setup(self) -> None:
+        self.show_notice("Rechecking installation, authentication, and model access…")
+
+        def refresh() -> None:
+            try:
+                snapshot = self.proof_app.service.get_ai_setup()
+            except Exception as exc:
+                self.proof_app.call_from_thread(
+                    self.show_notice,
+                    f"Provider setup check failed: {exc}",
+                    error=True,
+                )
+                return
+            self.proof_app.call_from_thread(self._record_setup_and_reload, snapshot)
+
+        self.run_worker(refresh, thread=True, exclusive=True, group="ai-provider-setup")
+
+    def _record_setup_and_reload(self, snapshot: ProviderSetupSnapshot) -> None:
+        """Render authoritative setup first; task-policy display is supplemental."""
+
+        self._record_setup(snapshot, self._policies)
+        self._load_task_policies()
+
+    def _load_task_policies(self) -> None:
+        """Load policy DTOs without redundantly probing every provider again."""
+
+        def load() -> None:
+            try:
+                policies = self.proof_app.service.ai_task_policies()
+            except Exception as exc:
+                self.proof_app.call_from_thread(
+                    self.show_notice,
+                    f"Task policy loading failed: {exc}",
+                    error=True,
+                )
+                return
+            self.proof_app.call_from_thread(self._record_task_policies, policies)
+
+        self.run_worker(load, thread=True, exclusive=True, group="ai-task-policies")
+
+    def _record_task_policies(self, policies: tuple[TaskModelPolicy, ...]) -> None:
+        if not self.is_mounted:
+            return
+        if not self.query("#ai-task-policies").nodes:
+            self.set_timer(0.01, lambda: self._record_task_policies(policies))
+            return
+        self._policies = policies
+        self.query_one("#ai-task-policies", TextArea).text = _task_policy_summary(
+            policies
+        )
+
+    def _record_setup(
+        self,
+        snapshot: ProviderSetupSnapshot,
+        policies: tuple[TaskModelPolicy, ...],
+    ) -> None:
+        if not self.is_mounted:
+            return
+        if not self.query("#ai-provider-summary").nodes:
+            self.set_timer(0.01, lambda: self._record_setup(snapshot, policies))
+            return
+        previous_driver = None
+        configured_nodes = self.query("#ai-configure-driver").nodes
+        if configured_nodes and isinstance(configured_nodes[0], Select):
+            value = configured_nodes[0].value
+            if value is not Select.BLANK:
+                previous_driver = str(value)
+        self.snapshot = snapshot
+        self._policies = policies
+        self.proof_app.record_ai_setup(snapshot)
+        self.query_one("#ai-provider-summary", TextArea).text = _provider_summary(
+            snapshot
+        )
+        self.query_one("#ai-task-policies", TextArea).text = _task_policy_summary(
+            policies
+        )
+        primary = self.query_one("#ai-primary-driver", Select)
+        primary.disabled = False
+        primary.value = snapshot.primary_driver.value
+        configure = self.query_one("#ai-configure-driver", Select)
+        configure.disabled = False
+        configure.value = (
+            previous_driver
+            if previous_driver in {driver.value for driver in DriverId}
+            else snapshot.primary_driver.value
+        )
+        self.query_one("#save-ai-settings", Button).disabled = False
+        continue_button = self.query_one("#ai-setup-continue", Button)
+        continue_button.disabled = self.first_run and not snapshot.primary_ready
+        self.query_one("#ai-provider-back", Button).disabled = (
+            self.first_run and not snapshot.primary_ready
+        )
+        self._render_selected_provider()
+        self.show_notice(snapshot.detail, error=not snapshot.primary_ready)
+
+    def _render_selected_provider(self) -> None:
+        snapshot = self.snapshot
+        if snapshot is None or not self.query("#ai-configure-driver").nodes:
+            return
+        driver = self._selected_driver()
+        status = _status_for(snapshot, driver)
+        preference = snapshot.settings.config.preference_for(driver)
+        catalog = status.catalog
+        options: list[tuple[str, str]] = [
+            ("Automatic task-specific choice", _AUTO_MODEL)
+        ]
+        if catalog is not None:
+            options.extend(
+                (f"{model.display_name} [{model.model_id}]", model.model_id)
+                for model in catalog.models
+            )
+        if preference.model is not None and preference.model not in {
+            value for _, value in options
+        }:
+            options.append(
+                (
+                    f"{preference.model} [configured; not in current catalog]",
+                    preference.model,
+                )
+            )
+        model_select = self.query_one("#ai-provider-model", Select)
+        model_select.set_options(options)
+        model_select.disabled = False
+        model_select.value = preference.model or _AUTO_MODEL
+
+        credential_select = self.query_one("#ai-credential-source", Select)
+        is_api = driver in _API_DRIVERS
+        credential_select.disabled = not is_api
+        if is_api:
+            source = preference.credential_source
+            credential_select.value = (
+                source.value
+                if source
+                in {
+                    CredentialSource.ENVIRONMENT,
+                    CredentialSource.CREDENTIAL_STORE,
+                }
+                else CredentialSource.ENVIRONMENT.value
+            )
+        key_input = self.query_one("#ai-api-key", Input)
+        key_input.value = ""
+        key_input.disabled = not is_api
+        self.query_one("#store-ai-key", Button).disabled = not is_api
+        self.query_one("#delete-ai-key", Button).disabled = not is_api
+
+        installation = status.installation.value
+        self.query_one("#install-ai-driver", Button).disabled = not (
+            status.transport.value == "cli" and installation in {"missing", "broken"}
+        )
+        self.query_one("#verify-ai-account", Button).disabled = not (
+            driver is DriverId.COPILOT_CLI
+            and installation == "installed"
+            and status.authentication.value == "unknown"
+        )
+        self.query_one("#ai-auth-next-step", TextArea).text = (
+            f"Provider: {_driver_label(driver)}\n"
+            f"Authentication status: {status.authentication.value}\n"
+            f"Configured credential source: {preference.credential_source.value}\n"
+            f"Executable: {status.executable or 'not applicable / not found'}\n"
+            f"Version: {status.version or 'not available'}\n"
+            f"Next step: {status.detail or 'none'}"
+        )
+        self._render_difficulties()
+
+    def _render_difficulties(self) -> None:
+        snapshot = self.snapshot
+        if snapshot is None or not self.query("#ai-provider-model").nodes:
+            return
+        driver = self._selected_driver()
+        status = _status_for(snapshot, driver)
+        preference = snapshot.settings.config.preference_for(driver)
+        selected = self.query_one("#ai-provider-model", Select).value
+        difficulties: tuple[Difficulty, ...] = ()
+        if status.catalog is not None and selected is not Select.BLANK:
+            descriptor = next(
+                (
+                    model
+                    for model in status.catalog.models
+                    if model.model_id == str(selected)
+                ),
+                None,
+            )
+            if descriptor is not None:
+                difficulties = descriptor.difficulties
+        if not difficulties and status.catalog is not None and status.catalog.models:
+            # With automatic model choice, only offer values valid for every
+            # candidate the backend may select. Choosing an explicit model below
+            # exposes that model's complete exact set.
+            first_model, *remaining_models = status.catalog.models
+            common = list(first_model.difficulties)
+            for candidate in remaining_models:
+                common = [
+                    difficulty
+                    for difficulty in common
+                    if difficulty in candidate.difficulties
+                ]
+            difficulties = tuple(common)
+        if not difficulties:
+            difficulties = (preference.difficulty,)
+        options: tuple[tuple[str, str], ...] = tuple(
+            (difficulty.value.replace("xhigh", "Extra high").title(), difficulty.value)
+            for difficulty in difficulties
+        )
+        difficulty_select = self.query_one("#ai-provider-difficulty", Select)
+        difficulty_select.set_options(options)
+        difficulty_select.disabled = False
+        allowed = {value for _, value in options}
+        difficulty_select.value = (
+            preference.difficulty.value
+            if preference.difficulty.value in allowed
+            else options[0][1]
+        )
+
+    def _save_settings(self) -> None:
+        snapshot = self.snapshot
+        if snapshot is None:
+            self.show_notice("Provider setup has not loaded yet.", error=True)
+            return
+        try:
+            primary = DriverId(
+                _select_value(self.query_one("#ai-primary-driver", Select))
+            )
+            driver = self._selected_driver()
+            model_value = _select_value(self.query_one("#ai-provider-model", Select))
+            difficulty_value = _select_value(
+                self.query_one("#ai-provider-difficulty", Select)
+            )
+            preference = snapshot.settings.config.preference_for(driver)
+            source = preference.credential_source
+            if driver in _API_DRIVERS:
+                source = CredentialSource(
+                    _select_value(self.query_one("#ai-credential-source", Select))
+                )
+            updated_preference = replace(
+                preference,
+                credential_source=source,
+                model=None if model_value == _AUTO_MODEL else model_value,
+                difficulty=Difficulty(difficulty_value),
+            )
+            drivers = tuple(
+                updated_preference if item.driver is driver else item
+                for item in snapshot.settings.config.drivers
+            )
+            if not any(item.driver is driver for item in drivers):
+                drivers = (*drivers, updated_preference)
+            config: ProviderConfig = replace(
+                snapshot.settings.config,
+                primary_driver=primary,
+                drivers=drivers,
+            )
+        except (ValueError, LookupError) as exc:
+            self.show_notice(f"Invalid provider setting: {exc}", error=True)
+            return
+        self.show_notice("Saving the revision-checked machine provider settings…")
+
+        def save() -> None:
+            try:
+                result = self.proof_app.service.update_ai_settings(
+                    config,
+                    expected_revision=snapshot.settings.revision,
+                )
+            except Exception as exc:
+                self.proof_app.call_from_thread(
+                    self.show_notice,
+                    f"Provider settings were not saved: {exc}",
+                    error=True,
+                )
+                return
+            self.proof_app.call_from_thread(self._record_setup_and_reload, result)
+
+        self.run_worker(save, thread=True, exclusive=True, group="ai-provider-setup")
+
+    def _preview_install(self) -> None:
+        driver = self._selected_driver()
+        self.show_notice(f"Loading the exact {_driver_label(driver)} install plan…")
+
+        def preview() -> None:
+            try:
+                plan = self.proof_app.service.preview_ai_driver_install(driver)
+            except Exception as exc:
+                self.proof_app.call_from_thread(
+                    self.show_notice,
+                    f"Installation preview failed: {exc}",
+                    error=True,
+                )
+                return
+            self.proof_app.call_from_thread(self._review_install, plan)
+
+        self.run_worker(preview, thread=True, exclusive=True, group="ai-driver-install")
+
+    def _review_install(self, plan: InstallPlan) -> None:
+        dialog = AIInstallConfirmationScreen(plan)
+
+        def after_review(accepted: bool | None) -> None:
+            if accepted:
+                self._install(plan)
+            else:
+                self.show_notice("Installation canceled; no command was run.")
+
+        self.proof_app.push_screen(dialog, callback=after_review)
+
+    def _install(self, plan: InstallPlan) -> None:
+        self.show_notice("Installing the reviewed driver through the backend…")
+
+        def install() -> None:
+            try:
+                result = self.proof_app.service.install_ai_driver(
+                    plan,
+                    consent_token=plan.consent_token,
+                )
+            except Exception as exc:
+                self.proof_app.call_from_thread(
+                    self.show_notice,
+                    f"Driver installation failed: {exc}",
+                    error=True,
+                )
+                return
+            self.proof_app.call_from_thread(self._installation_finished, result)
+
+        self.run_worker(install, thread=True, exclusive=True, group="ai-driver-install")
+
+    def _installation_finished(self, result: InstallResult) -> None:
+        self.show_notice(result.detail, error=not result.succeeded)
+        self.refresh_setup()
+
+    def _review_account_verification(self) -> None:
+        if self._selected_driver() is not DriverId.COPILOT_CLI:
+            self.show_notice(
+                "Only Copilot needs an explicit model-request account check.",
+                error=True,
+            )
+            return
+        dialog = AIAccountVerificationConfirmationScreen()
+
+        def after_review(accepted: bool | None) -> None:
+            if accepted:
+                self._verify_account()
+            else:
+                self.show_notice("Copilot account check canceled; no request was sent.")
+
+        self.proof_app.push_screen(dialog, callback=after_review)
+
+    def _verify_account(self) -> None:
+        driver = DriverId.COPILOT_CLI
+        self.show_notice("Sending the one explicitly approved tiny Copilot request…")
+
+        def verify() -> None:
+            try:
+                snapshot = self.proof_app.service.verify_ai_driver_account(
+                    driver, consent=True
+                )
+            except Exception as exc:
+                self.proof_app.call_from_thread(
+                    self.show_notice,
+                    f"Copilot account check failed: {exc}",
+                    error=True,
+                )
+                return
+            self.proof_app.call_from_thread(self._record_setup_and_reload, snapshot)
+
+        self.run_worker(verify, thread=True, exclusive=True, group="ai-account-check")
+
+    def _store_credential(self) -> None:
+        driver = self._selected_driver()
+        if driver not in _API_DRIVERS:
+            self.show_notice("CLI authentication is owned by its CLI.", error=True)
+            return
+        key_input = self.query_one("#ai-api-key", Input)
+        credential = key_input.value.strip()
+        key_input.value = ""
+        if not credential:
+            self.show_notice("Paste a non-empty API key before storing it.", error=True)
+            return
+        submission: SecretSubmission | None = SecretSubmission(credential)
+        credential = ""
+        self.show_notice(
+            "Sending the one-shot credential submission to the backend keyring…"
+        )
+
+        def store() -> None:
+            nonlocal submission
+            try:
+                if submission is None:
+                    raise RuntimeError("credential submission is no longer available")
+                snapshot = self.proof_app.service.store_ai_credential(
+                    driver,
+                    CredentialSource.CREDENTIAL_STORE,
+                    submission,
+                )
+            except Exception as exc:
+                self.proof_app.call_from_thread(
+                    self.show_notice,
+                    f"Credential was not stored: {exc}",
+                    error=True,
+                )
+                return
+            finally:
+                submission = None
+            self.proof_app.call_from_thread(self._record_setup_and_reload, snapshot)
+
+        self.run_worker(store, thread=True, exclusive=True, group="ai-credential")
+
+    def _delete_credential(self) -> None:
+        driver = self._selected_driver()
+        if driver not in _API_DRIVERS:
+            self.show_notice("CLI authentication is owned by its CLI.", error=True)
+            return
+        self.show_notice("Removing the provider key from the backend keyring…")
+
+        def delete() -> None:
+            try:
+                snapshot = self.proof_app.service.delete_ai_credential(
+                    driver,
+                    CredentialSource.CREDENTIAL_STORE,
+                )
+            except Exception as exc:
+                self.proof_app.call_from_thread(
+                    self.show_notice,
+                    f"Credential was not removed: {exc}",
+                    error=True,
+                )
+                return
+            self.proof_app.call_from_thread(self._record_setup_and_reload, snapshot)
+
+        self.run_worker(delete, thread=True, exclusive=True, group="ai-credential")
+
+
 class SettingsHomeScreen(NoticeScreen):
     """Machine settings landing page with distinct modern and legacy routes."""
 
@@ -252,9 +1137,16 @@ class SettingsHomeScreen(NoticeScreen):
             )
             with Horizontal(classes="toolbar"):
                 yield Button(
+                    "AI Providers",
+                    id="open-ai-provider-settings",
+                    variant="primary",
+                    disabled=not callable(
+                        getattr(self.proof_app.service, "get_ai_setup", None)
+                    ),
+                )
+                yield Button(
                     "Concurrency / Resources",
                     id="open-concurrency-settings",
-                    variant="primary",
                     disabled=self.snapshot is None,
                 )
                 yield Button(
@@ -320,6 +1212,8 @@ class SettingsHomeScreen(NoticeScreen):
                     self.snapshot,
                     project=self.project,
                 )
+        elif event.button.id == "open-ai-provider-settings":
+            self.proof_app.show_ai_provider_settings(project=self.project)
         elif event.button.id == "open-legacy-settings":
             if self.snapshot is not None:
                 self.proof_app.show_legacy_settings(

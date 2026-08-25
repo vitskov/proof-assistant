@@ -158,9 +158,7 @@ def test_heartbeat_extends_ttl_and_crashed_lease_is_reclaimed(tmp_path):
     assert controller.heartbeat(lease) is None
 
 
-def test_lease_context_heartbeats_long_work_and_releases_on_exit(
-    tmp_path, monkeypatch
-):
+def test_lease_context_heartbeats_long_work_and_releases_on_exit(tmp_path, monkeypatch):
     clock = FakeClock()
     store = SQLiteAdmissionStore(tmp_path / "admission.sqlite3", clock=clock)
     controller = AdmissionController(store, ResourceKind.BUILD, 1)

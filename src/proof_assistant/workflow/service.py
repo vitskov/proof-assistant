@@ -15,6 +15,23 @@ from enum import StrEnum
 from pathlib import Path
 from typing import TypeVar
 
+from ..ai import (
+    CredentialSource,
+    Difficulty,
+    DriverId,
+    InstallPlan,
+    InstallResult,
+    MachineProviderConfigStore,
+    ModelCatalog,
+    ProviderConfig,
+    ProviderService,
+    ProviderSetupSnapshot,
+    SecretSubmission,
+    TaskKind,
+    TaskModelPolicy,
+    driver_definition,
+)
+from ..ai.execution import AIBackendConfig
 from ..backend import CodexBackend, CodexConfig
 from ..cache import CacheLayout
 from ..concurrency import (
@@ -98,6 +115,7 @@ from ..json_types import JSONObject, json_object, load_json
 from ..presentation.clarifications import (
     ClarificationNarrator,
     ClarificationPresenter,
+    IsolatedAIClarificationNarrator,
     IsolatedCodexClarificationNarrator,
 )
 from ..workspace.catalog import ProjectCatalog
@@ -326,6 +344,8 @@ class ProofAssistantWorkflow:
         use_codex_clarification: bool = True,
         codex_model: str = "gpt-5.6-sol",
         machine_config_path: Path | None = None,
+        provider_config_path: Path | None = None,
+        provider_service: ProviderService | None = None,
         preference_path: Path | None = None,
     ) -> None:
         catalog_path = None
@@ -344,6 +364,16 @@ class ProofAssistantWorkflow:
         self.codex_model = codex_model
         self._sequence = 0
         self._machine_config_store = MachineConfigStore(machine_config_path)
+        if provider_service is None:
+            if provider_config_path is None and machine_config_path is not None:
+                provider_config_path = (
+                    Path(machine_config_path).expanduser().resolve(strict=False).parent
+                    / "providers.json"
+                )
+            provider_service = ProviderService(
+                config_store=MachineProviderConfigStore(provider_config_path)
+            )
+        self._provider_service = provider_service
         self._local_preferences = LocalPreferenceStore(preference_path)
         self._telemetry = TelemetryCollector()
         self._concurrency_runtime: ConcurrencyRuntime | None = None
@@ -361,11 +391,137 @@ class ProofAssistantWorkflow:
 
         resolved = self._resolved_concurrency()
         legacy = resolved.config.legacy
+        try:
+            policy = self._configured_task_policy(TaskKind.PROOF)
+        except Exception:
+            configured = self._provider_service.config_store.load().config
+            driver_id = configured.primary_driver
+            preference = configured.preference_for(driver_id)
+            definition = driver_definition(driver_id)
+            model = preference.model or (
+                definition.curated_models[0].model_id
+                if definition.curated_models
+                else ""
+            )
+            difficulty = preference.difficulty.value
+            if preference.difficulty.value == "auto":
+                difficulty = (
+                    "high" if Difficulty.HIGH in definition.difficulties else "auto"
+                )
+            driver = driver_id.value
+        else:
+            driver = policy.driver.value
+            model = policy.model or self.codex_model
+            difficulty = policy.difficulty.value
         return VerificationSettings(
+            ai_driver=driver,
+            model=model,
+            effort=difficulty,
             jobs=legacy.jobs,
             batch_size=legacy.batch_size,
             lean_pool_size=legacy.lean_pool_size,
         )
+
+    def _configured_task_policy(self, task: TaskKind) -> TaskModelPolicy:
+        """Resolve a task against the account-visible catalog when available."""
+
+        settings = self._provider_service.config_store.load()
+        preference = settings.config.task_preference_for(task)
+        driver = (
+            preference.driver
+            if preference is not None and preference.driver is not None
+            else settings.config.primary_driver
+        )
+        catalog = self._provider_service.discover_models(
+            driver,
+            preference=settings.config.preference_for(driver),
+        )
+        return self._provider_service.recommend_task_policy(
+            task, settings=settings, catalog=catalog
+        )
+
+    def get_ai_setup(self) -> ProviderSetupSnapshot:
+        """Return a freshly probed, sanitized machine-wide provider snapshot."""
+
+        return self._provider_service.get_setup_snapshot()
+
+    def update_ai_settings(
+        self, config: ProviderConfig, *, expected_revision: int
+    ) -> ProviderSetupSnapshot:
+        self._provider_service.validate_config(config)
+        self._provider_service.config_store.save(
+            config, expected_revision=expected_revision
+        )
+        return self._provider_service.get_setup_snapshot()
+
+    def ai_task_policies(self) -> tuple[TaskModelPolicy, ...]:
+        settings = self._provider_service.config_store.load()
+        catalogs: dict[DriverId, ModelCatalog] = {}
+        policies: list[TaskModelPolicy] = []
+        for task in TaskKind:
+            preference = settings.config.task_preference_for(task)
+            driver = (
+                preference.driver
+                if preference is not None and preference.driver is not None
+                else settings.config.primary_driver
+            )
+            catalog = catalogs.get(driver)
+            if catalog is None:
+                catalog = self._provider_service.discover_models(
+                    driver,
+                    preference=settings.config.preference_for(driver),
+                )
+                catalogs[driver] = catalog
+            policies.append(
+                self._provider_service.recommend_task_policy(
+                    task,
+                    settings=settings,
+                    catalog=catalog,
+                )
+            )
+        return tuple(policies)
+
+    def preview_ai_driver_install(self, driver: DriverId) -> InstallPlan:
+        return self._provider_service.preview_install(driver)
+
+    def install_ai_driver(
+        self, plan: InstallPlan, *, consent_token: str
+    ) -> InstallResult:
+        return self._provider_service.execute_install(plan, consent_token=consent_token)
+
+    def verify_ai_driver_account(
+        self, driver: DriverId, *, consent: bool
+    ) -> ProviderSetupSnapshot:
+        self._provider_service.verify_cli_account(driver, consent=consent)
+        return self._provider_service.get_setup_snapshot()
+
+    def store_ai_credential(
+        self,
+        driver: DriverId,
+        source: CredentialSource,
+        credential: SecretSubmission,
+    ) -> ProviderSetupSnapshot:
+        self._provider_service.store_credential(driver, source, credential)
+        settings = self._provider_service.config_store.load()
+        preference = settings.config.preference_for(driver)
+        if preference.credential_source is not source:
+            updated_preferences = tuple(
+                replace(item, credential_source=source)
+                if item.driver is driver
+                else item
+                for item in settings.config.drivers
+            )
+            self._provider_service.config_store.save(
+                replace(settings.config, drivers=updated_preferences),
+                expected_revision=settings.revision,
+            )
+        return self._provider_service.get_setup_snapshot()
+
+    def delete_ai_credential(
+        self, driver: DriverId, source: CredentialSource
+    ) -> ProviderSetupSnapshot:
+        self._provider_service.delete_credential(driver, source)
+        return self._provider_service.get_setup_snapshot()
 
     def browse_manuscript_folders(
         self, directory: Path | None = None
@@ -1720,9 +1876,11 @@ class ProofAssistantWorkflow:
             result = verify_project(
                 IncrementalSession(project),
                 options=VerifyOptions(
+                    ai_driver=settings.ai_driver,
                     model=settings.model,
                     effort=settings.effort,
                     codex=self.codex,
+                    provider_config_path=str(self._provider_service.config_store.path),
                     cache_home=self.cache_home,
                     jobs=settings.jobs,
                     batch_size=settings.batch_size,
@@ -1919,6 +2077,7 @@ class ProofAssistantWorkflow:
                     "confirmation"
                 )
             VerifyOptions(
+                ai_driver=settings.ai_driver,
                 model=settings.model,
                 jobs=settings.jobs,
                 batch_size=settings.batch_size,
@@ -2138,18 +2297,36 @@ class ProofAssistantWorkflow:
     ) -> ClarificationPresenter:
         narrator = self._provided_narrator
         if narrator is None and self.use_codex_clarification:
-            narrator = IsolatedCodexClarificationNarrator(
-                CodexConfig(
-                    executable=self.codex,
-                    model=model or self.codex_model,
-                    effort="low",
-                    sandbox="read-only",
-                    isolate_external_tools=True,
-                    concurrency=self._concurrency_spec(project=project),
-                    ai_task_class=AITaskClass.CLARIFICATION,
-                ),
-                cwd=project,
-            )
+            try:
+                policy = self._configured_task_policy(TaskKind.CLARIFICATION)
+            except Exception:
+                narrator = IsolatedCodexClarificationNarrator(
+                    CodexConfig(
+                        executable=self.codex,
+                        model=model or self.codex_model,
+                        effort="low",
+                        sandbox="read-only",
+                        isolate_external_tools=True,
+                        concurrency=self._concurrency_spec(project=project),
+                        ai_task_class=AITaskClass.CLARIFICATION,
+                    ),
+                    cwd=project,
+                )
+            else:
+                narrator = IsolatedAIClarificationNarrator(
+                    AIBackendConfig(
+                        driver=policy.driver,
+                        model=policy.model or model or self.codex_model,
+                        difficulty=policy.difficulty,
+                        executable=(
+                            self.codex if policy.driver is DriverId.CODEX_CLI else None
+                        ),
+                        concurrency=self._concurrency_spec(project=project),
+                        task_kind=TaskKind.CLARIFICATION,
+                        provider_config_path=(self._provider_service.config_store.path),
+                    ),
+                    cwd=project,
+                )
         return ClarificationPresenter(narrator)
 
     def _summary(self, project: Path) -> ProjectSummary:

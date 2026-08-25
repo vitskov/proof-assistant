@@ -5,7 +5,7 @@ import re
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -33,6 +33,8 @@ class CodexConfig:
     sandbox: str = "read-only"
     validate_model: bool = True
     isolate_external_tools: bool = True
+    environment: Mapping[str, str] | None = None
+    inherit_environment: bool = True
     extra_app_server_args: tuple[str, ...] = field(default_factory=tuple)
     concurrency: ConcurrencyRuntimeSpec | None = None
     ai_task_class: AITaskClass = AITaskClass.PROOF
@@ -79,20 +81,31 @@ class CodexBackend:
         self.cwd = Path(cwd).resolve() if cwd else None
         if client is None:
             extra_args: list[str] = []
+            child_environment = (
+                dict(config.environment) if config.environment is not None else None
+            )
             if config.isolate_external_tools:
-                external_tool_args = isolated_tool_config_args(config.executable)
+                external_tool_args = isolated_tool_config_args(
+                    config.executable,
+                    env=child_environment,
+                    inherit_environment=config.inherit_environment,
+                )
                 extra_args.extend(external_tool_args)
                 extra_args.extend(
                     isolated_skill_config_args(
                         config.executable,
                         cwd=self.cwd,
                         external_tool_args=external_tool_args,
+                        env=child_environment,
+                        inherit_environment=config.inherit_environment,
                     )
                 )
             extra_args.extend(config.extra_app_server_args)
             client = AppServerClient(
                 config.executable,
                 cwd=self.cwd,
+                env=child_environment,
+                inherit_environment=config.inherit_environment,
                 extra_args=extra_args,
             )
         self.client = client

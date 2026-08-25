@@ -3,14 +3,14 @@
 Proof Assistant controls three different kinds of work independently:
 
 ```text
-Codex / AI turns     Lean checks and REPLs     Lake builds
+AI provider turns    Lean checks and REPLs     Lake builds
         |                     |                    |
         v                     v                    v
  AI admission          Lean admission        build admission
 ```
 
 This separation is a correctness and reliability boundary. A machine may have
-room for several remote Codex turns but only one memory-heavy Lean process, or
+room for several remote AI turns but only one memory-heavy Lean process, or
 many Lean checks but only one I/O-heavy full build. Proof Assistant never turns
 one generic worker count into all three limits.
 
@@ -48,7 +48,7 @@ on a separate page because they are not independent resource budgets:
 
 | Legacy setting | Default | Current meaning |
 |---|---:|---|
-| proof batch workers (`jobs`) | 2 | logical worker-process fan-out; the machine AI controller still caps active Codex turns |
+| proof batch workers (`jobs`) | 2 | logical worker-process fan-out; the machine AI controller still caps active provider turns |
 | claims per batch | 8 | scheduling granularity for the next run |
 | Lean REPLs per batch worker | 1 | compatibility value; global Lean admission is authoritative |
 | old process-local AI guard | — | superseded on managed paths by machine AI admission |
@@ -63,13 +63,15 @@ contracts.
 
 ### AI admission
 
-Every managed Codex turn uses the same machine-wide AI resource namespace.
+Every managed AI turn uses the same machine-wide AI resource namespace,
+regardless of whether it uses Codex, Claude, Copilot, OpenAI, Anthropic, or
+Gemini.
 Proof, sketching, maintenance, clarification, diagnosis, review, reporting, and
 duplicate proof attempts cannot each create their own independent allowance.
 A reviewer therefore consumes one of the same slots as a prover.
 
 Logical work and active remote work are different quantities. It is valid to
-have 30 ready claims, 8 batch worker processes, and only 4 admitted Codex turns.
+have 30 ready claims, 8 batch worker processes, and only 4 admitted AI turns.
 The AI controller regulates the last number.
 
 Work is admitted through a priority queue. Clarification diagnosis has highest
@@ -566,13 +568,13 @@ hidden upstream defaults from being mistaken for Proof Assistant policy:
 | `DistributedWorker.max_concurrent` | 512 | upstream distributed worker is not used by the normal workflow |
 | `DistributedWorker.lean_pool_size` | 24 | upstream distributed worker is not used; PA exposes per-node controller primitives |
 | upstream `MAX_CONCURRENT_BUILDS` | 8 | not the managed workflow's source of truth; PA build admission gates bootstrap, agent, merge, and certification builds |
-| upstream reviewer thread pool | 2 | upstream reviewer path is not used; any managed review Codex call shares PA's AI controller |
-| RepoProver contributor agent and dynamic tools | varies | used through Proof Assistant's narrow adapter; Codex, `lean_check`, and `lake build` calls are wrapped by PA admission |
+| upstream reviewer thread pool | 2 | upstream reviewer path is not used; any managed review AI call shares PA's AI controller |
+| RepoProver contributor agent and dynamic tools | varies | used through Proof Assistant's narrow adapter; provider turns, `lean_check`, and `lake build` calls are wrapped by PA admission |
 | RepoProver process-local Lean pool | compatibility setting | initialized per batch, but global cross-process Lean admission is authoritative |
 | Proof Assistant `jobs` / batch size | 2 / 8 | retained as visible Legacy scheduling controls; they cannot raise AI, Lean, or build admission limits |
 
 The managed CLI and workflow pass a concurrency runtime specification into
-Codex and worker processes. A small process-local Codex guard remains only as a
+AI-driver and worker processes. A small process-local Codex guard remains only as a
 defensive fallback for an unmanaged caller that constructs a backend without a
 runtime specification; it is not the source of truth for normal Proof
 Assistant runs.

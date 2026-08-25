@@ -118,9 +118,9 @@ and its dependent slice require new proof work.
 
 Only claims whose known dependencies are certified enter the ready frontier.
 Ready claims are placed in bounded batches. The legacy `--jobs 2` default is a
-minimum logical worker fan-out, not an account-level Codex limit. When several
-batches are ready, the scheduler may instantiate additional logical workers up
-to the current machine AI limit, while the global AI admission controller
+minimum logical worker fan-out, not an account-level AI-provider limit. When
+several batches are ready, the scheduler may instantiate additional logical
+workers up to the current machine AI limit, while the global AI admission controller
 independently caps active remote turns. Fixed mode plus explicit numeric limits
 provides reproducible single- or multi-worker debugging.
 Each batch uses a detached Git worktree and isolated root `.lake/build`, while
@@ -147,7 +147,7 @@ The new snapshot, graph slice, and formal type decide what is reused. Questions
 never disappear merely because a later agent is silent.
 
 The source file, excerpt span, question category, diagnostics, and blocked
-claims come from persisted deterministic data. A separately isolated Codex
+claims come from persisted deterministic data. A separately isolated AI
 presentation pass may improve wording, but its output is schema-validated and
 cannot change those facts.
 

@@ -72,6 +72,7 @@ from proof_assistant.workflow.contracts import (
     ProjectDeletionResult,
     ProjectDestinationInspection,
     ProjectSummary,
+    ProviderSetupSnapshot,
     ReportDocument,
     SourceInspection,
     VerificationJobObservation,
@@ -276,19 +277,72 @@ class WelcomeScreen(NoticeScreen):
         SETTINGS.binding(),
     ]
 
+    def __init__(
+        self,
+        ai_setup: ProviderSetupSnapshot | None = None,
+        *,
+        ai_setup_supported: bool = False,
+    ) -> None:
+        super().__init__()
+        self.ai_setup = ai_setup
+        self.ai_setup_supported = ai_setup_supported
+
+    def _ai_status_text(self) -> str:
+        if not self.ai_setup_supported:
+            return (
+                "AI provider setup: unavailable in this legacy workflow service. "
+                "Existing project controls remain available."
+            )
+        if self.ai_setup is None:
+            return "AI provider setup: checking through the backend…"
+        return (
+            f"AI: {self.ai_setup.primary_driver.value} — "
+            f"{'ready' if self.ai_setup.primary_ready else 'NOT READY'}. "
+            f"{self.ai_setup.detail}"
+        )
+
     def compose(self) -> ComposeResult:
         yield Header()
         with Vertical(id="page"):
             yield CopyableText("Proof Assistant", classes="title")
             yield CopyableText(
-                "Create a managed verification project or resume exactly where one "
-                "left off."
+                "Verify a LaTeX manuscript in a backend-managed project. Source "
+                "paths, project paths, findings, and status text remain selectable "
+                "for terminal copy and paste."
             )
+            yield CopyableText(
+                self._ai_status_text(),
+                id="landing-ai-provider-status",
+                classes=(
+                    "muted"
+                    if self.ai_setup is None or self.ai_setup.primary_ready
+                    else "warning"
+                ),
+            )
+            yield CopyableText("Start a new verification", classes="section")
             with Horizontal(classes="toolbar"):
-                yield Button("New project", id="new-project", variant="primary")
-                yield Button("Refresh projects", id="refresh-projects")
+                yield Button(
+                    "New project…",
+                    id="new-project",
+                    variant="primary",
+                    disabled=(
+                        self.ai_setup_supported
+                        and (self.ai_setup is None or not self.ai_setup.primary_ready)
+                    ),
+                )
+                yield Button(
+                    "AI providers…",
+                    id="landing-ai-providers",
+                    disabled=not self.ai_setup_supported,
+                )
                 yield Button("Settings", id="settings")
-            yield CopyableText("Existing projects", classes="section")
+                yield Button("Refresh list", id="refresh-projects")
+            yield CopyableText("Open or resume an existing project", classes="section")
+            yield CopyableText(
+                "Resume continues from durable backend state. Opening this TUI does "
+                "not take ownership of a project or its verification job.",
+                classes="muted",
+            )
             yield Vertical(id="project-list")
             yield CopyableText(
                 "Loading project catalog…", id="status-line", classes="muted"
@@ -299,6 +353,15 @@ class WelcomeScreen(NoticeScreen):
         self.load_projects()
 
     def action_new_project(self) -> None:
+        if self.ai_setup_supported and (
+            self.ai_setup is None or not self.ai_setup.primary_ready
+        ):
+            self.show_notice(
+                "Set up a ready primary AI driver before starting verification.",
+                error=True,
+            )
+            self.proof_app.show_ai_provider_settings(self.ai_setup)
+            return
         self.proof_app.show_new_project()
 
     def action_refresh(self) -> None:
@@ -315,6 +378,8 @@ class WelcomeScreen(NoticeScreen):
             self.action_refresh()
         elif button_id == "settings":
             self.action_settings()
+        elif button_id == "landing-ai-providers":
+            self.proof_app.show_ai_provider_settings(self.ai_setup)
         elif button_id.startswith("resume-"):
             project = (
                 event.button.payload
@@ -347,6 +412,33 @@ class WelcomeScreen(NoticeScreen):
             )
             if isinstance(project, Path):
                 self.proof_app.open_location(project)
+
+    def record_ai_setup(self, snapshot: ProviderSetupSnapshot) -> None:
+        """Refresh the landing card from a sanitized backend DTO."""
+
+        self.ai_setup = snapshot
+        self.ai_setup_supported = True
+        status_nodes = self.query("#landing-ai-provider-status").nodes
+        if status_nodes and isinstance(status_nodes[0], TextArea):
+            status_nodes[0].text = self._ai_status_text()
+            status_nodes[0].remove_class("warning", "muted")
+            status_nodes[0].add_class("muted" if snapshot.primary_ready else "warning")
+        new_nodes = self.query("#new-project").nodes
+        if new_nodes and isinstance(new_nodes[0], Button):
+            new_nodes[0].disabled = not snapshot.primary_ready
+        provider_nodes = self.query("#landing-ai-providers").nodes
+        if provider_nodes and isinstance(provider_nodes[0], Button):
+            provider_nodes[0].disabled = False
+
+    def record_ai_setup_error(self, detail: str) -> None:
+        status_nodes = self.query("#landing-ai-provider-status").nodes
+        if status_nodes and isinstance(status_nodes[0], TextArea):
+            status_nodes[0].text = (
+                "AI provider setup could not be checked. Existing projects and "
+                f"reports remain accessible. Detail: {detail}"
+            )
+            status_nodes[0].remove_class("muted")
+            status_nodes[0].add_class("warning")
 
     def load_projects(self) -> None:
         self.show_notice("Loading project catalog…")
@@ -390,7 +482,10 @@ class WelcomeScreen(NoticeScreen):
             controls: list[Button] = []
             if entry.resumable:
                 button = _ProjectActionButton(
-                    "Resume", id=f"resume-{index}", payload=project
+                    "Resume / open",
+                    id=f"resume-{index}",
+                    variant="success",
+                    payload=project,
                 )
                 controls.append(button)
                 delete_button = _ProjectActionButton(
@@ -1361,6 +1456,7 @@ class ProgressScreen(NoticeScreen):
         self._event_sequences: set[int] = set()
         self._observation: VerificationJobObservation | None = None
         self._observer_error: tuple[str, bool] | None = None
+        self._client_detached = False
         self._current_phase: ProgressPhase | None = None
         self._seen_phases: set[ProgressPhase] = set()
         self._progress_percent = 0.0
@@ -1457,6 +1553,12 @@ class ProgressScreen(NoticeScreen):
     def _observer_status(self) -> str:
         if not self.detached_job:
             return "The backend operation continues while this screen is open."
+        if self._client_detached:
+            return (
+                "This TUI observer is detached. The backend-owned verification was "
+                "not cancelled and may still be running. Use F2 Main menu and "
+                "Resume / open to attach again."
+            )
         if self._observer_error is not None:
             message, job_may_continue = self._observer_error
             continuation = (
@@ -1572,6 +1674,27 @@ class ProgressScreen(NoticeScreen):
             "active until the backend records and reaches a cooperative stop boundary."
         )
 
+    def record_client_detached(self) -> None:
+        """Render durable-job semantics after global client navigation."""
+
+        self._client_detached = True
+        self._lines.append(
+            "observer: detached locally; backend job ownership and state unchanged"
+        )
+        self._lines = self._lines[-200:]
+        status_nodes = self.query("#status-line").nodes
+        if status_nodes and isinstance(status_nodes[0], TextArea):
+            status_nodes[0].text = self._observer_status()
+        log_nodes = self.query("#progress-log").nodes
+        if log_nodes and isinstance(log_nodes[0], TextArea):
+            log_nodes[0].text = "\n".join(self._lines)
+        for selector in ("#cancel", "#detach-observer"):
+            nodes = self.query(selector).nodes
+            if nodes and isinstance(nodes[0], Button):
+                nodes[0].disabled = True
+        if self.is_mounted:
+            self.refresh_bindings()
+
     def record_polling_error(self, message: str, job_may_continue: bool) -> None:
         self._observer_error = (message, job_may_continue)
         self._lines.append(f"observer error: {message}")
@@ -1607,12 +1730,13 @@ class ProgressScreen(NoticeScreen):
             buttons = self.query("#cancel").nodes
             return bool(
                 self.cancellable
+                and not self._client_detached
                 and buttons
                 and isinstance(buttons[0], Button)
                 and not buttons[0].disabled
             )
         if action == "detach_job":
-            return self.detached_job
+            return self.detached_job and not self._client_detached
         return True
 
     def action_cancel_job(self) -> None:

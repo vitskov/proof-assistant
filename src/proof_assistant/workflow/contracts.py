@@ -13,7 +13,38 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Protocol
 
-CONTRACT_SCHEMA_VERSION = 8
+from ..ai import (
+    CredentialSource as CredentialSource,
+)
+from ..ai import (
+    Difficulty as Difficulty,
+)
+from ..ai import (
+    DriverId as DriverId,
+)
+from ..ai import (
+    DriverStatus as DriverStatus,
+)
+from ..ai import (
+    InstallPlan as InstallPlan,
+)
+from ..ai import (
+    InstallResult as InstallResult,
+)
+from ..ai import (
+    ProviderConfig as ProviderConfig,
+)
+from ..ai import (
+    ProviderSetupSnapshot as ProviderSetupSnapshot,
+)
+from ..ai import (
+    SecretSubmission as SecretSubmission,
+)
+from ..ai import (
+    TaskModelPolicy as TaskModelPolicy,
+)
+
+CONTRACT_SCHEMA_VERSION = 9
 
 
 class WorkflowState(StrEnum):
@@ -141,6 +172,7 @@ class BenchmarkKind(StrEnum):
 
 @dataclass(frozen=True)
 class VerificationSettings:
+    ai_driver: str = "codex_cli"
     model: str = "gpt-5.6-sol"
     effort: str = "high"
     jobs: int = 2
@@ -768,6 +800,35 @@ class WorkflowServiceContract(Protocol):
     def default_task_text(self) -> str: ...
 
     def default_verification_settings(self) -> VerificationSettings: ...
+
+    def get_ai_setup(self) -> ProviderSetupSnapshot: ...
+
+    def update_ai_settings(
+        self, config: ProviderConfig, *, expected_revision: int
+    ) -> ProviderSetupSnapshot: ...
+
+    def ai_task_policies(self) -> tuple[TaskModelPolicy, ...]: ...
+
+    def preview_ai_driver_install(self, driver: DriverId) -> InstallPlan: ...
+
+    def install_ai_driver(
+        self, plan: InstallPlan, *, consent_token: str
+    ) -> InstallResult: ...
+
+    def verify_ai_driver_account(
+        self, driver: DriverId, *, consent: bool
+    ) -> ProviderSetupSnapshot: ...
+
+    def store_ai_credential(
+        self,
+        driver: DriverId,
+        source: CredentialSource,
+        credential: SecretSubmission,
+    ) -> ProviderSetupSnapshot: ...
+
+    def delete_ai_credential(
+        self, driver: DriverId, source: CredentialSource
+    ) -> ProviderSetupSnapshot: ...
 
     def get_machine_settings(
         self, *, project: Path | None = None

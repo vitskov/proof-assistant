@@ -36,7 +36,8 @@ Proof Assistant supports macOS and Linux local execution. Install:
 - Git;
 - Lean 4 and Lake compatible with the tested RepoProver/Mathlib checkout;
 - a native C compiler; and
-- Codex CLI, authenticated with `codex login`.
+- access to at least one supported AI driver: Codex, Claude Code, or GitHub
+  Copilot CLI, or an OpenAI, Anthropic, or Gemini API key.
 
 The development installer uses an existing working
 [uv](https://docs.astral.sh/uv/) when available. If uv is missing or broken, it
@@ -48,9 +49,10 @@ Python 3.13 is the default runtime. uv uses an existing compatible interpreter
 or provisions one when needed, so neither a preinstalled Python nor a
 system-package-manager Python is required by the development installer.
 
-Authentication stays inside Codex CLI. Do not copy anything from
-`~/.codex/auth.json` and do not manufacture an `OPENAI_API_KEY` from Codex
-credentials.
+CLI authentication stays inside the provider CLI. Do not copy anything from a
+CLI auth store or manufacture an API key from a subscription login. API keys
+are read only from their documented environment variable or the OS keyring;
+see [AI providers and first-time setup](AI_PROVIDERS.md).
 
 ## Development/local installation
 
@@ -90,6 +92,7 @@ source             $HOME/src/proof-assistant
 Python environment $HOME/.venvs/proof-assistant
 new projects       $HOME/proof-assistant/<project-name>
 managed cache      $HOME/.cache/repoprover-codex
+provider settings  $HOME/.config/proof-assistant/providers.json
 ```
 
 Add the command to the current shell:
@@ -153,10 +156,13 @@ proof-assistant compiler-check
 proof-assistant cache doctor
 proof-assistant doctor
 proof-assistant models
+proof-assistant ai status
 ```
 
-`compiler-check` must report that the probe compiled and ran. `doctor` must be
-able to start `codex app-server`, initialize it, and list models.
+`compiler-check` must report that the probe compiled and ran. `doctor` and the
+top-level `models` command are Codex-specific compatibility diagnostics.
+`ai status` is the provider-neutral readiness check and prints no credential
+values.
 
 Launch the interface with either form:
 
@@ -168,6 +174,34 @@ proof-assistant tui
 The former `repoprover-codex` executable is a deprecated alias during the 0.1
 line. New documentation, shell configuration, and automation should use
 `proof-assistant`.
+
+### First-time AI setup
+
+On first launch, the TUI opens provider setup when the default primary driver
+is not ready. You may instead configure it from the shell:
+
+```bash
+proof-assistant ai status
+proof-assistant ai models codex_cli
+proof-assistant ai select codex_cli --difficulty high
+```
+
+For a missing CLI, `proof-assistant ai install DRIVER` only previews an exact
+user-local npm plan. Re-run with `--yes` to approve that unchanged plan. This
+path requires Node.js/npm; Claude Code and Copilot require Node.js 22 or newer.
+The install uses `$HOME/.local` without `sudo`, verifies the resulting
+executable, and adds `$HOME/.local/bin` to the current and future shell PATH.
+It does not perform the provider's interactive account login.
+
+For an API driver, either export `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or
+`GEMINI_API_KEY`, or submit it to the OS keyring with the password-masked TUI
+field or `proof-assistant ai credential DRIVER`. No API key is accepted in a
+command argument or provider settings file.
+
+Codex and Claude expose non-billable CLI status checks. Copilot does not expose
+a documented equivalent: its optional account check sends one tiny request
+only after an explicit cancel-first TUI confirmation or
+`proof-assistant ai verify-account copilot_cli --yes`.
 
 On first project creation, select the external source folder and then its main
 LaTeX file. A sole `.tex`/`.ltx` file is announced and adopted automatically;

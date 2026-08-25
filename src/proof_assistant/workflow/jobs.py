@@ -443,4 +443,12 @@ def request_fingerprint(
         "codex": codex,
         "cache_home": cache_home,
     }
+    # Preserve the exact 0.1 Codex fingerprint so clients can attach to active
+    # jobs created before the provider field existed. Other drivers must bind
+    # their identity explicitly and do not depend on the Codex executable.
+    if settings.ai_driver != "codex_cli":
+        proof_request = payload["proof_request"]
+        assert isinstance(proof_request, dict)
+        proof_request["ai_driver"] = settings.ai_driver
+        payload.pop("codex", None)
     return canonical_hash(payload)

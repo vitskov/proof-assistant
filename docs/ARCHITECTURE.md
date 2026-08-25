@@ -15,7 +15,7 @@ backend project management
     | catalog reconciliation, occupancy, migration, destination policy
     v
 persistent incremental verifier
-    | snapshots, SQLite, graphs, Codex workers, Lean certification
+    | snapshots, SQLite, graphs, provider-neutral AI workers, Lean certification
     v
 Lean kernel
 ```
@@ -27,7 +27,7 @@ Lean kernel
 Owns Textual screens, widgets, Rich syntax rendering, key bindings, and
 background worker lifecycles. It may call workflow interfaces and render typed
 results. It must not write SQLite, copy manuscript trees, calculate graph
-closure, invoke Codex directly, or decide certification state.
+closure, invoke an AI provider directly, or decide certification state.
 Informational values are rendered through selectable read-only surfaces;
 nonselectable syntax/Markdown renderers require an exact copyable source twin.
 
@@ -39,7 +39,10 @@ Owns the UI-neutral application state machine. Immutable contracts live in
 `remember_manuscript_folder`, `inspect_source`,
 `inspect_project_destination`, `list_projects`, `create_project`,
 `select_project_main_file`, `resume_project`, `plan_changes`, and
-`confirm_and_verify`. `CancellationFlag` and
+`confirm_and_verify`. It also owns the TUI-facing, sanitized provider operations
+(`get_ai_setup`, revision-checked settings updates, install-plan review,
+credential submission/deletion, and explicit account verification).
+`CancellationFlag` and
 `StaleChangePlanError` make cancellation and stale confirmation explicit. The
 service maps persisted backend state to screens but contains no Textual imports.
 
@@ -56,9 +59,21 @@ management only through workflow contracts.
 ### `proof_assistant.presentation`
 
 Builds source-location, excerpt, affected-tree, clarification, and findings view
-models. An optional isolated Codex presenter may improve prose only within a
+models. An optional isolated AI presenter may improve prose only within a
 strict output schema. Deterministic facts remain host-owned, and a deterministic
 fallback is always available.
+
+### `proof_assistant.ai`
+
+Owns provider-neutral contracts, machine-scoped provider configuration,
+credential indirection, executable/account inspection, model-catalog
+provenance, task/model policy, setup plans, and execution adapters. It supports
+Codex, Claude Code, and Copilot CLIs plus OpenAI, Anthropic, and Gemini APIs.
+The module does not decide claim state or certification.
+
+Provider settings contain no secret values. API credentials are resolved just
+in time from the selected environment variable or OS keyring. CLI sessions use
+their native account login without Proof Assistant reading auth files.
 
 ### `proof_assistant.incremental`
 
@@ -188,7 +203,7 @@ author source
 deterministic host: snapshot -> index -> graph -> scheduler -> certificate DB
                                       |                         ^
                                       v                         |
-                              isolated Codex/RepoProver -> Lean kernel
+                              isolated AI/RepoProver -> Lean kernel
 ```
 
 AI performs semantic interpretation, correspondence proposals, diagnostics,
@@ -201,32 +216,55 @@ independent `lake build`, inspects elaborated declarations through Lean's
 environment API, hashes structural types and values, records proof-term
 dependencies and axioms, and only then changes a claim to `CERTIFIED`.
 
-## Codex and RepoProver boundary
+## AI providers and RepoProver boundary
 
 ```text
-RepoProver agent tools
-    | validated function schemas and handlers
+machine provider policy + credential reference
+    |
     v
-Proof Assistant adapter
-    | client-defined dynamic tools over app-server JSONL
-    v
-isolated Codex app-server -> existing Codex CLI login
+Proof Assistant AI adapter -> isolated CLI or provider-native API tool loop
+    |                                      |
+    +------ allowlisted tool calls --------+
+                       |
+                       v
+          RepoProver schemas/handlers -> Lean and Lake admission
 ```
 
-RepoProver remains the control plane for Lean, Git, files, shell operations,
-and Mathlib search. Proof workers receive narrow reads and validated mutation
-requests. They cannot directly write SQLite, source snapshots, graph exports,
-certificate rows, the managed manuscript, or host aggregate modules.
+Proof Assistant reuses tested RepoProver prompts, dynamic-tool schemas, and tool
+handlers where appropriate. It does not adopt RepoProver's legacy raw API-key
+configuration, static model table, OpenAI-compatible provider client, retry
+policy, or research-deployment concurrency as an authoritative provider layer.
+Provider selection, credential indirection, catalog provenance, task policy,
+execution isolation, and admission have one source of truth in
+`proof_assistant.ai`.
 
-Before a turn, child-only configuration disables apps, plugins, bundled/local
-skills, and configured MCP servers. Startup verifies the effective inventory
-and fails closed if an external capability remains. The user's normal Codex
-configuration is not modified.
+RepoProver tools remain the control plane below that boundary for Lean, Git,
+files, shell operations, and Mathlib search. Proof workers receive narrow reads
+and validated mutation requests. They cannot directly write SQLite, source
+snapshots, graph exports, certificate rows, the managed manuscript, or host
+aggregate modules.
 
-Authentication stays inside Codex. Proof Assistant does not read
-`~/.codex/auth.json`, print tokens, or convert a login into an API key. The
-system is not offline: task context and tool results needed for a turn are
-processed through the authenticated Codex service.
+Codex uses the established isolated app-server adapter: child-only
+configuration disables apps, plugins, bundled/local skills, and configured MCP
+servers, then startup verifies the effective inventory and fails closed if an
+external capability remains. Claude and Copilot use ephemeral mode-`0600`
+prompt/tool/MCP files and are restricted to the supplied Proof Assistant MCP
+tools while their general shell/file mutation surface is disabled. Direct API
+drivers use provider-native function calling. In every case, dynamic tool
+requests return to the same allowlisted host and pass through Lean/build
+admission where applicable.
+
+CLI authentication stays inside the native provider CLI. Proof Assistant does
+not read `~/.codex/auth.json` or any Claude/Copilot credential store, print
+tokens, or convert a subscription login into an API key. API keys come only
+from the configured provider environment variable or OS keyring and never
+enter provider settings, project state, an argument vector, or a log.
+
+Codex and Claude have non-billable status checks. Automatic Copilot inspection
+does not make a request; its optional tiny no-tools entitlement probe is a
+separate explicit-consent operation. Catalogs distinguish live account results
+from contract-approved curated fallbacks. See [AI providers and first-time
+setup](AI_PROVIDERS.md).
 
 ## Persistence and recovery
 
@@ -271,9 +309,11 @@ recovery, or read-only progress screen from this state.
 
 ## Parallelism and storage
 
-At most two independent proof processes run concurrently. Each has its own
-Codex process, RepoProver Lean pool, Git worktree, and isolated root build. The
-host merges results deterministically and performs fresh certification.
+The default logical proof-batch fan-out is two processes. Each has its own AI
+turn, RepoProver Lean pool, Git worktree, and isolated root build, but logical
+fan-out does not override the machine-global AI, Lean, or build admission
+limits. The host merges results deterministically and performs fresh
+certification.
 
 Compatible Mathlib/REPL dependencies share the established depot under
 `$HOME/.cache/repoprover-codex`. Projects and ephemeral worktrees have isolated

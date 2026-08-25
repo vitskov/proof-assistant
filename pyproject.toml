@@ -12,6 +12,7 @@ license = "CC-BY-NC-4.0"
 license-files = ["LICENSE"]
 authors = [{name = "Vladimir Itskov"}]
 dependencies = [
+    "keyring>=25,<26",
     "networkx>=3.4,<4",
     "psutil>=7,<8",
     "pylatexenc>=2.10,<3",
@@ -56,7 +57,7 @@ strict = true
 show_error_codes = true
 
 [[tool.mypy.overrides]]
-module = ["pylatexenc.*", "repoprover.*"]
+module = ["keyring.*", "pylatexenc.*", "repoprover.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

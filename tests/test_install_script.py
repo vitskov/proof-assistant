@@ -287,7 +287,7 @@ _SYSCTL_STUB = (
     "#!/bin/sh\n"
     'case "$2" in\n'
     '  hw.physicalcpu|hw.ncpu) echo "{cores}" ;;\n'
-    "  hw.memsize) echo \"{mem_bytes}\" ;;\n"
+    '  hw.memsize) echo "{mem_bytes}" ;;\n'
     "  *) exit 1 ;;\n"
     "esac\n"
 )
@@ -524,9 +524,7 @@ def test_missing_uv_bootstraps_with_curl_and_uses_exact_installed_binary(tmp_pat
         home / ".config/fish/config.fish",
     ]
     configured = [
-        path.read_text(encoding="utf-8")
-        for path in startup_files
-        if path.exists()
+        path.read_text(encoding="utf-8") for path in startup_files if path.exists()
     ]
     assert any("proof-assistant" in text for text in configured)
 
@@ -644,9 +642,7 @@ def test_installer_configures_the_detected_shell_startup_path(tmp_path):
         home / ".config/fish/config.fish",
     ]
     configured = [
-        path.read_text(encoding="utf-8")
-        for path in startup_files
-        if path.exists()
+        path.read_text(encoding="utf-8") for path in startup_files if path.exists()
     ]
     assert any(".venvs/proof-assistant/bin" in text for text in configured)
 
@@ -663,8 +659,8 @@ def test_installer_does_not_duplicate_shell_startup_path(tmp_path):
         home / ".config/fish/config.fish",
     ]
     configured = [
-        path.read_text(encoding="utf-8")
-        for path in startup_files
-        if path.exists()
+        path.read_text(encoding="utf-8") for path in startup_files if path.exists()
     ]
-    assert all(text.count("Added by Proof Assistant installer") == 1 for text in configured)
+    assert all(
+        text.count("Added by Proof Assistant installer") == 1 for text in configured
+    )

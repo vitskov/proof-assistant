@@ -28,6 +28,7 @@ def isolated_tool_config_args(
     executable: str,
     *,
     env: dict[str, str] | None = None,
+    inherit_environment: bool = True,
     timeout: float = 30.0,
 ) -> list[str]:
     """Build child-only overrides that disable inherited external tools.
@@ -38,8 +39,8 @@ def isolated_tool_config_args(
     fail-closed form supported by the current CLI. Apps and plugin-bundled MCP
     servers have separate feature switches and are disabled as well.
     """
-    child_env = os.environ.copy()
-    if env:
+    child_env = os.environ.copy() if inherit_environment else {}
+    if env is not None:
         child_env.update(env)
     try:
         result = subprocess.run(
@@ -97,6 +98,7 @@ def isolated_skill_config_args(
     cwd: str | Path | None,
     external_tool_args: list[str],
     env: dict[str, str] | None = None,
+    inherit_environment: bool = True,
     timeout: float = 30.0,
 ) -> list[str]:
     """Discover and disable every skill visible to the child workspace.
@@ -116,6 +118,7 @@ def isolated_skill_config_args(
         executable,
         cwd=cwd,
         env=env,
+        inherit_environment=inherit_environment,
         extra_args=[*external_tool_args, *base_args],
     )
     try:
@@ -202,11 +205,13 @@ class AppServerClient:
         *,
         cwd: str | Path | None = None,
         env: dict[str, str] | None = None,
+        inherit_environment: bool = True,
         extra_args: list[str] | None = None,
     ) -> None:
         self.executable = executable
         self.cwd = Path(cwd).resolve() if cwd else None
         self.env = env
+        self.inherit_environment = inherit_environment
         self.extra_args = list(extra_args or [])
         self.proc: subprocess.Popen[str] | None = None
         self._reader: threading.Thread | None = None
@@ -222,9 +227,10 @@ class AppServerClient:
             return
         cmd = [self.executable, "app-server", "--listen", "stdio://", *self.extra_args]
         child_env = None
-        if self.env is not None:
-            child_env = os.environ.copy()
-            child_env.update(self.env)
+        if self.env is not None or not self.inherit_environment:
+            child_env = os.environ.copy() if self.inherit_environment else {}
+            if self.env is not None:
+                child_env.update(self.env)
         try:
             self.proc = subprocess.Popen(
                 cmd,

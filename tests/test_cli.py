@@ -113,3 +113,77 @@ def test_terminal_run_status_cannot_be_replaced_by_cleanup_progress(tmp_path):
 
     status.write_text('{"outcome": "unverified", "exit_code": 4}')
     assert _run_status_is_terminal(status)
+
+
+def test_ai_status_for_one_driver_does_not_probe_every_provider(
+    monkeypatch, capsys, tmp_path
+):
+    import proof_assistant.cli as cli
+    from proof_assistant.ai import (
+        AuthenticationState,
+        Difficulty,
+        DiscoverySource,
+        DriverId,
+        DriverStatus,
+        DriverTransport,
+        InstallationState,
+        MachineProviderSettings,
+        ModelCatalog,
+        ModelDescriptor,
+        TaskKind,
+        TaskModelPolicy,
+    )
+
+    settings = MachineProviderSettings()
+    status = DriverStatus(
+        driver=DriverId.CLAUDE_CLI,
+        transport=DriverTransport.CLI,
+        installation=InstallationState.INSTALLED,
+        authentication=AuthenticationState.AUTHENTICATED,
+        executable="/bin/claude",
+        version="Claude Code 2.0",
+        catalog=ModelCatalog(
+            driver=DriverId.CLAUDE_CLI,
+            models=(ModelDescriptor("sonnet", "Sonnet"),),
+            source=DiscoverySource.CURATED_FALLBACK,
+            contract_approved=True,
+        ),
+    )
+
+    class FakeConfigStore:
+        path = tmp_path / "providers.json"
+
+        def load(self):
+            return settings
+
+    class FakeService:
+        config_store = FakeConfigStore()
+
+        def get_setup_snapshot(self):
+            raise AssertionError("single-driver status must not probe every provider")
+
+        def inspect_driver(self, driver, *, preference):
+            assert driver is DriverId.CLAUDE_CLI
+            assert preference.driver is driver
+            return status
+
+        def recommend_task_policy(self, task, *, settings, catalog):
+            assert task is TaskKind.PROOF
+            assert settings.config.primary_driver is DriverId.CLAUDE_CLI
+            assert catalog is status.catalog
+            return TaskModelPolicy(
+                task=task,
+                driver=DriverId.CLAUDE_CLI,
+                model="sonnet",
+                difficulty=Difficulty.HIGH,
+                model_source=DiscoverySource.CURATED_FALLBACK,
+                explanation="test",
+            )
+
+    monkeypatch.setattr(cli, "_ai_provider_service", lambda: FakeService())
+    result = cli.cmd_ai_status(SimpleNamespace(driver=DriverId.CLAUDE_CLI.value))
+    assert result == 0
+    output = capsys.readouterr().out
+    assert "selected ready: yes" in output
+    assert "claude_cli" in output
+    assert "openai_api" not in output

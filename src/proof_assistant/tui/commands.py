@@ -81,6 +81,20 @@ QUIT = CommandSpec(
     "Quit",
     "Exit Proof Assistant and return to the shell.",
 )
+MAIN_MENU = CommandSpec(
+    "f2",
+    "F2",
+    "main_menu",
+    "Main menu",
+    "Return to the Proof Assistant landing screen.",
+)
+GLOBAL_SETTINGS = CommandSpec(
+    "f3",
+    "F3",
+    "global_settings",
+    "Settings",
+    "Open machine settings from any screen.",
+)
 
 BACK = CommandSpec("escape", "Esc", "back", "Back", "Return to the prior screen.")
 CANCEL = CommandSpec(
@@ -141,6 +155,8 @@ DETACH_JOB = CommandSpec(
 GLOBAL_BINDINGS: list[Binding | tuple[str, str] | tuple[str, str, str]] = [
     HELP.binding(priority=True),
     Binding("question_mark", "show_shortcuts", show=False),
+    MAIN_MENU.binding(priority=True),
+    GLOBAL_SETTINGS.binding(priority=True),
     COMMAND_PALETTE.binding(priority=True),
     TOGGLE_THEME.binding(priority=True),
     QUIT.binding(priority=True),
@@ -164,7 +180,14 @@ SHORTCUT_GROUPS: tuple[tuple[str, tuple[ReferenceCommand, ...]], ...] = (
         tuple(
             map(
                 _reference,
-                (HELP, COMMAND_PALETTE, TOGGLE_THEME, QUIT),
+                (
+                    HELP,
+                    MAIN_MENU,
+                    GLOBAL_SETTINGS,
+                    COMMAND_PALETTE,
+                    TOGGLE_THEME,
+                    QUIT,
+                ),
             )
         ),
     ),
@@ -230,7 +253,8 @@ def shortcut_reference_text() -> str:
 
     lines = [
         "Commands shown in the footer are available on the current screen.",
-        "F1 always opens this reference; ? does so when you are not typing text.",
+        "F1-F3 are global and safe while typing; ? opens help outside text fields.",
+        "On a dialog, F2 or F3 dismisses the dialog first; press again to navigate.",
         "",
     ]
     for group_name, commands in SHORTCUT_GROUPS:

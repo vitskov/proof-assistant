@@ -14,8 +14,13 @@ start or resume -> verify -> findings or clarification -> author edit
 proof-assistant
 ```
 
-`proof-assistant tui` is an explicit equivalent. The welcome screen offers
-**New project** and **Resume project**.
+`proof-assistant tui` is an explicit equivalent. On an unconfigured machine,
+the backend first checks the primary AI driver and opens the provider setup
+screen if it is not ready. Choose one of the CLI or API drivers, complete the
+displayed authentication step, and recheck. No project is created until one
+primary driver is ready. See [AI providers and first-time setup](AI_PROVIDERS.md).
+
+The welcome screen then offers **New project** and **Resume project**.
 
 ### Keyboard commands and themes
 
@@ -28,6 +33,8 @@ field; in an editor it remains normal text input.
 The common vocabulary is consistent throughout the application:
 
 - **Esc** goes back or safely cancels a modal;
+- **F2** returns to the main menu without cancelling a backend verification;
+- **F3** opens machine settings from any ordinary screen;
 - **Ctrl+Enter** confirms or continues a reviewed form;
 - **Ctrl+S** saves settings;
 - **Ctrl+P** opens the searchable command palette;
@@ -39,6 +46,11 @@ Letter shortcuts follow the visible action name on their current screen, such
 as **N** for New, **R** for Refresh/Retry, **S** for Settings, **V** for Verify,
 and **O** for Open. The F1 reference documents navigation and less frequent
 contextual commands as well.
+
+F2/F3 are cancel-first on a modal dialog: the first press dismisses the dialog
+without accepting it, and a second press performs the navigation. Settings is
+an overlay, so closing it restores the exact prior screen. Leaving a progress
+screen detaches only the TUI observer; the detached backend job continues.
 
 ## Start a project
 
@@ -332,10 +344,32 @@ make a deliberate selection from the backend-provided candidates, and review
 the resulting proof-impact plan before starting another iteration. Existing
 evidence is preserved; the TUI never edits project metadata itself.
 
+## AI provider settings
+
+Open **Settings → AI Providers** to inspect the machine-wide primary driver,
+installation/authentication state, credential source, catalog provenance,
+provider model/difficulty, and resolved task policies. The same screen can
+review a missing CLI's exact user-local install plan, show copyable native
+login instructions, and submit an API key once to the OS keyring. It never
+reads a provider auth file or displays a stored key.
+
+Automatic model discovery is live for Codex and the three API drivers when the
+configured account is reachable. Claude and Copilot CLI catalogs are explicitly
+labeled curated aliases because those CLIs do not document a noninteractive
+account model-list command. Copilot's authentication check also remains
+unknown until the user explicitly approves one tiny no-tools request; normal
+startup and refresh never send that request.
+
+Provider settings apply to every project on the machine. Task selection is
+resolved by the backend, and a selected driver still shares the same global AI
+admission controller with all other AI task classes. See
+[AI providers and first-time setup](AI_PROVIDERS.md) for commands, credential
+handling, model policy, and execution isolation.
+
 ## Concurrency and machine resources
 
 Open **Settings** from the welcome screen or a project dashboard, then choose
-**Concurrency / Resources**. Proof Assistant controls active Codex turns, Lean
+**Concurrency / Resources**. Proof Assistant controls active AI turns, Lean
 checks, and Lake builds with three independent machine-wide admission
 controllers. The page shows each configured value beside its effective value,
 the source of the setting, and live CPU, memory, swap, queue, and throttle
@@ -371,13 +405,14 @@ To run verification without the TUI after a project exists:
 ```bash
 proof-assistant manuscript verify \
   --project "$PROJECT" \
+  --ai-driver codex_cli \
   --model gpt-5.6-sol \
   --effort high \
   --turn-timeout 86400
 ```
 
 Two logical proof-batch workers are the legacy default. `--jobs` controls batch
-process fan-out, not active Codex turns: the machine AI controller is
+process fan-out, not active provider turns: the machine AI controller is
 authoritative across all workers, and the Lean and build controllers enforce
 their own separate limits. For fully reproducible resource limits, use
 `--concurrency fixed` with explicit AI, Lean, and build values. Merge order and

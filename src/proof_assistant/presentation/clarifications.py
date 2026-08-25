@@ -5,6 +5,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Protocol
 
+from ..ai.execution import AIBackend, AIBackendConfig
 from ..backend import CodexBackend, CodexConfig
 from ..incremental.io import atomic_write_json, canonical_hash
 from ..incremental.store import StateStore
@@ -21,7 +22,7 @@ class ClarificationNarrator(Protocol):
     @property
     def name(self) -> str: ...
 
-    def narrate(self, facts: Mapping[str, Any]) -> Mapping[str, Any]: ...
+    def narrate(self, facts: Mapping[str, object]) -> Mapping[str, object]: ...
 
 
 class IsolatedCodexClarificationNarrator:
@@ -39,7 +40,7 @@ class IsolatedCodexClarificationNarrator:
     def name(self) -> str:
         return f"codex:{self.config.model}"
 
-    def narrate(self, facts: Mapping[str, Any]) -> Mapping[str, Any]:
+    def narrate(self, facts: Mapping[str, object]) -> Mapping[str, object]:
         backend = CodexBackend(self.config, cwd=self.cwd)
         try:
             result = backend.run(
@@ -60,6 +61,41 @@ class IsolatedCodexClarificationNarrator:
         payload = json.loads(result.final_text)
         if not isinstance(payload, dict):
             raise ValueError("Codex clarification response must be a JSON object")
+        return payload
+
+
+class IsolatedAIClarificationNarrator:
+    """Provider-neutral narration-only driver using no dynamic tools."""
+
+    def __init__(self, config: AIBackendConfig, *, cwd: Path) -> None:
+        self.config = config
+        self.cwd = cwd.resolve()
+
+    @property
+    def name(self) -> str:
+        return f"{self.config.driver_id.value}:{self.config.model}"
+
+    def narrate(self, facts: Mapping[str, object]) -> Mapping[str, object]:
+        backend = AIBackend(self.config, cwd=self.cwd)
+        try:
+            result = backend.run(
+                system_prompt=(
+                    "You rewrite an already-authorized mathematical clarification "
+                    "request for a manuscript author. Return one JSON object with only "
+                    "headline, explanation, and requested_actions. Do not add facts, "
+                    "change the quoted passage, source location, claim, diagnosis, "
+                    "blocked claims, or possible resolutions. requested_actions must be "
+                    "an array of short strings. Do not use Markdown fences."
+                ),
+                user_prompt=json.dumps(dict(facts), ensure_ascii=False, sort_keys=True),
+                tools=[],
+                tool_handler=lambda _name, _arguments: "Tools are disabled",
+            )
+        finally:
+            backend.close()
+        payload = json.loads(result.final_text)
+        if not isinstance(payload, dict):
+            raise ValueError("AI clarification response must be a JSON object")
         return payload
 
 

@@ -1,33 +1,88 @@
 # Test report — Proof Assistant 0.1.0
 
-Tested on 2026-08-23 in `America/New_York`.
+Current provider revision tested on 2026-08-25 in `America/New_York`.
 
-## Release result
+## 2026-08-25 provider revision result
 
-The current source passed the complete automated suite, the supported local
-installer, a clean Python 3.13 wheel installation, real Lean memory
-calibration, and a provider-backed two-claim manuscript verification.
+The current source passed the supported installer in a disposable location
+outside Dropbox. That run installed the development/test dependencies with
+Python 3.13 and `uv`, compiled and executed a real native test program, and ran
+the complete automated suite. This pass deliberately used fake provider
+process/HTTP/keyring boundaries: it consumed no provider subscription quota and
+made no OpenAI, Anthropic, or Gemini API request.
 
 | Gate | Result |
 |---|---|
-| complete automated suite | **433 passed** on macOS in 133.94 seconds |
-| Cortex Linux suite | **433 passed** in 99.64 seconds |
-| supported installer | **passed**; compiler compile/run and 393 tests in 123.92 seconds |
+| supported disposable installer | **passed**; **550 tests passed in 155.72 seconds** |
+| complete automated suite | **passed independently**; **550 tests passed in 161.15 seconds** |
+| provider security tests | **32 passed**; included in the 550-test suite |
+| provider TUI tests | **6 passed**; included in the 550-test suite |
 | Ruff lint and format | **passed** |
-| strict mypy | **passed**; 64 source files |
-| explicit `Any` policy | **passed**; 98/98 AST uses, 11 boundary modules `Any`-free |
+| strict mypy | **passed**; 72 source files |
 | Python `compileall` | **passed** |
 | `git diff --check` | **passed** |
-| clean Python 3.13 wheel | **passed**; `py.typed` and downstream strict mypy |
-| real Lean calibration | **passed**; no Codex traffic |
-| real manuscript verification | **verified**, 2/2 current certificates |
-| RepoProver checkout | exact commit, clean and unchanged |
+| native compiler preflight | **passed**; `/usr/bin/clang` compiled and executed the probe |
+| provider traffic | **none**; no real CLI model turn and no provider API request |
+| RepoProver checkout | exact commit recorded; upstream untouched |
 | upstream RepoProver PR | **NOT CREATED** |
+
+This validation does not assign a final release commit SHA. A final 0.1.0 wheel
+and source distribution were built outside the repository and checked as
+described below. The real Lean calibration, provider-backed manuscript run,
+and cross-platform suite retained below were collected on the earlier
+2026-08-23 snapshot. They remain useful
+regression evidence, but they are not represented as reruns of the new provider
+revision.
+
+## Multi-provider feature scope
+
+The 2026-08-25 suite covers the new provider-neutral AI layer:
+
+- Codex CLI, Claude Code CLI, GitHub Copilot CLI, OpenAI API, Anthropic API,
+  and Gemini API driver contracts;
+- machine-scoped, revision-checked provider settings with no secret fields;
+- live-account model catalogs bound to setup readiness and automatic task
+  policy, with unavailable explicit models rejected before persistence;
+- API credentials resolved only from provider environment variables or the OS
+  keyring, with one-shot/redacted credential submissions;
+- minimal provider-specific subprocess environments that keep API keys out of
+  CLI setup, discovery, execution, entitlement checks, and npm installation;
+- native CLI authentication checks without reading provider auth files;
+- live-versus-curated model-catalog provenance and exact model/difficulty
+  validation;
+- an automatic, non-billable Codex/Claude readiness path and a separate
+  explicit-consent Copilot entitlement probe that is never run by ordinary
+  startup/status inspection;
+- reviewed, allowlisted, user-local CLI installation plans with executable
+  identity and PATH handling;
+- task-class model/difficulty policy for proof, sketch, maintenance,
+  clarification, diagnosis, review, duplicate proof, and reporting;
+- provider-neutral execution through the global AI controller and the common
+  allowlisted RepoProver tool host, with Lean/build admission preserved;
+- Codex external-capability isolation, ephemeral restricted Claude/Copilot MCP
+  execution, and provider-native API function-calling loops;
+- first-run primary-driver setup, machine-wide **Settings → AI Providers**,
+  copyable sanitized status, model/auth/install controls, and consent-first
+  credential/account actions; and
+- global **F2 Main menu** and **F3 Settings** navigation, including cancel-first
+  modal behavior and observer-only detachment from a running job.
+
+The provider tests substitute deterministic fakes at every external account
+boundary. Therefore the suite validates request construction, isolation,
+redaction, consent, state transitions, and error handling without claiming that
+the current machine is entitled to any particular provider model.
+
+## Earlier 2026-08-23 acceptance evidence
+
+The following sections describe the preceding 2026-08-23 acceptance snapshot.
+Counts and artifacts in those sections are historical unless explicitly marked
+as part of the 2026-08-25 provider run above.
 
 ## Python 3.13 roadmap acceptance
 
-Strict mypy now checks all 64 package source files in CI. A companion policy
-gate caps the remaining 98 explicit AST-level `Any` uses and requires 11
+At that earlier snapshot, strict mypy checked all 64 package source files in
+CI. A companion policy gate capped the remaining 98 explicit AST-level `Any`
+uses and required 11
 protocol, backend, JSON, task, Lean, workflow, and catalog boundary modules to
 remain `Any`-free. The original roadmap inventory contained 225 textual `Any`
 occurrences; the implemented tree contains 121, including comments, while the
@@ -56,8 +111,8 @@ both controls, matching the complete-screen readiness rule used elsewhere.
 
 ## Fresh-project and state-isolation regressions
 
-This revision addresses three failures found on the real `lapl` project and in
-release testing:
+The August 23 snapshot addressed three failures found on the real `lapl`
+project and in release testing:
 
 - Lean-version auto-tuning no longer invokes `lake env` before cache setup.
   The direct `lean --version` probe cannot materialize a fresh project's
@@ -222,7 +277,36 @@ failed closed unless no external tools or enabled skills remained exposed.
 
 ## Installed and packaged state
 
-The supported installer was run with:
+### 2026-08-25 installer and package
+
+The supported installer ran in a disposable location outside Dropbox with
+Python 3.13.15 and uv 0.9.26. It installed the editable development package and
+test dependencies, compiled and executed its native C preflight with
+`/usr/bin/clang`, initialized the managed cache, and completed all 550 tests in
+155.72 seconds. Ruff lint/format, strict mypy over 72 source files, Python
+`compileall`, and `git diff --check` also passed. A separate final full-suite
+run completed all 550 tests in 161.15 seconds.
+
+No real AI turn or API request was part of this installer acceptance. No new
+final release commit SHA is recorded in this pre-commit report.
+
+The final wheel and source distribution were built with `uv` outside the
+repository. The wheel was installed into a fresh external CPython 3.13.15
+environment alongside the exact RepoProver checkout. Distribution version,
+package imports (including AI providers, TUI settings, and Lean resources), AI
+setup help, and the real compiler compile-and-execute command all passed. The
+installed package imported from `site-packages`, not an editable source tree.
+Archive filename and content scans found no credentials, private keys,
+environments, caches, or machine-private files.
+
+| Artifact | SHA-256 |
+|---|---|
+| `proof_assistant-0.1.0-py3-none-any.whl` | `e3d6e820136afd7d831dac1c677f0ccb7b54776a8f0cd3e567544ec30d6727dd` |
+| `proof_assistant-0.1.0.tar.gz` | `ebb4497974a64a3c50ffb303ded075906f1806f7f9a070152ce6e91d14368e97` |
+
+### Earlier 2026-08-23 package acceptance
+
+The earlier supported installer was run with:
 
 ```text
 PROOF_ASSISTANT_VENV=/Users/vui1/.venvs/proof-assistant
@@ -249,8 +333,8 @@ for:
 - Textual 1.0.0 compatibility; and
 - native compiler compile-and-execute behavior.
 
-The disposable build and environment were deleted after the checks. The live
-installation is:
+The disposable build and environment were deleted after the checks. At that
+acceptance point, the live installation was:
 
 ```text
 source:      /Users/vui1/src/proof-assistant
@@ -264,27 +348,39 @@ intentional so existing Mathlib artifacts are shared rather than duplicated.
 
 ## Tested environment
 
+### 2026-08-25 provider pass
+
 | Component | Tested value |
 |---|---|
 | OS | macOS 12.7.6 (21H1320), x86_64 |
 | Python | CPython 3.13.15 |
-| uv | 0.9.26 (`ee4f00362`, 2026-01-15) |
-| Codex CLI | 0.149.0 |
-| Git | 2.37.1 (Apple Git-137.1) |
+| uv | 0.9.26 |
+| Codex CLI | 0.149.1; version inspection only, no model turn |
 | Lean | 4.28.0, commit `7e01a1bf5c70fc6167d49c345d3bf80596e9a79b` |
 | Lake | 5.0.0-src+7e01a1b |
-| Mathlib | v4.28.0, commit `8f9d9cff6bd728b17a24e163c9402775d9e6a365` |
 | RepoProver | commit `386adba3df572cb71df534add2c764e071898a2e` |
+| native compiler | `/usr/bin/clang`; real compile-and-execute preflight passed |
+
+The RepoProver integration version was the exact commit above and remained
+untouched. No upstream RepoProver pull request was created.
+
+### Earlier 2026-08-23 manuscript environment
+
+| Component | Earlier tested value |
+|---|---|
+| Codex CLI | 0.149.0 |
+| Git | 2.37.1 (Apple Git-137.1) |
+| Mathlib | v4.28.0, commit `8f9d9cff6bd728b17a24e163c9402775d9e6a365` |
 | native compiler | `/usr/bin/clang`, Apple clang 14.0.0 |
 | Textual / Rich | 1.0.0 / 14.3.4 |
 | psutil / NetworkX | 7.2.2 / 3.6.1 |
 
-The RepoProver checkout at `/Users/vui1/src/repoprover` was clean at the exact
-commit above and remained untouched by Proof Assistant publication work.
+These dependency versions accompany the earlier real Lean/manuscript evidence;
+they are not a claim that the provider revision repeated that manuscript run.
 
 ## Storage and repository hygiene
 
-At the final cache check:
+At the earlier 2026-08-23 final cache check:
 
 ```text
 managed cache:          9.88 GiB
@@ -295,9 +391,10 @@ isolated builds:        2.43 GiB
 active reservations:    0.00 GiB
 ```
 
-Before publication the repository is checked for private-key material,
-credentials, tokens, `.env`/`auth.json` files, machine-private configuration,
-virtual environments, package builds, caches, and temporary test output.
-Generated repository-local caches are removed, ignored-path rules are verified,
-and the remote history is fetched before any push. No command in this work may
-push to or open a pull request against `facebookresearch/repoprover`.
+For that earlier publication, the repository was checked for private-key
+material, credentials, tokens, `.env`/`auth.json` files, machine-private
+configuration, virtual environments, package builds, caches, and temporary
+test output.
+Generated repository-local caches were removed, ignored-path rules were
+verified, and remote history was fetched before the push. No command in this
+work may push to or open a pull request against `facebookresearch/repoprover`.

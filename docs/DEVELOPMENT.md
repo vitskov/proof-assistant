@@ -40,7 +40,10 @@ have strict boundaries described in [Architecture](ARCHITECTURE.md).
   filesystem events alone cannot authorize import.
 - Confirmation must reject a stale source inventory or project generation.
 - Resume behavior comes from persisted state, not a remembered screen.
-- Codex clarification presentation cannot alter deterministic question facts.
+- AI clarification presentation cannot alter deterministic question facts.
+- `proof_assistant.ai` owns provider selection, credential indirection,
+  catalog provenance, task policy, and provider execution. Do not route around
+  it through RepoProver's legacy provider client or a TUI-only setup path.
 
 Favor contract tests at each boundary and integration tests that use fakes only
 at the next external boundary.
@@ -53,10 +56,19 @@ proof-assistant cache status
 proof-assistant doctor
 proof-assistant models
 proof-assistant smoke --model MODEL --effort EFFORT
+proof-assistant ai status
 ```
 
 Run smoke once with `OPENAI_API_KEY` removed to demonstrate that the existing
-Codex login is sufficient.
+Codex login is sufficient for the Codex compatibility path. Provider setup and
+execution tests must fake CLI/HTTP/keyring boundaries by default; do not consume
+Copilot quota or API credits in an ordinary test suite. A real provider test
+requires explicit authorization and must record which provider traffic it used.
+
+Provider regression coverage must prove that settings cannot contain secrets,
+credential submissions are one-shot/redacted, model catalogs retain their
+live-versus-fallback source, install plans require exact consent, and all
+provider tool calls return through the common host admission boundary.
 
 ## TUI and workflow acceptance
 

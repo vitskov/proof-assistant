@@ -20,7 +20,7 @@ attention.
   an interactive, copyable proof-dependency map.
 - Preserve independently checked Lean certificates between manuscript edits.
 - Show how one changed statement affects its dependent lemmas and theorems.
-- Auto-tune Codex turns, Lean checks, and Lake builds independently for the
+- Auto-tune AI turns, Lean checks, and Lake builds independently for the
   machine, with effective limits and pressure visible in the TUI.
 - Keep source snapshots, reports, questions, Lean code, and history together in
   one durable project.
@@ -34,9 +34,11 @@ introduced project axiom.
 
 Requirements: macOS 12+ (Intel or Apple Silicon) or Linux with glibc 2.31+, at
 least 4 CPU cores and 16 GiB RAM (8+ cores / 32+ GiB recommended), Python
-3.13, `uv`, Git, Lean/Lake, a native C compiler, an authenticated Codex CLI,
-and the tested RepoProver checkout. The installer enforces the OS/CPU/memory
-floor before it downloads or builds anything. See
+3.13, `uv`, Git, Lean/Lake, a native C compiler, one supported AI provider,
+and the tested RepoProver checkout. Supported AI drivers are Codex, Claude
+Code, and GitHub Copilot CLIs plus the OpenAI, Anthropic, and Gemini APIs. The
+installer enforces the OS/CPU/memory floor before it downloads or builds
+anything. See
 [Installation](docs/INSTALLATION.md#system-requirements) for details.
 
 ```bash
@@ -47,16 +49,25 @@ export PATH="$HOME/.venvs/proof-assistant/bin:$PATH"
 proof-assistant
 ```
 
-The welcome screen offers **New project** and **Resume project**. A new project
-defaults to:
+On first launch, Proof Assistant checks its machine-wide primary AI driver. If
+it is not ready, **Set up your primary AI driver** lets you inspect or install a
+CLI, copy its native login step, choose an API credential source, and select a
+model/difficulty. A CLI install requires review and explicit approval, and the
+Copilot quota-consuming account probe is never sent without separate consent.
+See
+[AI providers and first-time setup](docs/AI_PROVIDERS.md).
+
+The welcome screen then offers **New project** and **Resume project**. A new
+project defaults to:
 
 ```text
 $HOME/proof-assistant/<project-name>
 ```
 
 Every screen keeps its current keyboard commands in a compact footer. Press
-**F1** for the complete command reference, **Ctrl+P** for the searchable
-command palette, and **Ctrl+T** to switch between the warm **Proof Ink** dark
+**F1** for the complete command reference, **F2** for the main menu, **F3** for
+machine settings, **Ctrl+P** for the searchable command palette, and **Ctrl+T**
+to switch between the warm **Proof Ink** dark
 theme and **Proof Paper** light theme. Setup and settings screens consistently
 use **Esc** to go back, **Ctrl+Enter** to continue, and **Ctrl+S** to save when
 those actions are available.
@@ -144,7 +155,8 @@ source representation.
 | start, resume, clarify, and review | [Usage guide](docs/USAGE.md) |
 | understand the project-owned verification task | [Task and scope](docs/TASK_FILES.md) |
 | understand snapshots, graphs, and certificates | [Incremental verification](docs/INCREMENTAL_VERIFICATION.md) |
-| tune Codex, Lean, and build resources | [Concurrency and resources](docs/CONCURRENCY.md) |
+| connect Codex, Claude, Copilot, OpenAI, Anthropic, or Gemini | [AI providers and setup](docs/AI_PROVIDERS.md) |
+| tune AI, Lean, and build resources | [Concurrency and resources](docs/CONCURRENCY.md) |
 | use advanced command-line operations | [Command reference](docs/COMMAND_REFERENCE.md) |
 | diagnose a quiet or failed run | [Troubleshooting](docs/TROUBLESHOOTING.md) |
 | understand disk use and cleanup | [Cache and storage](docs/CACHE_AND_STORAGE.md) |
@@ -171,10 +183,13 @@ $HOME/.cache/repoprover-codex
 Reusing that exact location prevents existing installations from creating a
 second multi-gigabyte Mathlib dependency depot after the rename.
 
-Authentication remains inside Codex CLI. Proof Assistant never reads
-`auth.json` or extracts login tokens. Verification children start with local
-MCP servers, apps, plugins, and skills disabled and verified absent. This
-independently maintained project does not modify or publish to
+CLI authentication remains inside each provider's native CLI. API keys are
+read only from the selected environment variable or OS keyring; they are never
+stored in a project or provider settings file. Proof Assistant never reads
+provider auth files or extracts login tokens. Provider tools remain constrained
+to the Proof Assistant host boundary described in
+[AI providers and first-time setup](docs/AI_PROVIDERS.md#execution-and-security-boundary).
+This independently maintained project does not modify or publish to
 `facebookresearch/repoprover`.
 
 Proof Assistant is distributed under the Creative Commons

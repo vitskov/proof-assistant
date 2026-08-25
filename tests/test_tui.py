@@ -1077,6 +1077,89 @@ async def test_question_mark_remains_typable_while_f1_help_is_global() -> None:
 
 
 @async_test
+async def test_f2_f3_global_navigation_is_input_safe_and_cancel_first() -> None:
+    service = FakeWorkflowService()
+    app = ProofAssistantApp(service)
+
+    async with app.run_test(size=(100, 36)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        assert {"f2", "f3"}.issubset(app.screen.active_bindings)
+        await pilot.press("n")
+        await wait_for(pilot, lambda: isinstance(app.screen, NewProjectScreen))
+        draft_screen = app.screen
+        name = draft_screen.query_one("#project-name", Input)
+        name.value = "A preserved draft"
+        name.focus()
+
+        await pilot.press("f1")
+        await wait_for(pilot, lambda: isinstance(app.screen, ShortcutHelpScreen))
+        reference = app.screen.query_one("#shortcut-reference", TextArea).text
+        assert "F2" in reference and "Main menu" in reference
+        assert "F3" in reference and "Settings" in reference
+
+        # A global navigation key cancels a modal first. It neither confirms the
+        # modal nor discards the screen and input preserved underneath it.
+        await pilot.press("f3")
+        await wait_for(pilot, lambda: app.screen is draft_screen)
+        assert name.value == "A preserved draft"
+
+        await pilot.press("f3")
+        await wait_for(pilot, lambda: settings_home_is_ready(app))
+        app.screen.query_one("#settings-back", Button).press()
+        await wait_for(pilot, lambda: app.screen is draft_screen)
+        assert name.value == "A preserved draft"
+
+        await pilot.press("f2")
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+
+
+@async_test
+async def test_global_navigation_detaches_only_client_and_blocks_late_completion() -> (
+    None
+):
+    service = FakeWorkflowService()
+    service.verification_release = threading.Event()
+    app = ProofAssistantApp(service)
+
+    async with app.run_test(size=(110, 35)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        app.start_verification(service.project, None)
+        await wait_for(pilot, lambda: progress_log_contains(app, "INDEXING"))
+        progress = app.screen
+        assert isinstance(progress, ProgressScreen)
+
+        await pilot.press("f3")
+        await wait_for(pilot, lambda: settings_home_is_ready(app))
+        assert service.cancel_requests == []
+        assert app._observer_worker is None
+        assert app._active_observation is None
+        assert app._progress_screen is None
+
+        # A terminal callback already queued by the observer is identity-guarded
+        # and therefore cannot steal the Settings screen after detachment.
+        app._finish_observed_job(progress, service.verify_result)
+        await pilot.pause()
+        assert isinstance(app.screen, SettingsHomeScreen)
+        service.verification_release.set()
+        await pilot.pause(0.05)
+        assert isinstance(app.screen, SettingsHomeScreen)
+
+        app.screen.query_one("#settings-back", Button).press()
+        await wait_for(pilot, lambda: app.screen is progress)
+        status = progress.query_one("#status-line", TextArea)
+        assert "observer is detached" in status.text
+        assert "not cancelled" in status.text
+        status.select_all()
+        assert "Resume / open" in status.selected_text
+        assert progress.query_one("#cancel", Button).disabled
+        assert progress.query_one("#detach-observer", Button).disabled
+
+        await pilot.press("f2")
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        assert service.cancel_requests == []
+
+
+@async_test
 async def test_terminal_folder_picker_traverses_and_persists_only_on_select() -> None:
     service = FakeWorkflowService()
     app = ProofAssistantApp(service)

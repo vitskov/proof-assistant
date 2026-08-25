@@ -8,9 +8,11 @@ This index separates ordinary use from implementation and maintenance details.
    validation, and upgrades.
 2. [Usage guide](USAGE.md) — select a main LaTeX file, then use the TUI to
    verify, clarify, edit, and resume a persistent project.
-3. [Project task and scope](TASK_FILES.md) — the default task, the built-in task
+3. [AI providers and first-time setup](AI_PROVIDERS.md) — connect Codex,
+   Claude, Copilot, OpenAI, Anthropic, or Gemini without exposing credentials.
+4. [Project task and scope](TASK_FILES.md) — the default task, the built-in task
    editor, targets, modes, and policies.
-4. [Troubleshooting and operations](TROUBLESHOOTING.md) — quiet runs, stopped
+5. [Troubleshooting and operations](TROUBLESHOOTING.md) — quiet runs, stopped
    runs, output recovery, disk pressure, and common failure modes.
 
 ## Reference
@@ -19,12 +21,12 @@ This index separates ordinary use from implementation and maintenance details.
   non-interactive operations.
 - [Incremental verification model](INCREMENTAL_VERIFICATION.md) — snapshots,
   graphs, invalidation, scheduling, questions, and certificates.
-- [Concurrency and resource management](CONCURRENCY.md) — independent Codex,
+- [Concurrency and resource management](CONCURRENCY.md) — independent AI,
   Lean, and build admission, automatic tuning, machine settings, telemetry, and
   legacy migration boundaries.
 - [Cache and storage](CACHE_AND_STORAGE.md) — sharing, reservations, bounded
   garbage collection, and recovery.
-- [Architecture and security](ARCHITECTURE.md) — Codex/RepoProver boundary,
+- [Architecture and security](ARCHITECTURE.md) — AI/RepoProver boundary,
   authentication, child isolation, and storage control plane.
 - [Latest test report](../TEST_REPORT.md) — exact versions, test counts, and
   real Lean acceptance evidence.

@@ -30,6 +30,10 @@ IGNORED_DIRECTORY_NAMES = frozenset(
     {
         ".git",
         ".lake",
+        ".claude",
+        ".codex",
+        ".copilot",
+        ".ssh",
         ".mypy_cache",
         ".pytest_cache",
         ".ruff_cache",
@@ -44,7 +48,14 @@ IGNORED_FILE_NAMES = frozenset(
     {
         ".DS_Store",
         ".env",
+        ".env.local",
+        ".netrc",
+        ".npmrc",
         "auth.json",
+        "credentials.json",
+        "id_ed25519",
+        "id_rsa",
+        "service-account.json",
     }
 )
 IGNORED_FILE_SUFFIXES = frozenset(
@@ -236,13 +247,15 @@ def _is_within(path: Path, parent: Path) -> bool:
 
 def _copy_ignore(_directory: str, names: list[str]) -> set[str]:
     ignored: set[str] = set()
+    ignored_directories = {name.casefold() for name in IGNORED_DIRECTORY_NAMES}
+    ignored_files = {name.casefold() for name in IGNORED_FILE_NAMES}
     for name in names:
         folded = name.casefold()
         suffixes = Path(name).suffixes
         combined_suffix = "".join(suffixes).casefold()
         if (
-            name in IGNORED_DIRECTORY_NAMES
-            or name in IGNORED_FILE_NAMES
+            folded in ignored_directories
+            or folded in ignored_files
             or folded.startswith(".env.")
             or combined_suffix in IGNORED_FILE_SUFFIXES
         ):

@@ -117,18 +117,35 @@ Run:
 ```bash
 proof-assistant compiler-check
 proof-assistant cache doctor
-proof-assistant doctor
-proof-assistant models
+proof-assistant ai status
+proof-assistant ai status --driver DRIVER
+proof-assistant ai models DRIVER
 ```
 
 The compiler check must compile and execute a program. Select an exact
-model/effort advertised by `models`. Authentication comes from `codex login`;
-do not expose an API key or token to Proof Assistant.
+model/difficulty advertised for the chosen driver. A `curated_fallback` catalog
+is not proof that the configured account can use those models.
+
+For a CLI driver, run the native login command shown by `ai status` (`codex
+login`, `claude auth login`, or `copilot login`) and recheck. Proof Assistant
+never reads the CLI's auth files. Copilot normally remains `unknown` because it
+has no documented non-billable status command; use the separate explicit tiny
+probe only if you accept one account request:
+
+```bash
+proof-assistant ai verify-account copilot_cli --yes
+```
+
+For an API driver, select either its environment variable (`OPENAI_API_KEY`,
+`ANTHROPIC_API_KEY`, or `GEMINI_API_KEY`) or the OS keyring. Store a key with a
+hidden prompt via `proof-assistant ai credential DRIVER`; never place one in a
+project, provider JSON, task, or command argument. See [AI providers and
+first-time setup](AI_PROVIDERS.md).
 
 Persistent verification exit codes preserve failure boundaries:
 
 - 20: project/cache/setup failure;
-- 21: Codex authentication, protocol, or provider failure; and
+- 21: AI authentication, protocol, or provider failure; and
 - 22: Lean bootstrap, build, merge, or extraction failure.
 
 Exit 11 is partial/inconclusive and never means false. Exit 12 is reserved for a

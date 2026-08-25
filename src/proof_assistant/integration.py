@@ -4,7 +4,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from .backend import CodexBackend, CodexConfig, CodexResult
+from .ai import DriverId, TaskKind
+from .ai.execution import AIBackend, AIBackendConfig, AITurnResult
+from .backend import CodexConfig
 from .json_types import JSONObject
 
 
@@ -25,17 +27,24 @@ class RepoProverAgent(Protocol):
 
 @dataclass
 class RepoProverCodexRun:
-    codex: CodexResult
+    """Compatibility name for a provider-neutral RepoProver agent turn."""
+
+    codex: AITurnResult
     agent_type: str
+
+    @property
+    def ai(self) -> AITurnResult:
+        return self.codex
 
 
 def run_repoprover_agent(
     agent: RepoProverAgent,
     *,
     run_kwargs: dict[str, object],
-    codex: CodexConfig,
+    codex: CodexConfig | None = None,
+    ai: AIBackendConfig | None = None,
 ) -> RepoProverCodexRun:
-    """Run one already-constructed RepoProver agent through Codex.
+    """Run one already-constructed RepoProver agent through an AI driver.
 
     This is a deliberately narrow integration seam for internal testing. It uses
     the public-ish methods already present on BaseAgent subclasses:
@@ -48,7 +57,21 @@ def run_repoprover_agent(
     tools = agent.get_tools()
     cwd = getattr(agent, "repo_root", None)
 
-    backend = CodexBackend(codex, cwd=cwd)
+    if (codex is None) == (ai is None):
+        raise ValueError("Provide exactly one of codex= or ai=")
+    if ai is None:
+        assert codex is not None
+        ai = AIBackendConfig(
+            driver=DriverId.CODEX_CLI,
+            model=codex.model,
+            difficulty=codex.effort,
+            executable=codex.executable,
+            request_timeout=codex.request_timeout,
+            turn_timeout=codex.turn_timeout,
+            concurrency=codex.concurrency,
+            task_kind=TaskKind(codex.ai_task_class.value),
+        )
+    backend = AIBackend(ai, cwd=cwd)
     try:
         result = backend.run(
             system_prompt=system_prompt,
