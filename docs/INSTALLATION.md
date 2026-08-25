@@ -59,6 +59,7 @@ see [AI providers and first-time setup](AI_PROVIDERS.md).
 Clone the user-owned repository outside Dropbox:
 
 ```bash
+mkdir -p "$HOME/src"
 git clone https://github.com/vitskov/proof-assistant.git "$HOME/src/proof-assistant"
 cd "$HOME/src/proof-assistant"
 scripts/install-dev.sh
@@ -148,21 +149,72 @@ The 0.1 installer accepts the old `REPOPROVER_CODEX_VENV`,
 lower-priority migration fallbacks. Prefer the new names. In particular, do not
 set a new cache directory merely to update the branding.
 
+## RepoProver integration checkout
+
+Complete this step before starting manuscript verification. The Proof
+Assistant installer deliberately does not modify or guess an upstream
+RepoProver checkout.
+
+For a fresh machine, run this block **only if `$HOME/src/repoprover` does not
+already exist**:
+
+```bash
+export REPOPROVER_SHA=386adba3df572cb71df534add2c764e071898a2e
+git clone https://github.com/facebookresearch/repoprover.git "$HOME/src/repoprover"
+git -C "$HOME/src/repoprover" checkout --detach "$REPOPROVER_SHA"
+git -C "$HOME/src/repoprover" remote set-url --push origin DISABLED
+```
+
+If the path already exists, do not clone into it or check out a commit over it.
+Inspect it first:
+
+```bash
+git -C "$HOME/src/repoprover" status --short
+git -C "$HOME/src/repoprover" rev-parse HEAD
+```
+
+Preserve any existing work. If that checkout is not clean and at the exact
+tested SHA, create a separate checkout and substitute its path below. After
+`scripts/install-dev.sh`, `$HOME/.local/bin` contains a bootstrapped `uv` when
+one was needed; adding it to `PATH` also preserves any pre-existing `uv` later
+on the path:
+
+```bash
+export PATH="$HOME/.venvs/proof-assistant/bin:$HOME/.local/bin:$PATH"
+uv --version
+uv pip install \
+  --python "$HOME/.venvs/proof-assistant/bin/python" \
+  -e "$HOME/src/repoprover"
+```
+
+This checkout is an integration dependency only. Never modify or push to it,
+and never open or prepare a pull request against
+`facebookresearch/repoprover` as part of installing Proof Assistant. The fresh
+checkout block disables its `origin` push URL as an additional guard.
+
 ## Validate the installation
 
 ```bash
 proof-assistant --version
 proof-assistant compiler-check
 proof-assistant cache doctor
-proof-assistant doctor
-proof-assistant models
 proof-assistant ai status
 ```
 
-`compiler-check` must report that the probe compiled and ran. `doctor` and the
-top-level `models` command are Codex-specific compatibility diagnostics.
-`ai status` is the provider-neutral readiness check and prints no credential
-values.
+`compiler-check` must report that the probe compiled and ran. `ai status` is
+the provider-neutral readiness check and prints no credential values. Check a
+particular configured driver with:
+
+```bash
+proof-assistant ai status --driver DRIVER
+```
+
+Only Codex users need the Codex compatibility diagnostics:
+
+```bash
+proof-assistant doctor
+proof-assistant models
+```
 
 Launch the interface with either form:
 
@@ -207,21 +259,6 @@ On first project creation, select the external source folder and then its main
 LaTeX file. A sole `.tex`/`.ltx` file is announced and adopted automatically;
 several candidates require an explicit selection. The managed project persists
 that root and resolves its recursive `\input`/`\include` closure.
-
-## RepoProver integration checkout
-
-Keep the integration checkout outside Dropbox, for example at
-`$HOME/src/repoprover`, and install the exact tested checkout into the same
-environment when required:
-
-```bash
-uv pip install \
-  --python "$HOME/.venvs/proof-assistant/bin/python" \
-  -e "$HOME/src/repoprover"
-```
-
-Do not modify, push to, or open a pull request against
-`facebookresearch/repoprover` as part of installing this package.
 
 ## Upgrade
 

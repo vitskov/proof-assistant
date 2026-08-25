@@ -179,14 +179,13 @@ def _bootstrap_harness(
             "FAKE_UV_TEMPLATE": str(installed_template),
             "PROOF_ASSISTANT_VENV": str(home / ".venvs/proof-assistant"),
             "PROOF_ASSISTANT_CACHE_HOME": str(home / ".cache/repoprover-codex"),
+            "PROOF_ASSISTANT_UV_INSTALL_DIR": str(install_dir),
             # Bootstrap tests exercise uv discovery, not the hardware gate;
             # relax the floor so they pass regardless of the test host's specs.
             "PROOF_ASSISTANT_MIN_CPU_CORES": "1",
             "PROOF_ASSISTANT_MIN_MEMORY_GIB": "1",
         }
     )
-    if custom_install_dir is not None:
-        env["PROOF_ASSISTANT_UV_INSTALL_DIR"] = str(custom_install_dir)
     result = subprocess.run(
         [str(INSTALLER)], text=True, capture_output=True, check=False, env=env
     )

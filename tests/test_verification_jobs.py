@@ -11,6 +11,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from proof_assistant.ai import DriverId, ProviderConfig
+from proof_assistant.ai.config import MachineProviderConfigStore
 from proof_assistant.cli import build_parser
 from proof_assistant.incremental.locking import (
     acquire_worker_lease,
@@ -38,7 +40,9 @@ from proof_assistant.workflow.service import (
 from proof_assistant.workspace.management import ProjectManager
 
 
-def _workflow(tmp_path: Path) -> tuple[ProofAssistantWorkflow, Path]:
+def _workflow(
+    tmp_path: Path, *, provider_config_path: Path | None = None
+) -> tuple[ProofAssistantWorkflow, Path]:
     source = tmp_path / "source"
     source.mkdir()
     (source / "main.tex").write_text(
@@ -52,6 +56,7 @@ def _workflow(tmp_path: Path) -> tuple[ProofAssistantWorkflow, Path]:
     service = ProofAssistantWorkflow(
         catalog_root=tmp_path / "catalog",
         machine_config_path=tmp_path / "settings.yaml",
+        provider_config_path=provider_config_path,
         use_codex_clarification=False,
     )
     # These tests exercise detached-worker and mutation-lease behavior, not the
@@ -93,7 +98,12 @@ def test_start_is_detached_idempotent_and_conflicts_on_different_request(
 ):
     credential_sentinel = "must-not-appear-in-persisted-worker-command"
     monkeypatch.setenv("OPENAI_API_KEY", credential_sentinel)
-    service, project = _workflow(tmp_path)
+    provider_config = tmp_path / "separate-provider-state" / "selected.json"
+    provider_store = MachineProviderConfigStore(provider_config)
+    provider_store.save(
+        ProviderConfig(primary_driver=DriverId.ANTHROPIC_API), expected_revision=0
+    )
+    service, project = _workflow(tmp_path, provider_config_path=provider_config)
     processes = _FakeDetachedProcesses()
     monkeypatch.setattr(service, "plan_changes", lambda _project: None)
     monkeypatch.setattr(
@@ -124,6 +134,19 @@ def test_start_is_detached_idempotent_and_conflicts_on_different_request(
         assert Path(command[catalog_index + 1]) == service.catalog.path
         settings_index = command.index("--machine-config-file")
         assert Path(command[settings_index + 1]) == service._machine_config_store.path
+        provider_index = command.index("--provider-config-file")
+        assert Path(command[provider_index + 1]) == provider_config.resolve()
+        detached = ProofAssistantWorkflow(
+            catalog_root=tmp_path / "detached-catalog",
+            machine_config_path=Path(command[settings_index + 1]),
+            provider_config_path=Path(command[provider_index + 1]),
+            use_codex_clarification=False,
+        )
+        assert detached._provider_service.config_store.path == provider_config.resolve()
+        assert (
+            detached._provider_service.config_store.load().config.primary_driver
+            is DriverId.ANTHROPIC_API
+        )
         assert first.job.launch_command == command
         assert credential_sentinel not in command
         assert credential_sentinel not in first.job.launch_command
@@ -154,6 +177,7 @@ def test_hidden_worker_cli_consumes_explicit_state_paths(tmp_path, monkeypatch):
     )
     catalog = tmp_path / "catalog" / "projects.json"
     settings = tmp_path / "config" / "settings.yaml"
+    providers = tmp_path / "provider-config" / "providers.json"
     project = tmp_path / "project"
     args = build_parser().parse_args(
         [
@@ -168,13 +192,49 @@ def test_hidden_worker_cli_consumes_explicit_state_paths(tmp_path, monkeypatch):
             str(catalog),
             "--machine-config-file",
             str(settings),
+            "--provider-config-file",
+            str(providers),
         ]
     )
 
     assert args.func(args) == 17
     assert captured["kwargs"]["catalog_root"] == catalog.resolve()
     assert captured["kwargs"]["machine_config_path"] == settings.resolve()
+    assert captured["kwargs"]["provider_config_path"] == providers.resolve()
     assert captured["call"] == (project.resolve(), "job-1", 19)
+
+
+def test_hidden_worker_cli_preserves_legacy_provider_path_fallback(
+    tmp_path, monkeypatch
+):
+    captured = {}
+
+    class FakeWorkflow:
+        def __init__(self, **kwargs):
+            captured["kwargs"] = kwargs
+
+        def _run_verification_job(self, project, job_id, lease_fd):
+            return 0
+
+    monkeypatch.setattr(
+        "proof_assistant.workflow.service.ProofAssistantWorkflow", FakeWorkflow
+    )
+    args = build_parser().parse_args(
+        [
+            "_project-worker",
+            "--project",
+            str(tmp_path / "project"),
+            "--job-id",
+            "job-legacy",
+            "--lease-fd",
+            "19",
+            "--machine-config-file",
+            str(tmp_path / "config" / "settings.yaml"),
+        ]
+    )
+
+    assert args.func(args) == 0
+    assert captured["kwargs"]["provider_config_path"] is None
 
 
 def test_concurrent_equivalent_submissions_spawn_exactly_one_worker(

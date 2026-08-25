@@ -127,7 +127,8 @@ therefore reports authentication as **unknown** and does not consume quota.
 The **Verify Copilot account** action is separate, cancel-first, and explains
 that it sends one tiny, no-tools request. The equivalent CLI operation sends
 nothing unless `--yes` is present. A successful result is associated with the
-installed Copilot CLI version and is rechecked after that version changes.
+installed Copilot CLI version. After that version changes, readiness returns to
+**unknown** until the user explicitly approves a new tiny account probe.
 
 ## Installing a missing CLI
 

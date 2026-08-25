@@ -2113,6 +2113,8 @@ class ProofAssistantWorkflow:
                         str(self.catalog.path),
                         "--machine-config-file",
                         str(self._machine_config_store.path),
+                        "--provider-config-file",
+                        str(self._provider_service.config_store.path),
                     )
                 )
                 try:

@@ -13,10 +13,10 @@ made no OpenAI, Anthropic, or Gemini API request.
 
 | Gate | Result |
 |---|---|
-| supported disposable installer | **passed**; **550 tests passed in 154.45 seconds** |
-| complete automated suite | **passed independently**; **550 tests passed in 159.16 seconds** |
-| provider security tests | **32 passed**; included in the 550-test suite |
-| provider TUI tests | **6 passed**; included in the 550-test suite |
+| supported disposable installer | **passed**; **551 tests passed in 162.10 seconds** |
+| complete automated suite | **passed independently**; **551 tests passed in 162.36 seconds** |
+| provider security tests | **32 passed**; included in the 551-test suite |
+| provider TUI tests | **6 passed**; included in the 551-test suite |
 | Ruff lint and format | **passed** |
 | strict mypy | **passed**; 72 source files |
 | Python `compileall` | **passed** |
@@ -282,13 +282,15 @@ failed closed unless no external tools or enabled skills remained exposed.
 The supported installer ran in a disposable location outside Dropbox with
 Python 3.13.15 and uv 0.9.26. It installed the editable development package and
 test dependencies, compiled and executed its native C preflight with
-`/usr/bin/clang`, initialized the managed cache, and completed all 550 tests in
-154.45 seconds. Ruff lint/format, strict mypy over 72 source files, Python
+`/usr/bin/clang`, initialized the managed cache, and completed all 551 tests in
+162.10 seconds. Ruff lint/format, strict mypy over 72 source files, Python
 `compileall`, and `git diff --check` also passed. A separate final full-suite
-run completed all 550 tests in 159.16 seconds.
+run completed all 551 tests in 162.36 seconds.
 
 No real AI turn or API request was part of this installer acceptance. No new
-final release commit SHA is recorded in this pre-commit report.
+final release commit SHA is assigned by this report; the validated test counts
+and artifact hashes identify the tested state without describing it as
+uncommitted.
 
 The final wheel and source distribution were built with `uv` outside the
 repository. The wheel was installed into a fresh external CPython 3.13.15
@@ -301,8 +303,8 @@ environments, caches, or machine-private files.
 
 | Artifact | SHA-256 |
 |---|---|
-| `proof_assistant-0.1.0-py3-none-any.whl` | `0607712c201e4db98fa0782b9208c8a93eaeb0fe78abc51e9540cec6376c0e2d` |
-| `proof_assistant-0.1.0.tar.gz` | `97002d9a3f3ce383a77ca2f0116566825ca7ac514c539f5db8062c26648ae46d` |
+| `proof_assistant-0.1.0-py3-none-any.whl` | `919341bf0cf50e5bd84048de5cb9ff1932927c86fdeab37af7834734130c30a7` |
+| `proof_assistant-0.1.0.tar.gz` | `ded691c0acf8e0549ed6056c3849a00e43d00fc0be8f9c6e607a24f600cc4e6c` |
 
 ### Earlier 2026-08-23 package acceptance
 

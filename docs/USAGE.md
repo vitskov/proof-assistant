@@ -148,7 +148,7 @@ preserves the selected main file.
 The progress screen always identifies the persisted main file and lists every
 resolved `\input`/`\include` file in its manuscript closure. It reports detailed
 phases, substage messages, and claim counts rather than flooding the terminal
-with raw Lean and Codex logs.
+with raw Lean and AI-provider logs.
 
 The stage pane displays the complete typed pipeline with pending, active, and
 done status: validation, stable source observation, source import, indexing,
@@ -167,7 +167,7 @@ deciding which screen to show.
 
 ### What “Request cooperative cancellation” preserves
 
-Cancellation is cooperative, so an active Codex/Lean batch is allowed to stop
+Cancellation is cooperative, so an active AI/Lean batch is allowed to stop
 at a host-controlled boundary. If cancellation is already requested when the
 workers return, their temporary candidates are discarded before merge. If a
 merge has begun, Proof Assistant finishes that round's independent Lean build
@@ -242,7 +242,7 @@ The clarification screen displays:
 - the blocked portion of the proof tree.
 
 The deterministic backend chooses the source file, byte/line span, quotation,
-claim, diagnostics, and affected graph. An isolated Codex presentation pass may
+claim, diagnostics, and affected graph. An isolated AI presentation pass may
 make the wording clearer, but cannot change those facts. Invalid presentation
 output falls back to a deterministic explanation.
 
