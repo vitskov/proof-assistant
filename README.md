@@ -32,9 +32,12 @@ introduced project axiom.
 
 ## Quick start
 
-Requirements: macOS or Linux, Python 3.13, `uv`, Git, Lean/Lake, a native C
-compiler, an authenticated Codex CLI, and the tested RepoProver checkout. See
-[Installation](docs/INSTALLATION.md) for details.
+Requirements: macOS 12+ (Intel or Apple Silicon) or Linux with glibc 2.31+, at
+least 4 CPU cores and 16 GiB RAM (8+ cores / 32+ GiB recommended), Python
+3.13, `uv`, Git, Lean/Lake, a native C compiler, an authenticated Codex CLI,
+and the tested RepoProver checkout. The installer enforces the OS/CPU/memory
+floor before it downloads or builds anything. See
+[Installation](docs/INSTALLATION.md#system-requirements) for details.
 
 ```bash
 git clone https://github.com/vitskov/proof-assistant.git "$HOME/src/proof-assistant"

@@ -9,6 +9,72 @@ cache_home="${PROOF_ASSISTANT_CACHE_HOME:-${REPOPROVER_CODEX_CACHE_HOME:-${HOME}
 python_spec="${PROOF_ASSISTANT_PYTHON:-${REPOPROVER_CODEX_PYTHON:-3.13}}"
 uv_install_dir="${PROOF_ASSISTANT_UV_INSTALL_DIR:-${HOME}/.local/bin}"
 
+# Hardware/OS floor for local Lean/Mathlib builds. Override only for a site
+# policy that has verified its own hardware; do not lower these to work
+# around a genuinely underpowered machine.
+min_cpu_cores="${PROOF_ASSISTANT_MIN_CPU_CORES:-4}"
+min_memory_gib="${PROOF_ASSISTANT_MIN_MEMORY_GIB:-16}"
+recommended_cpu_cores=8
+recommended_memory_gib=32
+
+os_name="$(uname -s)"
+os_release="$(uname -r)"
+cpu_cores=0
+memory_bytes=0
+
+case "${os_name}" in
+  Darwin)
+    # Darwin 21.x is macOS 12 Monterey, the oldest release this project
+    # supports on both Intel and Apple Silicon Macs.
+    darwin_major="${os_release%%.*}"
+    if [[ "${darwin_major}" -lt 21 ]]; then
+      echo "ERROR: macOS 12 Monterey (Darwin 21) or newer is required; detected Darwin ${os_release}" >&2
+      exit 2
+    fi
+    cpu_cores="$(sysctl -n hw.physicalcpu 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 0)"
+    memory_bytes="$(sysctl -n hw.memsize 2>/dev/null || echo 0)"
+    ;;
+  Linux)
+    glibc_version="$(getconf GNU_LIBC_VERSION 2>/dev/null | awk '{print $2}' || true)"
+    if [[ -n "${glibc_version}" ]]; then
+      glibc_major="${glibc_version%%.*}"
+      glibc_minor="${glibc_version#*.}"
+      glibc_minor="${glibc_minor%%.*}"
+      if [[ "${glibc_major}" -lt 2 ]] \
+        || { [[ "${glibc_major}" -eq 2 ]] && [[ "${glibc_minor}" -lt 31 ]]; }; then
+        echo "ERROR: glibc 2.31 (Ubuntu 20.04-equivalent) or newer is required; detected glibc ${glibc_version}" >&2
+        exit 2
+      fi
+    fi
+    cpu_cores="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 0)"
+    memory_bytes="$(awk '/^MemTotal:/ { print $2 * 1024 }' /proc/meminfo 2>/dev/null || echo 0)"
+    ;;
+  *)
+    echo "ERROR: Unsupported operating system: ${os_name}. Proof Assistant supports macOS and Linux only." >&2
+    exit 2
+    ;;
+esac
+
+cpu_cores="${cpu_cores:-0}"
+memory_bytes="${memory_bytes:-0}"
+
+if [[ "${cpu_cores}" -lt "${min_cpu_cores}" ]]; then
+  echo "ERROR: at least ${min_cpu_cores} CPU cores are required; detected ${cpu_cores}" >&2
+  exit 2
+fi
+
+memory_gib=$(( memory_bytes / 1024 / 1024 / 1024 ))
+if [[ "${memory_gib}" -lt "${min_memory_gib}" ]]; then
+  echo "ERROR: at least ${min_memory_gib} GiB of RAM is required; detected ${memory_gib} GiB" >&2
+  exit 2
+fi
+
+echo "System check: ${os_name} ${os_release}, ${cpu_cores} CPU cores, ${memory_gib} GiB RAM"
+if [[ "${cpu_cores}" -lt "${recommended_cpu_cores}" ]] \
+  || [[ "${memory_gib}" -lt "${recommended_memory_gib}" ]]; then
+  echo "NOTE: ${recommended_cpu_cores}+ CPU cores and ${recommended_memory_gib}+ GiB RAM are recommended for faster Lean/Mathlib builds." >&2
+fi
+
 case "${venv_path}" in
   *[Dd][Rr][Oo][Pp][Bb][Oo][Xx]*)
     echo "ERROR: Python environments must not reside in Dropbox: ${venv_path}" >&2

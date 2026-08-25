@@ -1,5 +1,34 @@
 # Installation
 
+## System requirements
+
+The installer refuses to run on hardware or an OS below these floors, before
+downloading or building anything:
+
+| Resource | Minimum        | Recommended     |
+| -------- | -------------- | ---------------- |
+| OS       | macOS 12 Monterey (Darwin 21) or newer, on Intel or Apple Silicon; or Linux with glibc 2.31+ (Ubuntu 20.04-equivalent) | Latest macOS or Ubuntu LTS |
+| CPU      | 4 physical cores | 8+ physical cores |
+| Memory   | 16 GiB RAM       | 32+ GiB RAM       |
+| Disk     | 25 GiB free (see [cache disk policy](CACHE_AND_STORAGE.md#disk-policy)) | more, for larger caches |
+
+Lean/Mathlib builds are memory- and CPU-heavy; hardware at the minimum floor
+works but compiles more slowly and supports less build concurrency (see
+[Concurrency](CONCURRENCY.md)). Intel Macs remain fully supported: Lean 4 and
+`uv` both still ship Intel builds, but Apple only security-patches macOS
+13/14/15 on Intel hardware going forward (macOS 26 "Tahoe" dropped Intel
+support), so Intel users should expect to be capped at macOS 15 Sequoia.
+
+Override the CPU/memory floor only for a site policy that has verified its
+own hardware:
+
+```bash
+export PROOF_ASSISTANT_MIN_CPU_CORES=4    # default: 4
+export PROOF_ASSISTANT_MIN_MEMORY_GIB=16  # default: 16
+```
+
+The OS/kernel floor (Darwin 21 / glibc 2.31) is not configurable.
+
 ## Required software
 
 Proof Assistant supports macOS and Linux local execution. Install:
