@@ -448,14 +448,19 @@ def cmd_cache_prepare(args: argparse.Namespace) -> int:
         layout.create()
         config = layout.load_config()
         if config is None:
-            config, _check = initialize_cache(layout)
+            config, _check = initialize_cache(layout, cwd=project)
         if args.lean_cc:
-            os.environ["LEAN_CC"] = args.lean_cc
-        compiler = configure_lean_runtime()
-        if config.lean_cc != compiler.executable:
+            layout.apply_runtime_environment(lean_cc=args.lean_cc)
+        else:
+            layout.apply_runtime_environment(lean_cc=config.lean_cc)
+        compiler = configure_lean_runtime(cwd=project)
+        if (
+            config.compiler_executable != compiler.executable
+            or config.lean_cc != compiler.lean_cc
+        ):
             config = layout.record_compiler(compiler)
         runtime_env = layout.runtime_environment(
-            os.environ, lean_cc=compiler.executable
+            os.environ, lean_cc=compiler.lean_cc
         )
         concurrency = _concurrency_spec(args, project=project).create()
         key = dependency_cache_key(project, env=runtime_env)
@@ -600,9 +605,10 @@ def cmd_repoprover_prove(args: argparse.Namespace) -> int:
         cache_layout = _cache_layout(args)
         cache_layout.create()
         cache_config = cache_layout.load_config()
-        cache_layout.apply_runtime_environment(
-            lean_cc=cache_config.lean_cc if cache_config else None
-        )
+        if cache_config is None:
+            cache_layout.apply_runtime_environment()
+        else:
+            cache_layout.apply_runtime_environment(lean_cc=cache_config.lean_cc)
         ensure_project_cache_managed(project, cache_layout)
     except CacheLocationError as exc:
         print("OUTCOME: tool_failure", file=sys.stderr)
@@ -612,15 +618,19 @@ def cmd_repoprover_prove(args: argparse.Namespace) -> int:
     if args.lean_cc:
         os.environ["LEAN_CC"] = args.lean_cc
     try:
-        compiler = configure_lean_runtime()
+        compiler = configure_lean_runtime(cwd=project)
     except EnvironmentCheckError as exc:
         print("OUTCOME: tool_failure", file=sys.stderr)
         print(f"ERROR: Lean compiler preflight failed: {exc}", file=sys.stderr)
         return 5
-    if cache_config is None or cache_config.lean_cc != compiler.executable:
+    if (
+        cache_config is None
+        or cache_config.compiler_executable != compiler.executable
+        or cache_config.lean_cc != compiler.lean_cc
+    ):
         cache_layout.record_compiler(compiler)
     runtime_env = cache_layout.runtime_environment(
-        os.environ, lean_cc=compiler.executable
+        os.environ, lean_cc=compiler.lean_cc
     )
     dependency_target = dependency_depot_target(
         cache_layout,
@@ -798,18 +808,23 @@ def cmd_manuscript_run(args: argparse.Namespace) -> int:
     try:
         cache_layout.create()
         cache_config = cache_layout.load_config()
-        cache_layout.apply_runtime_environment(
-            lean_cc=cache_config.lean_cc if cache_config else None
-        )
+        if cache_config is None:
+            cache_layout.apply_runtime_environment()
+        else:
+            cache_layout.apply_runtime_environment(lean_cc=cache_config.lean_cc)
 
         if args.lean_cc:
             os.environ["LEAN_CC"] = args.lean_cc
-        compiler = configure_lean_runtime()
-        if cache_config is None or cache_config.lean_cc != compiler.executable:
+        compiler = configure_lean_runtime(cwd=paths.workspace)
+        if (
+            cache_config is None
+            or cache_config.compiler_executable != compiler.executable
+            or cache_config.lean_cc != compiler.lean_cc
+        ):
             cache_layout.record_compiler(compiler)
         runtime_env = cache_layout.runtime_environment(
             os.environ,
-            lean_cc=compiler.executable,
+            lean_cc=compiler.lean_cc,
         )
         concurrency = _concurrency_spec(args, project=paths.workspace).create()
         policy = cache_policy(cache_layout.load_config())

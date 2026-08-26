@@ -115,6 +115,67 @@ def test_terminal_run_status_cannot_be_replaced_by_cleanup_progress(tmp_path):
     assert _run_status_is_terminal(status)
 
 
+def test_cache_prepare_reuses_persisted_external_compiler(monkeypatch, tmp_path):
+    import proof_assistant.cli as cli
+    from proof_assistant.cache import CacheLocationError
+    from proof_assistant.environment import CompilerCheck
+
+    project = tmp_path / "project"
+    project.mkdir()
+    compiler = "/opt/proof-assistant-toolchain/bin/cc"
+    config = SimpleNamespace(
+        compiler_executable=compiler,
+        lean_cc=compiler,
+    )
+    recorded: list[CompilerCheck] = []
+
+    class FakeLayout:
+        def create(self):
+            return None
+
+        def load_config(self):
+            return config
+
+        def apply_runtime_environment(self, *, lean_cc):
+            assert lean_cc == compiler
+            cli.os.environ["LEAN_CC"] = lean_cc
+
+        def record_compiler(self, check):
+            recorded.append(check)
+            return config
+
+        def runtime_environment(self, base, *, lean_cc):
+            assert lean_cc == compiler
+            return dict(base)
+
+    def fake_configure(*, cwd):
+        assert cwd == project
+        assert cli.os.environ["LEAN_CC"] == compiler
+        return CompilerCheck(
+            executable=compiler,
+            lean_cc=compiler,
+            lean_compiler=False,
+            fallback_used=False,
+        )
+
+    monkeypatch.setattr(cli, "_cache_layout", lambda _args: FakeLayout())
+    monkeypatch.setattr(cli, "configure_lean_runtime", fake_configure)
+    monkeypatch.setattr(
+        cli,
+        "_concurrency_spec",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            CacheLocationError("stop after compiler selection")
+        ),
+    )
+
+    result = cli.cmd_cache_prepare(
+        SimpleNamespace(project=str(project), lean_cc=None)
+    )
+
+    assert result == 2
+    assert recorded == []
+
+
 def test_ai_status_for_one_driver_does_not_probe_every_provider(
     monkeypatch, capsys, tmp_path
 ):

@@ -183,25 +183,64 @@ def test_runtime_environment_routes_supported_cache_variables(monkeypatch, tmp_p
     assert env["LEAN_CC"] == "/usr/bin/clang"
 
 
+def test_runtime_environment_preserves_ambient_lean_cc_when_omitted(tmp_path):
+    layout = layout_for(tmp_path)
+
+    env = layout.runtime_environment({"LEAN_CC": "/ambient/cc"})
+
+    assert env["LEAN_CC"] == "/ambient/cc"
+
+
+def test_runtime_environment_removes_ambient_lean_cc_when_explicitly_none(tmp_path):
+    layout = layout_for(tmp_path)
+
+    env = layout.runtime_environment({"LEAN_CC": "/ambient/cc"}, lean_cc=None)
+
+    assert "LEAN_CC" not in env
+
+
+def test_apply_runtime_environment_removes_ambient_lean_cc_when_explicitly_none(
+    tmp_path,
+):
+    layout = layout_for(tmp_path)
+    env = {"LEAN_CC": "/ambient/cc"}
+
+    layout.apply_runtime_environment(env, lean_cc=None)
+
+    assert "LEAN_CC" not in env
+
+
 def test_initialize_creates_layout_and_records_compiler(monkeypatch, tmp_path):
     layout = layout_for(tmp_path)
     expected = CompilerCheck(
         executable="/usr/bin/clang",
+        lean_cc="/usr/bin/clang",
         lean_compiler=True,
         fallback_used=True,
     )
     monkeypatch.setattr(cache, "ensure_lean_on_path", lambda env: False)
-    monkeypatch.setattr(cache, "select_native_compiler", lambda env: expected)
+    project = tmp_path / "project"
+    seen_cwd: list[Path | None] = []
 
-    config, check = cache.initialize_cache(layout, env={"PATH": "/usr/bin"})
+    def fake_select(_env, *, cwd=None):
+        seen_cwd.append(cwd)
+        return expected
+
+    monkeypatch.setattr(cache, "select_native_compiler", fake_select)
+
+    config, check = cache.initialize_cache(
+        layout, env={"PATH": "/usr/bin"}, cwd=project
+    )
 
     assert check == expected
     assert all(directory.is_dir() for directory in layout.directories)
     assert config.cache_root == str(layout.root)
+    assert config.compiler_executable == "/usr/bin/clang"
     assert config.lean_cc == "/usr/bin/clang"
+    assert seen_cwd == [project]
     assert layout.load_config() == config
     raw = json.loads(layout.config_path.read_text())
-    assert raw["schema_version"] == 2
+    assert raw["schema_version"] == 3
     assert raw["max_bytes"] == 16 * 1024**3
     assert raw["min_free_bytes"] == 25 * 1024**3
     assert list(layout.root.glob("config-*.json.tmp")) == []
@@ -224,6 +263,73 @@ def test_config_with_different_root_fails_closed(tmp_path):
     )
     with pytest.raises(CacheLocationError, match="does not match"):
         layout.load_config()
+
+
+@pytest.mark.parametrize("schema_version", [1, 2])
+def test_old_config_migrates_bundled_lean_clang_to_no_override(
+    tmp_path, schema_version
+):
+    layout = layout_for(tmp_path)
+    layout.create()
+    prefix = tmp_path / "toolchains" / "lean"
+    compiler = prefix / "bin" / "clang"
+    compiler.parent.mkdir(parents=True)
+    compiler.touch()
+    (compiler.parent / "leanc").touch()
+    lean_header = prefix / "include" / "lean" / "lean.h"
+    lean_header.parent.mkdir(parents=True)
+    lean_header.touch()
+    raw = {
+        "schema_version": schema_version,
+        "cache_root": str(layout.root),
+        "filesystem_type": "apfs",
+        "lean_cc": str(compiler),
+        "lean_compiler": True,
+        "compiler_fallback_used": False,
+    }
+    if schema_version == 2:
+        raw.update(max_bytes=123, min_free_bytes=456)
+    layout.config_path.write_text(json.dumps(raw))
+
+    config = layout.load_config()
+
+    assert config is not None
+    assert config.schema_version == 3
+    assert config.compiler_executable == str(compiler)
+    assert config.lean_cc is None
+    assert config.max_bytes == (
+        123 if schema_version == 2 else int(cache.DEFAULT_CACHE_MAX_GB * 1024**3)
+    )
+    assert config.min_free_bytes == (
+        456 if schema_version == 2 else int(cache.DEFAULT_MIN_FREE_GB * 1024**3)
+    )
+    assert json.loads(layout.config_path.read_text())["schema_version"] == schema_version
+
+
+@pytest.mark.parametrize("schema_version", [1, 2])
+def test_old_config_migration_preserves_external_compiler(tmp_path, schema_version):
+    layout = layout_for(tmp_path)
+    layout.create()
+    external = tmp_path / "opt" / "bin" / "clang"
+    external.parent.mkdir(parents=True)
+    external.touch()
+    raw = {
+        "schema_version": schema_version,
+        "cache_root": str(layout.root),
+        "filesystem_type": "apfs",
+        "lean_cc": str(external),
+        "lean_compiler": False,
+        "compiler_fallback_used": True,
+    }
+    if schema_version == 2:
+        raw.update(max_bytes=123, min_free_bytes=456)
+    layout.config_path.write_text(json.dumps(raw))
+
+    config = layout.load_config()
+
+    assert config is not None
+    assert config.compiler_executable == str(external)
+    assert config.lean_cc == str(external)
 
 
 def test_attach_moves_existing_lake_tree_and_leaves_symlink(tmp_path):
@@ -366,18 +472,14 @@ def test_dependency_key_reuses_compatible_projects_and_tracks_compiler(tmp_path)
     first = _lean_project(tmp_path / "first")
     second = _lean_project(tmp_path / "second")
 
-    first_key = cache.dependency_cache_key(first, env={"LEAN_CC": "/usr/bin/clang"})
-    assert first_key == cache.dependency_cache_key(
-        second, env={"LEAN_CC": "/usr/bin/clang"}
-    )
+    first_key = cache.dependency_cache_key(first, env={})
+    assert first_key == cache.dependency_cache_key(second, env={})
     assert first_key != cache.dependency_cache_key(
-        second, env={"LEAN_CC": "/opt/other/clang"}
+        second, env={"LEAN_CC": "/usr/bin/clang"}
     )
 
     (second / "lean-toolchain").write_text("leanprover/lean4:v4.29.0\n")
-    assert first_key != cache.dependency_cache_key(
-        second, env={"LEAN_CC": "/usr/bin/clang"}
-    )
+    assert first_key != cache.dependency_cache_key(second, env={})
 
 
 def test_dependency_key_ignores_project_only_lake_configuration(tmp_path):

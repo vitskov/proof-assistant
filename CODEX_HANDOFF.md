@@ -29,6 +29,9 @@ provider settings    $HOME/.config/proof-assistant/providers.json
 
 The cache name intentionally does not follow the product rename. Reusing it
 prevents duplication of the shared multi-gigabyte Mathlib dependency depot.
+Cache schema 3 separates the discovered compiler identity from the optional
+`LEAN_CC` override. Schema-1/2 records that point at Lean's bundled raw clang
+migrate to an unset override; external compiler overrides remain explicit.
 
 ## Non-negotiable rules
 
@@ -38,6 +41,8 @@ prevents duplication of the shared multi-gigabyte Mathlib dependency depot.
 - External manuscript sources may be in Dropbox; warn and use stable staged
   import.
 - Every installer must compile and execute a native test program.
+- Validate the bundled Lean toolchain through `leanc` with `LEAN_CC` unset.
+  Set `LEAN_CC` only for a separately validated external compiler override.
 - CLI authentication stays inside Codex, Claude Code, or Copilot CLI. Never
   read/print provider auth files or turn a subscription credential into an API
   key.

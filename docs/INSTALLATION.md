@@ -70,6 +70,11 @@ dependencies, compiles **and executes** a native test program, initializes the
 managed cache, and runs the test suite. A compiler-name lookup alone never
 counts as a successful installation.
 
+The compiler preflight also compiles a Lean-header translation unit through
+`leanc`. On both macOS and Linux, Proof Assistant leaves `LEAN_CC` unset when
+using Lean's bundled toolchain so Lean can supply its required sysroot, header,
+and linker flags. `LEAN_CC` is reserved for a validated external compiler.
+
 If no working uv is available, the installer:
 
 1. downloads `https://astral.sh/uv/install.sh` with `curl`, falling back to
@@ -201,9 +206,9 @@ proof-assistant cache doctor
 proof-assistant ai status
 ```
 
-`compiler-check` must report that the probe compiled and ran. `ai status` is
-the provider-neutral readiness check and prints no credential values. Check a
-particular configured driver with:
+`compiler-check` must report that the standard C, Lean-header, and execution
+probes succeeded. `ai status` is the provider-neutral readiness check and
+prints no credential values. Check a particular configured driver with:
 
 ```bash
 proof-assistant ai status --driver DRIVER

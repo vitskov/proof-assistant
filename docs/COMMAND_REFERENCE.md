@@ -129,7 +129,10 @@ proof-assistant models
 proof-assistant smoke --model MODEL --effort EFFORT
 ```
 
-- `compiler-check` compiles and executes a native C program.
+- `compiler-check` compiles a standard-header and Lean-header probe, then
+  executes a native C program. Lean's bundled toolchain is driven through
+  `leanc` with `LEAN_CC` unset; an explicit or fallback compiler is validated
+  before it is exported to Lake.
 - `doctor` checks Codex app-server initialization and model listing.
 - top-level `models` prints Codex model IDs and supported reasoning effort;
   use `ai models DRIVER` for provider-neutral setup.

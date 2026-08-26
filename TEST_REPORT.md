@@ -1,6 +1,34 @@
 # Test report — Proof Assistant 0.1.0
 
-Current provider revision tested on 2026-08-25 in `America/New_York`.
+Current compiler-integration revision tested on 2026-08-26 in
+`America/New_York`. The provider-only acceptance result below is the preceding
+2026-08-25 snapshot.
+
+## 2026-08-26 Lean compiler integration repair
+
+The compiler preflight now validates Lean's actual native compilation path.
+For the bundled Lean toolchain, Proof Assistant invokes `leanc` with `LEAN_CC`
+unset; a user-supplied external compiler remains an explicit override only
+after it passes both a native standard-header probe and a Lean-header probe.
+Cache schema 3 records the discovered compiler separately from the optional
+override and migrates older bundled-clang records to the safe unset state.
+
+| Gate | Result |
+|---|---|
+| focused compiler/cache/CLI tests | **68 passed in 3.33 seconds** |
+| complete automated suite | **564 passed in 119.68 seconds** |
+| Ruff lint | **passed** |
+| typing policy | **passed**; 94/98 explicit `Any` uses and 11 boundary modules `Any`-free |
+| strict mypy | **passed**; 72 source files |
+| Python `compileall` | **passed** |
+| source distribution and wheel build | **passed** with `uv build` |
+| real Lean compiler preflight | **passed in 0.63 seconds** with Lean 4.28.0 and `LEAN_CC` unset |
+| live cache migration and doctor | **passed**; schema 3 stores `lean_cc: null` for the bundled toolchain |
+| original `laplacians` project | **passed**; a cold schema-3 dependency depot completed `lake update` and `lake build`, then a project-scoped warm rerun reused it successfully |
+| platform CI contract | pinned Lean setup and compiler preflight added to both Ubuntu and macOS jobs |
+
+This repair validation made no provider request and did not run a
+provider-backed manuscript proof.
 
 ## 2026-08-25 provider revision result
 

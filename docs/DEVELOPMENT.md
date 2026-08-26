@@ -6,6 +6,10 @@
 - Keep Python environments and Lean/Lake/Mathlib caches outside Dropbox.
 - Keep managed Proof Assistant projects outside Dropbox.
 - Every installer must compile and execute a native test program.
+- Compiler validation must exercise standard headers and `lean/lean.h` through
+  `leanc`; never export Lean's bundled `bin/clang` as `LEAN_CC`.
+- Resolve Lean's toolchain from the target project's directory so its
+  `lean-toolchain` pin, not the caller's current directory, controls validation.
 - Never push to, open a pull request against, or create an issue in
   `facebookresearch/repoprover`.
 

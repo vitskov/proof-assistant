@@ -27,6 +27,11 @@ jobs:
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
           version: "0.12.0"
+      - name: Install pinned Lean toolchain
+        uses: leanprover/lean-action@50fcf42d2e460296f1a34b402e990d1b24f8b596 # v1
+        with:
+          auto-config: false
+          use-github-cache: false
 
       - name: Compile-and-execute compiler preflight
         shell: bash
@@ -41,6 +46,9 @@ jobs:
         run: |
           uv venv --python 3.13
           uv pip install --python .venv/bin/python -e ".[dev]"
+      - name: Validate Lean compiler integration
+        shell: bash
+        run: env -u LEAN_CC .venv/bin/proof-assistant compiler-check
       - name: Lint
         run: uv run --no-sync ruff check src tests scripts
       - name: Strict type check

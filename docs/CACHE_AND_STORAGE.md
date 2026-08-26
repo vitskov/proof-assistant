@@ -55,7 +55,8 @@ For the standard generated `lakefile.lean`, the dependency fingerprint includes:
 - `lean-toolchain` content;
 - normalized `require NAME from git "URL" @ "REV"` declarations;
 - operating system and architecture; and
-- the selected native compiler path.
+- any validated external `LEAN_CC` override. The default bundled compiler is
+  identified by `lean-toolchain` and runs with `LEAN_CC` unset.
 
 Project package names, `lean_lib` roots, and absolute workspace paths are not
 dependency inputs. A generated manuscript workspace and a small acceptance
@@ -196,6 +197,11 @@ proof-assistant cache doctor
 proof-assistant cache gc --gc-timeout 900
 proof-assistant cache prepare --project /absolute/path/to/project
 ```
+
+Cache configuration schema 3 records the validated compiler separately from
+the optional `LEAN_CC` override. Older configurations that stored Lean's own
+`bin/clang` as an override migrate to the safe bundled-toolchain default; real
+external overrides are preserved.
 
 `cache status` reports allocated managed bytes from the reconciled coarse index,
 the index path, and active reservations. It does not enumerate every Mathlib

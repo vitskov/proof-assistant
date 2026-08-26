@@ -122,9 +122,25 @@ proof-assistant ai status --driver DRIVER
 proof-assistant ai models DRIVER
 ```
 
-The compiler check must compile and execute a program. Select an exact
-model/difficulty advertised for the chosen driver. A `curated_fallback` catalog
-is not proof that the configured account can use those models.
+The compiler check must compile standard C and Lean headers and execute a native
+program. If verification reports `Required Lean setup failed: lake update`,
+inspect `$PROJECT/.repoprover/runs/RUN_ID/setup.log`; dependency resolution can
+succeed while a post-update native build fails.
+
+Do not set `LEAN_CC` to Lean's own `bin/clang`. That bypasses the internal flags
+normally supplied by `leanc` on both macOS and Linux. Repair a cache created by
+an older Proof Assistant release and prepare the project again with:
+
+```bash
+env -u LEAN_CC proof-assistant cache init
+proof-assistant cache prepare --project "$PROJECT"
+```
+
+Schema-1 and schema-2 cache configurations migrate automatically. A deliberate
+external compiler remains supported through `--lean-cc /absolute/path/to/cc`.
+Select an exact model/difficulty advertised for the chosen driver. A
+`curated_fallback` catalog is not proof that the configured account can use
+those models.
 
 For a CLI driver, run the native login command shown by `ai status` (`codex
 login`, `claude auth login`, or `copilot login`) and recheck. Proof Assistant

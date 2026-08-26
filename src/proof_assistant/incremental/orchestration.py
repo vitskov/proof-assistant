@@ -417,18 +417,30 @@ def _git(path: Path, arguments: Sequence[str], *, check: bool = True) -> str:
 
 
 def _runtime_environment(
-    layout: CacheLayout, lean_cc: str | None = None
+    layout: CacheLayout,
+    lean_cc: str | None = None,
+    *,
+    project: Path | None = None,
 ) -> tuple[dict[str, str], str]:
     layout.create()
     config = layout.load_config()
-    layout.apply_runtime_environment(lean_cc=config.lean_cc if config else None)
+    if lean_cc is not None:
+        layout.apply_runtime_environment(lean_cc=lean_cc)
+    elif config is not None:
+        layout.apply_runtime_environment(lean_cc=config.lean_cc)
+    else:
+        layout.apply_runtime_environment()
     if lean_cc:
         os.environ["LEAN_CC"] = lean_cc
-    compiler = configure_lean_runtime()
-    if config is None or config.lean_cc != compiler.executable:
+    compiler = configure_lean_runtime(cwd=project)
+    if (
+        config is None
+        or config.compiler_executable != compiler.executable
+        or config.lean_cc != compiler.lean_cc
+    ):
         layout.record_compiler(compiler)
     return (
-        layout.runtime_environment(os.environ, lean_cc=compiler.executable),
+        layout.runtime_environment(os.environ, lean_cc=compiler.lean_cc),
         compiler.executable,
     )
 
@@ -458,7 +470,7 @@ def _run_batch_worker(job: BatchJob) -> BatchResult:
     try:
         layout = CacheLayout.discover(job.options.cache_home)
         concurrency = job.options.concurrency.create()
-        runtime_env, _compiler = _runtime_environment(layout)
+        runtime_env, _compiler = _runtime_environment(layout, project=workspace)
         policy = cache_policy(layout.load_config())
         with managed_project_session(
             workspace,
@@ -896,7 +908,9 @@ def verify_project(
     ):
         prepared: PreparedPass | None = None
         try:
-            runtime_env, compiler = _runtime_environment(layout)
+            runtime_env, compiler = _runtime_environment(
+                layout, project=session.project
+            )
             notify(
                 "VALIDATING",
                 "Validated the Lean runtime and native compiler",
@@ -980,8 +994,10 @@ def verify_project(
                     None,
                 )
                 if failed:
+                    setup_log = run_directory / "setup.log"
                     setup_detail = (
-                        f"Required Lean setup failed: {' '.join(failed.argv)}"
+                        f"Required Lean setup failed: {' '.join(failed.argv)}; "
+                        f"see {setup_log}"
                     )
                     with StateStore(session.database_path) as store:
                         store.add_failure_incident(
@@ -996,7 +1012,7 @@ def verify_project(
                             retryable=True,
                             artifacts=(
                                 artifact_record(
-                                    run_directory / "setup.log",
+                                    setup_log,
                                     label="Lean setup log",
                                     command=failed.argv,
                                     exit_code=failed.returncode,

@@ -39,8 +39,8 @@ COLD_DEPOT_RESERVE_GB = 10.0
 WARM_PROJECT_RESERVE_GB = 1.0
 DEFAULT_GC_TIMEOUT_SECONDS = 900.0
 _GIB = 1024**3
-_CONFIG_SCHEMA = 2
-_DEPOT_SCHEMA = 2
+_CONFIG_SCHEMA = 3
+_DEPOT_SCHEMA = 3
 _BUILD_OWNERSHIP_SCHEMA = 1
 _BUILD_OWNERSHIP_MARKER = ".proof-assistant-build.json"
 _REMOTE_FILESYSTEM_MARKERS = (
@@ -56,6 +56,27 @@ _REMOTE_FILESYSTEM_MARKERS = (
 )
 
 
+class _UnsetLeanCc:
+    pass
+
+
+_UNSET_LEAN_CC = _UnsetLeanCc()
+
+
+def _is_lean_bundled_clang(executable: object) -> bool:
+    if not isinstance(executable, str):
+        return False
+    compiler = Path(executable)
+    if compiler.name != "clang" or compiler.parent.name != "bin":
+        return False
+    prefix = compiler.parent.parent
+    return (
+        compiler.is_file()
+        and (compiler.parent / "leanc").is_file()
+        and (prefix / "include" / "lean" / "lean.h").is_file()
+    )
+
+
 class CacheLocationError(RuntimeError):
     """Raised when a cache root violates the local-storage policy."""
 
@@ -69,7 +90,8 @@ class CacheConfig:
     schema_version: int
     cache_root: str
     filesystem_type: str
-    lean_cc: str
+    compiler_executable: str
+    lean_cc: str | None
     lean_compiler: bool
     compiler_fallback_used: bool
     max_bytes: int
@@ -273,13 +295,15 @@ class CacheLayout:
         self,
         base: Mapping[str, str] | None = None,
         *,
-        lean_cc: str | None = None,
+        lean_cc: str | None | _UnsetLeanCc = _UNSET_LEAN_CC,
     ) -> dict[str, str]:
         env = dict(os.environ if base is None else base)
         env["MATHLIB_CACHE_DIR"] = str(self.mathlib_downloads)
         env["LAKE_CACHE_DIR"] = str(self.lake_system)
         configure_portable_locale(env)
-        if lean_cc:
+        if lean_cc is None:
+            env.pop("LEAN_CC", None)
+        elif isinstance(lean_cc, str):
             env["LEAN_CC"] = lean_cc
         return env
 
@@ -287,9 +311,11 @@ class CacheLayout:
         self,
         target: MutableMapping[str, str] | None = None,
         *,
-        lean_cc: str | None = None,
+        lean_cc: str | None | _UnsetLeanCc = _UNSET_LEAN_CC,
     ) -> None:
         destination = os.environ if target is None else target
+        if lean_cc is None:
+            destination.pop("LEAN_CC", None)
         destination.update(self.runtime_environment(destination, lean_cc=lean_cc))
 
     def load_config(self) -> CacheConfig | None:
@@ -297,13 +323,22 @@ class CacheLayout:
             return None
         try:
             raw = json.loads(self.config_path.read_text(encoding="utf-8"))
-            if raw.get("schema_version") == 1:
+            if raw.get("schema_version") in {1, 2}:
+                old_lean_cc = raw.get("lean_cc")
                 raw = {
                     **raw,
                     "schema_version": _CONFIG_SCHEMA,
-                    "max_bytes": int(DEFAULT_CACHE_MAX_GB * _GIB),
-                    "min_free_bytes": int(DEFAULT_MIN_FREE_GB * _GIB),
+                    "compiler_executable": old_lean_cc,
+                    "lean_cc": (
+                        None
+                        if _is_lean_bundled_clang(old_lean_cc)
+                        else old_lean_cc
+                    ),
                 }
+                if raw.get("max_bytes") is None:
+                    raw["max_bytes"] = int(DEFAULT_CACHE_MAX_GB * _GIB)
+                if raw.get("min_free_bytes") is None:
+                    raw["min_free_bytes"] = int(DEFAULT_MIN_FREE_GB * _GIB)
             config = CacheConfig(**raw)
         except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise CacheLocationError(
@@ -332,7 +367,8 @@ class CacheLayout:
             schema_version=_CONFIG_SCHEMA,
             cache_root=str(self.root),
             filesystem_type=self.filesystem_type,
-            lean_cc=check.executable,
+            compiler_executable=check.executable,
+            lean_cc=check.lean_cc,
             lean_compiler=check.lean_compiler,
             compiler_fallback_used=check.fallback_used,
             max_bytes=policy.max_bytes,
@@ -549,6 +585,7 @@ def initialize_cache(
     layout: CacheLayout,
     *,
     env: Mapping[str, str] | None = None,
+    cwd: Path | None = None,
     max_gb: float | None = None,
     min_free_gb: float | None = None,
 ) -> tuple[CacheConfig, CompilerCheck]:
@@ -556,7 +593,7 @@ def initialize_cache(
     layout.create()
     runtime = layout.runtime_environment(env)
     ensure_lean_on_path(runtime)
-    check = select_native_compiler(runtime)
+    check = select_native_compiler(runtime, cwd=cwd)
     policy = cache_policy(
         layout.load_config(), env=env, max_gb=max_gb, min_free_gb=min_free_gb
     )
