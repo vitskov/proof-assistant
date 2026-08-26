@@ -28,10 +28,16 @@ jobs:
         with:
           version: "0.12.0"
       - name: Install pinned Lean toolchain
-        uses: leanprover/lean-action@50fcf42d2e460296f1a34b402e990d1b24f8b596 # v1
-        with:
-          auto-config: false
-          use-github-cache: false
+        shell: bash
+        run: |
+          installer="$RUNNER_TEMP/elan-init.sh"
+          curl --proto '=https' --tlsv1.2 -sSfL \
+            https://raw.githubusercontent.com/leanprover/elan/0e36a07b9bbcc5381fa6250df109f9a4f94d7bac/elan-init.sh \
+            -o "$installer"
+          sh "$installer" -y --no-modify-path --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+          toolchain="$(tr -d '\r\n' < lean-toolchain)"
+          "$HOME/.elan/bin/elan" toolchain install "$toolchain"
 
       - name: Compile-and-execute compiler preflight
         shell: bash
