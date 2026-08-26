@@ -57,6 +57,7 @@ def test_select_compiler_falls_back_when_lean_clang_is_broken(monkeypatch):
 def test_select_compiler_uses_configured_fallback_when_lean_clang_lacks_headers(
     monkeypatch,
 ):
+    monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(environment, "ensure_lean_on_path", lambda env: False)
     monkeypatch.setattr(
         environment,
