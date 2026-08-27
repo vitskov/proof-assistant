@@ -129,10 +129,10 @@ A current reinstall migrates only a file composed entirely of recognized
 managed marker/PATH pairs: it transfers every directory as a guarded entry to
 the next effective login profile, moves the original to
 `.bash_profile.proof-assistant-backup` (adding a numeric suffix if necessary),
-and resumes normal Bash precedence. Any unrelated byte or command prevents
-automatic migration. Startup-file symlinks are followed only when they resolve
-to regular files; broken symlinks and readable special files are never
-overwritten or skipped silently.
+and resumes normal Bash precedence. Blank separators are harmless, but any
+unrelated nonblank content prevents migration. Startup-file symlinks are
+followed only when they resolve to regular files; broken symlinks and readable
+special files are never overwritten or skipped silently.
 
 The cache keeps its historical `repoprover-codex` directory name on purpose.
 Changing the default during the product rename would create a second shared
