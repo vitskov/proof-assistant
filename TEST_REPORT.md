@@ -1,8 +1,31 @@
 # Test report — Proof Assistant 0.1.0
 
-Current compiler-integration revision tested on 2026-08-26 in
-`America/New_York`. The provider-only acceptance result below is the preceding
-2026-08-25 snapshot.
+Current installer shell-profile safety revision tested on 2026-08-27 in
+`America/New_York`. The compiler-integration result below is the preceding
+2026-08-26 snapshot.
+
+## 2026-08-27 shell-profile safety repair
+
+The supported installer completed end to end on Linux using the existing
+Python 3.13 environment, the editable checkout, the real Lean compiler and
+cache checks, and the complete test suite. Shell-path persistence now preserves
+Bash's existing login-file precedence instead of creating `.bash_profile` and
+shadowing `.profile`. The same policy is shared by provider CLI installation.
+
+| Gate | Result |
+|---|---|
+| supported installer | **passed** |
+| focused installer/provider path tests | **78 passed in 5.21 seconds** |
+| complete automated suite | **584 passed in 119.53 seconds** |
+| Ruff lint | **passed** |
+| typing policy | **passed**; 94/98 explicit `Any` uses and 11 boundary modules `Any`-free |
+| strict mypy | **passed**; 72 source files |
+| installer syntax | **passed** with `bash -n` |
+| profile preservation | existing Bash/zsh content, missing final newlines, readable-file precedence, multi-flow legacy transfer, custom zsh/fish roots, binary bytes, unsafe targets, and repeated-install idempotence covered |
+| local Bash recovery | login and interactive-login shells load Proof Assistant, `.bashrc`, and Juliaup successfully |
+
+This validation made no provider request and did not run a provider-backed
+manuscript proof.
 
 ## 2026-08-26 Lean compiler integration repair
 

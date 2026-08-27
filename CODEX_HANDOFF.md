@@ -41,6 +41,11 @@ migrate to an unset override; external compiler overrides remain explicit.
 - External manuscript sources may be in Dropbox; warn and use stable staged
   import.
 - Every installer must compile and execute a native test program.
+- Shell-profile updates are append-only, preserve existing bytes, and are
+  idempotent. For Bash, use its first readable regular login file plus
+  `.bashrc`; never create `.bash_profile` or `.bash_login` and shadow an
+  existing `.profile`. Honor zsh/fish custom config roots and reject unsafe
+  startup-file targets.
 - Validate the bundled Lean toolchain through `leanc` with `LEAN_CC` unset.
   Set `LEAN_CC` only for a separately validated external compiler override.
 - CLI authentication stays inside Codex, Claude Code, or Copilot CLI. Never

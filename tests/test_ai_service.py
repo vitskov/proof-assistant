@@ -1,4 +1,5 @@
 import json
+import subprocess
 from dataclasses import replace
 
 import pytest
@@ -308,6 +309,211 @@ def test_shell_path_manager_updates_login_and_interactive_zsh_profiles(tmp_path)
         text = (tmp_path / profile_name).read_text()
         assert text.count("# Added by Proof Assistant") == 1
         assert str(bin_path) in text
+    result = subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            '. "$HOME/.zprofile"; . "$HOME/.zshrc"; printf "%s" "$PATH"',
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={"HOME": str(tmp_path), "PATH": "/usr/bin"},
+    )
+    assert result.stdout.split(":").count(str(bin_path)) == 1
+
+
+def test_shell_path_manager_does_not_shadow_existing_bash_profile(tmp_path):
+    profile = tmp_path / ".profile"
+    bashrc = tmp_path / ".bashrc"
+    profile.write_text(
+        'export PROFILE_SENTINEL=1\n. "$HOME/.bashrc"\n', encoding="utf-8"
+    )
+    bashrc.write_text("export BASHRC_SENTINEL=1\n", encoding="utf-8")
+    environment = {"PATH": "/usr/bin", "SHELL": "/bin/bash"}
+    manager = ShellPathManager(environment=environment, home=tmp_path)
+    bin_path = tmp_path / ".local" / "bin"
+
+    manager.ensure(bin_path)
+    first_profile = profile.read_bytes()
+    first_bashrc = bashrc.read_bytes()
+    manager.ensure(bin_path)
+
+    assert not (tmp_path / ".bash_profile").exists()
+    assert not (tmp_path / ".bash_login").exists()
+    installed_profile = profile.read_text(encoding="utf-8")
+    installed_bashrc = bashrc.read_text(encoding="utf-8")
+    assert installed_profile.startswith(
+        'export PROFILE_SENTINEL=1\n. "$HOME/.bashrc"\n'
+    )
+    assert installed_bashrc.startswith("export BASHRC_SENTINEL=1\n")
+    assert installed_profile.count("# Added by Proof Assistant") == 1
+    assert installed_bashrc.count("# Added by Proof Assistant") == 1
+    assert profile.read_bytes() == first_profile
+    assert bashrc.read_bytes() == first_bashrc
+
+    result = subprocess.run(
+        ["/bin/bash", "-c", '. "$HOME/.profile"; printf "%s" "$PATH"'],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={"HOME": str(tmp_path), "PATH": "/usr/bin"},
+    )
+    assert result.stdout.split(":").count(str(bin_path)) == 1
+
+
+def test_shell_path_manager_uses_existing_bash_login_file(tmp_path):
+    bash_login = tmp_path / ".bash_login"
+    profile = tmp_path / ".profile"
+    bash_login.write_text("export LOGIN_SENTINEL=1\n", encoding="utf-8")
+    profile.write_text("export PROFILE_SENTINEL=1\n", encoding="utf-8")
+    environment = {"PATH": "/usr/bin", "SHELL": "/bin/bash"}
+    manager = ShellPathManager(environment=environment, home=tmp_path)
+
+    manager.ensure(tmp_path / ".local" / "bin")
+
+    assert not (tmp_path / ".bash_profile").exists()
+    assert "# Added by Proof Assistant" in bash_login.read_text(encoding="utf-8")
+    assert profile.read_text(encoding="utf-8") == "export PROFILE_SENTINEL=1\n"
+
+
+def test_shell_path_manager_migrates_legacy_owned_bash_profile(tmp_path):
+    bin_path = tmp_path / ".local" / "bin"
+    legacy = b"# Added by Proof Assistant\n" + f'export PATH={bin_path}:"$PATH"\n'.encode()
+    bash_profile = tmp_path / ".bash_profile"
+    bash_profile.write_bytes(legacy)
+    profile = tmp_path / ".profile"
+    profile.write_bytes(b"export PROFILE_SENTINEL=1\n")
+    manager = ShellPathManager(
+        environment={"PATH": "/usr/bin", "SHELL": "/bin/bash"}, home=tmp_path
+    )
+
+    manager.ensure(bin_path)
+
+    assert not bash_profile.exists()
+    assert (tmp_path / ".bash_profile.proof-assistant-backup").read_bytes() == legacy
+    assert b"# Added by Proof Assistant" in profile.read_bytes()
+
+
+def test_shell_path_manager_transfers_other_managed_path_before_migration(tmp_path):
+    bash_profile = tmp_path / ".bash_profile"
+    other_path = tmp_path / ".venvs" / "proof-assistant" / "bin"
+    current_path = tmp_path / ".local" / "bin"
+    legacy = (
+        b"# Added by Proof Assistant installer\n"
+        + f'case ":$PATH:" in *":{other_path}:"*) ;; *) '.encode()
+        + f'export PATH={other_path}:"$PATH";; esac\n'.encode()
+        + b"\n# Added by Proof Assistant\n"
+        + f'export PATH={current_path}:"$PATH"\n'.encode()
+    )
+    bash_profile.write_bytes(legacy)
+    manager = ShellPathManager(
+        environment={"PATH": "/usr/bin", "SHELL": "/bin/bash"}, home=tmp_path
+    )
+
+    manager.ensure(current_path)
+
+    assert not bash_profile.exists()
+    assert (tmp_path / ".bash_profile.proof-assistant-backup").read_bytes() == legacy
+    installed = (tmp_path / ".profile").read_text(encoding="utf-8")
+    assert str(other_path) in installed
+    assert str(current_path) in installed
+
+
+def test_shell_path_manager_refuses_readable_nonregular_bash_candidate(tmp_path):
+    (tmp_path / ".bash_profile").symlink_to(tmp_path, target_is_directory=True)
+    manager = ShellPathManager(
+        environment={"PATH": "/usr/bin", "SHELL": "/bin/bash"}, home=tmp_path
+    )
+
+    with pytest.raises(OSError, match="readable non-regular Bash startup file"):
+        manager.ensure(tmp_path / ".local" / "bin")
+
+
+def test_shell_path_manager_requires_exact_active_path_line(tmp_path):
+    profile = tmp_path / ".profile"
+    manager = ShellPathManager(
+        environment={"PATH": "/usr/bin", "SHELL": "/bin/bash"}, home=tmp_path
+    )
+    bin_path = tmp_path / ".local" / "bin"
+    line = manager._path_line(str(bin_path))
+    profile.write_text(f"# example only: {line}\n", encoding="utf-8")
+
+    manager.ensure(bin_path)
+
+    installed = profile.read_text(encoding="utf-8")
+    assert installed.startswith(f"# example only: {line}\n")
+    assert installed.splitlines().count(line) == 1
+
+
+def test_shell_path_manager_upgrades_its_owned_legacy_export(tmp_path):
+    profile = tmp_path / ".profile"
+    manager = ShellPathManager(
+        environment={"PATH": "/usr/bin", "SHELL": "/bin/bash"}, home=tmp_path
+    )
+    bin_path = tmp_path / ".local" / "bin"
+    legacy = (
+        "export SENTINEL=1\n"
+        "# Added by Proof Assistant\n"
+        f'export PATH={bin_path}:"$PATH"\n'
+    )
+    profile.write_text(legacy, encoding="utf-8")
+
+    manager.ensure(bin_path)
+    manager.ensure(bin_path)
+
+    installed = profile.read_text(encoding="utf-8")
+    assert installed.startswith("export SENTINEL=1\n")
+    assert f'export PATH={bin_path}:"$PATH"\n' not in installed
+    assert installed.splitlines().count(manager._path_line(str(bin_path))) == 1
+
+
+def test_shell_path_manager_skips_broken_bash_login_candidate(tmp_path):
+    (tmp_path / ".bash_profile").symlink_to("missing-profile")
+    profile = tmp_path / ".profile"
+    profile.write_bytes(b"\xffPROFILE_SENTINEL\n")
+    manager = ShellPathManager(
+        environment={"PATH": "/usr/bin", "SHELL": "/bin/bash"}, home=tmp_path
+    )
+
+    manager.ensure(tmp_path / ".local" / "bin")
+
+    assert (tmp_path / ".bash_profile").is_symlink()
+    assert not (tmp_path / "missing-profile").exists()
+    assert profile.read_bytes().startswith(b"\xffPROFILE_SENTINEL\n")
+
+
+def test_shell_path_manager_honors_custom_zsh_and_fish_roots(tmp_path):
+    bin_path = tmp_path / ".local" / "bin"
+    zdotdir = tmp_path / "zsh-config"
+    zsh = ShellPathManager(
+        environment={
+            "PATH": "/usr/bin",
+            "SHELL": "/bin/zsh",
+            "ZDOTDIR": str(zdotdir),
+        },
+        home=tmp_path,
+    )
+    zsh.ensure(bin_path)
+    for name in (".zprofile", ".zshrc"):
+        assert (zdotdir / name).is_file()
+
+    xdg_config = tmp_path / "xdg"
+    fish = ShellPathManager(
+        environment={
+            "PATH": "/usr/bin",
+            "SHELL": "/usr/bin/fish",
+            "XDG_CONFIG_HOME": str(xdg_config),
+        },
+        home=tmp_path,
+    )
+    fish.ensure(bin_path)
+    fish.ensure(bin_path)
+    fish_config = (xdg_config / "fish" / "config.fish").read_text(
+        encoding="utf-8"
+    )
+    assert fish_config.count("# Added by Proof Assistant") == 1
+    assert "fish_add_path --path" in fish_config
 
 
 def test_codex_live_model_discovery_uses_app_server_contract(tmp_path):

@@ -68,6 +68,7 @@ class ShellPathManager:
     """Persist a known installer bin directory without evaluating shell code."""
 
     MARKER = "# Added by Proof Assistant"
+    INSTALLER_MARKER = "# Added by Proof Assistant installer"
 
     def __init__(
         self,
@@ -81,10 +82,177 @@ class ShellPathManager:
     def _profiles(self) -> tuple[Path, ...]:
         shell = Path(self._environment.get("SHELL", "")).name
         if shell == "zsh":
-            return (self._home / ".zprofile", self._home / ".zshrc")
+            root = Path(
+                self._environment.get("ZDOTDIR") or str(self._home)
+            ).expanduser()
+            return (root / ".zprofile", root / ".zshrc")
         if shell == "bash":
-            return (self._home / ".bash_profile", self._home / ".bashrc")
+            login = self._select_bash_login(
+                (
+                    self._home / ".bash_profile",
+                    self._home / ".bash_login",
+                    self._home / ".profile",
+                )
+            )
+            return (login, self._home / ".bashrc")
+        if shell == "fish":
+            root = Path(
+                self._environment.get("XDG_CONFIG_HOME")
+                or str(self._home / ".config")
+            ).expanduser()
+            return (root / "fish" / "config.fish",)
         return (self._home / ".profile",)
+
+    def _select_bash_login(self, candidates: tuple[Path, ...]) -> Path:
+        for profile in candidates:
+            if profile.is_symlink() and not profile.exists():
+                continue
+            if not profile.exists():
+                continue
+            if profile.is_file():
+                if os.access(profile, os.R_OK):
+                    return profile
+                continue
+            if os.access(profile, os.R_OK):
+                raise OSError(
+                    f"refusing readable non-regular Bash startup file: {profile}"
+                )
+        return self._home / ".profile"
+
+    def _path_line(self, normalized: str) -> str:
+        quoted = shlex.quote(normalized)
+        if Path(self._environment.get("SHELL", "")).name == "fish":
+            return f"fish_add_path --path {quoted}"
+        return (
+            f'case ":$PATH:" in *:{quoted}:*) ;; *) '
+            f'export PATH={quoted}:"$PATH";; esac'
+        )
+
+    @staticmethod
+    def _legacy_guarded_path_line(normalized: str) -> str:
+        quoted = shlex.quote(normalized)
+        return (
+            f'case ":$PATH:" in *":{quoted}:"*) ;; *) '
+            f'export PATH={quoted}:"$PATH";; esac'
+        )
+
+    def _upgrade_owned_path_line(
+        self, profile: Path, existing: bytes, normalized: str, path_line: str
+    ) -> bytes:
+        quoted = shlex.quote(normalized)
+        legacy_block = (
+            f'{self.MARKER}\nexport PATH={quoted}:"$PATH"\n'.encode()
+        )
+        if legacy_block not in existing:
+            return existing
+        updated = existing.replace(
+            legacy_block,
+            f"{self.MARKER}\n{path_line}\n".encode(),
+        )
+        with profile.open("r+b") as stream:
+            stream.write(updated)
+            stream.truncate()
+        return updated
+
+    @staticmethod
+    def _managed_guard(line: bytes) -> bytes | None:
+        export_prefix = b"export PATH="
+        export_suffix = b':"$PATH"'
+        if line.startswith(export_prefix) and line.endswith(export_suffix):
+            token = line[len(export_prefix) : -len(export_suffix)]
+        else:
+            case_prefix = b'case ":$PATH:" in '
+            case_middle = b") ;; *) export PATH="
+            case_suffix = b':"$PATH";; esac'
+            if not line.startswith(case_prefix) or not line.endswith(case_suffix):
+                return None
+            before_export, separator, after_export = line.partition(case_middle)
+            if not separator:
+                return None
+            token = after_export[: -len(case_suffix)]
+            old_pattern = case_prefix + b'*":' + token + b':"*'
+            new_pattern = case_prefix + b"*:" + token + b":*"
+            if before_export not in {old_pattern, new_pattern}:
+                return None
+        if not token:
+            return None
+        return (
+            b'case ":$PATH:" in *:'
+            + token
+            + b':*) ;; *) export PATH='
+            + token
+            + export_suffix
+            + b";; esac"
+        )
+
+    def _managed_profile_guards(self, content: bytes) -> tuple[bytes, ...] | None:
+        nonblank = [line for line in content.splitlines() if line.strip()]
+        if not nonblank or len(nonblank) % 2:
+            return None
+        markers = {self.MARKER.encode(), self.INSTALLER_MARKER.encode()}
+        guards: list[bytes] = []
+        for index in range(0, len(nonblank), 2):
+            if nonblank[index] not in markers:
+                return None
+            guard = self._managed_guard(nonblank[index + 1])
+            if guard is None:
+                return None
+            if guard not in guards:
+                guards.append(guard)
+        return tuple(guards)
+
+    def _append_managed_guards(self, profile: Path, guards: tuple[bytes, ...]) -> None:
+        self._validate_profile(profile)
+        profile.parent.mkdir(parents=True, exist_ok=True)
+        existing = profile.read_bytes() if profile.exists() else b""
+        lines = set(existing.splitlines())
+        addition = bytearray()
+        for guard in guards:
+            if guard in lines:
+                continue
+            if existing or addition:
+                addition.extend(b"\n")
+            addition.extend(self.INSTALLER_MARKER.encode() + b"\n" + guard + b"\n")
+            lines.add(guard)
+        if addition:
+            with profile.open("ab") as stream:
+                stream.write(addition)
+
+    def _migrate_legacy_bash_profile(self) -> None:
+        if Path(self._environment.get("SHELL", "")).name != "bash":
+            return
+        profile = self._home / ".bash_profile"
+        if (
+            profile.is_symlink()
+            or not profile.is_file()
+            or not os.access(profile, os.R_OK)
+        ):
+            return
+        content = profile.read_bytes()
+        guards = self._managed_profile_guards(content)
+        if guards is None:
+            return
+
+        target = self._select_bash_login(
+            (self._home / ".bash_login", self._home / ".profile")
+        )
+        self._append_managed_guards(target, guards)
+
+        backup = profile.with_name(".bash_profile.proof-assistant-backup")
+        suffix = 0
+        while backup.exists() or backup.is_symlink():
+            suffix += 1
+            backup = profile.with_name(
+                f".bash_profile.proof-assistant-backup-{suffix}"
+            )
+        profile.replace(backup)
+
+    @staticmethod
+    def _validate_profile(profile: Path) -> None:
+        if profile.is_symlink() and not profile.exists():
+            raise OSError(f"refusing to update broken startup-file symlink: {profile}")
+        if profile.exists() and not profile.is_file():
+            raise OSError(f"refusing to update non-regular startup file: {profile}")
 
     def ensure(self, directory: Path) -> None:
         normalized = str(directory.expanduser().resolve(strict=False))
@@ -93,15 +261,26 @@ class ShellPathManager:
         if normalized not in parts:
             self._environment["PATH"] = os.pathsep.join([normalized, *parts])
 
-        export_line = f'export PATH={shlex.quote(normalized)}:"$PATH"'
+        self._migrate_legacy_bash_profile()
+        path_line = self._path_line(normalized)
+        encoded_line = path_line.encode("utf-8")
+        marker = self.MARKER.encode("utf-8")
         for profile in self._profiles():
+            self._validate_profile(profile)
             profile.parent.mkdir(parents=True, exist_ok=True)
-            existing = profile.read_text(encoding="utf-8") if profile.exists() else ""
-            if export_line in existing:
+            existing = profile.read_bytes() if profile.exists() else b""
+            existing = self._upgrade_owned_path_line(
+                profile, existing, normalized, path_line
+            )
+            equivalent_lines = {
+                encoded_line,
+                self._legacy_guarded_path_line(normalized).encode(),
+            }
+            if equivalent_lines.intersection(existing.splitlines()):
                 continue
-            prefix = "" if not existing or existing.endswith("\n") else "\n"
-            with profile.open("a", encoding="utf-8") as stream:
-                stream.write(f"{prefix}{self.MARKER}\n{export_line}\n")
+            prefix = b"" if not existing or existing.endswith(b"\n") else b"\n"
+            with profile.open("ab") as stream:
+                stream.write(prefix + marker + b"\n" + encoded_line + b"\n")
 
 
 def _clean_version(result: CommandResult) -> str | None:

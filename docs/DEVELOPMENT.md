@@ -6,6 +6,11 @@
 - Keep Python environments and Lean/Lake/Mathlib caches outside Dropbox.
 - Keep managed Proof Assistant projects outside Dropbox.
 - Every installer must compile and execute a native test program.
+- Shell configuration changes must be append-only and idempotent. For Bash,
+  update its existing effective login file and `.bashrc`; never create a
+  higher-priority login file that shadows `.profile`. Honor `ZDOTDIR` for zsh
+  and `XDG_CONFIG_HOME` for fish, use runtime-guarded PATH additions, and refuse
+  broken symlinks or non-regular startup targets.
 - Compiler validation must exercise standard headers and `lean/lean.h` through
   `leanc`; never export Lean's bundled `bin/clang` as `LEAN_CC`.
 - Resolve Lean's toolchain from the target project's directory so its

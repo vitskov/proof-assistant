@@ -167,6 +167,34 @@ Persistent verification exit codes preserve failure boundaries:
 Exit 11 is partial/inconclusive and never means false. Exit 12 is reserved for a
 kernel-checked counterexample outcome.
 
+## Bash login shell no longer loads existing setup
+
+Bash reads only the first existing login file among `.bash_profile`,
+`.bash_login`, and `.profile`. Proof Assistant must not create `.bash_profile`
+merely to add itself to `PATH`, because that can cause a previously active
+`.profile`—including its `.bashrc` loader—to be skipped.
+
+Current installers preserve the existing precedence and append to the login
+file Bash already uses. If older setup flows created a `.bash_profile` composed
+only of one or more Proof Assistant marker/PATH pairs, reinstalling transfers
+all managed directories to the next effective login file, moves the original
+to `.bash_profile.proof-assistant-backup`, and restores the previous
+precedence. No file containing unrelated setup is migrated.
+
+For a legacy file that was subsequently edited and therefore cannot be safely
+recognized automatically, restore the prior login chain rather than copying or
+replacing the rest of the configuration. On systems where `.profile` is the
+established source of truth, a minimal compatibility stanza is:
+
+```bash
+if [ -f "$HOME/.profile" ]; then
+    . "$HOME/.profile"
+fi
+```
+
+Inspect the files before making that repair; do not add the stanza if `.profile`
+would source `.bash_profile` and create a loop.
+
 ## Disk pressure or cache reconciliation
 
 ```bash

@@ -182,7 +182,8 @@ configure_shell_path() {
   local shell_name="${SHELL:-sh}"
   shell_name="${shell_name##*/}"
   local path_dir="${venv_path}/bin"
-  local quoted_path config path_line
+  local quoted_path config candidate config_root legacy_path_line path_line
+  local legacy_backup legacy_suffix legacy_target managed_line managed_lines
   local configs=()
 
   # Use shell-specific startup files. Login shells and interactive shells can
@@ -190,28 +191,199 @@ configure_shell_path() {
   printf -v quoted_path '%q' "${path_dir}"
   case "${shell_name}" in
     zsh)
-      configs=("${HOME}/.zprofile" "${HOME}/.zshrc")
-      path_line="case \":\$PATH:\" in *\":${quoted_path}:\"*) ;; *) export PATH=${quoted_path}:\"\$PATH\";; esac"
+      config_root="${ZDOTDIR:-${HOME}}"
+      configs=("${config_root}/.zprofile" "${config_root}/.zshrc")
+      path_line="case \":\$PATH:\" in *:${quoted_path}:*) ;; *) export PATH=${quoted_path}:\"\$PATH\";; esac"
+      legacy_path_line="case \":\$PATH:\" in *\":${quoted_path}:\"*) ;; *) export PATH=${quoted_path}:\"\$PATH\";; esac"
       ;;
     bash)
-      configs=("${HOME}/.bash_profile" "${HOME}/.bashrc")
-      path_line="case \":\$PATH:\" in *\":${quoted_path}:\"*) ;; *) export PATH=${quoted_path}:\"\$PATH\";; esac"
+      path_line="case \":\$PATH:\" in *:${quoted_path}:*) ;; *) export PATH=${quoted_path}:\"\$PATH\";; esac"
+      legacy_path_line="case \":\$PATH:\" in *\":${quoted_path}:\"*) ;; *) export PATH=${quoted_path}:\"\$PATH\";; esac"
+
+      # Releases before 0.1.0 could create a .bash_profile made entirely of
+      # Proof Assistant PATH blocks. Transfer every recognized entry to the
+      # next effective Bash login file before moving that owned-only profile.
+      if [[ -e "${HOME}/.bash_profile" \
+        && ! -f "${HOME}/.bash_profile" \
+        && -r "${HOME}/.bash_profile" ]]; then
+        echo "Refusing readable non-regular Bash startup file: ${HOME}/.bash_profile" >&2
+        return 2
+      fi
+      if [[ -f "${HOME}/.bash_profile" \
+        && ! -L "${HOME}/.bash_profile" \
+        && -r "${HOME}/.bash_profile" ]] \
+        && managed_lines="$(awk '
+          function managed_guard(line, token, before, position) {
+            if (index(line, export_prefix) == 1 \
+                && substr(line, length(line) - length(export_suffix) + 1) == export_suffix) {
+              token = substr(line, length(export_prefix) + 1, \
+                length(line) - length(export_prefix) - length(export_suffix))
+            } else {
+              position = index(line, case_middle)
+              if (index(line, case_prefix) != 1 || position == 0 \
+                  || substr(line, length(line) - length(case_suffix) + 1) != case_suffix) {
+                return ""
+              }
+              before = substr(line, 1, position - 1)
+              token = substr(line, position + length(case_middle), \
+                length(line) - position - length(case_middle) - length(case_suffix) + 1)
+              if (before != case_prefix "*\":" token ":\"*" \
+                  && before != case_prefix "*:" token ":*") {
+                return ""
+              }
+            }
+            if (token == "") {
+              return ""
+            }
+            return case_prefix "*:" token ":*) ;; *) export PATH=" token export_suffix ";; esac"
+          }
+          BEGIN {
+            marker = "# Added by Proof Assistant"
+            installer_marker = "# Added by Proof Assistant installer"
+            export_prefix = "export PATH="
+            export_suffix = ":\"$PATH\""
+            case_prefix = "case \":$PATH:\" in "
+            case_middle = ") ;; *) export PATH="
+            case_suffix = ":\"$PATH\";; esac"
+            expect_marker = 1
+            count = 0
+            invalid = 0
+          }
+          /^[[:space:]]*$/ { next }
+          expect_marker {
+            if ($0 != marker && $0 != installer_marker) {
+              invalid = 1
+              exit 2
+            }
+            expect_marker = 0
+            next
+          }
+          {
+            guard = managed_guard($0)
+            if (guard == "") {
+              invalid = 1
+              exit 2
+            }
+            print guard
+            count += 1
+            expect_marker = 1
+          }
+          END {
+            if (invalid || !expect_marker || count == 0) {
+              exit 2
+            }
+          }
+        ' "${HOME}/.bash_profile")"; then
+          legacy_target="${HOME}/.profile"
+          for candidate in "${HOME}/.bash_login" "${HOME}/.profile"; do
+            if [[ -L "${candidate}" && ! -e "${candidate}" ]]; then
+              continue
+            fi
+            if [[ ! -e "${candidate}" ]]; then
+              continue
+            fi
+            if [[ -f "${candidate}" ]]; then
+              if [[ -r "${candidate}" ]]; then
+                legacy_target="${candidate}"
+                break
+              fi
+              continue
+            fi
+            if [[ -r "${candidate}" ]]; then
+              echo "Refusing readable non-regular Bash startup file: ${candidate}" >&2
+              return 2
+            fi
+          done
+          if [[ -L "${legacy_target}" && ! -e "${legacy_target}" ]]; then
+            echo "Refusing to update broken startup-file symlink: ${legacy_target}" >&2
+            return 2
+          fi
+          if [[ -e "${legacy_target}" && ! -f "${legacy_target}" ]]; then
+            echo "Refusing to update non-regular startup file: ${legacy_target}" >&2
+            return 2
+          fi
+          if [[ -e "${legacy_target}" && ! -w "${legacy_target}" ]]; then
+            echo "Cannot write shell startup file: ${legacy_target}" >&2
+            return 2
+          fi
+          mkdir -p "$(dirname "${legacy_target}")"
+          while IFS= read -r managed_line; do
+            if ! grep -Fqx "${managed_line}" "${legacy_target}" 2>/dev/null; then
+              printf '\n# Added by Proof Assistant installer\n%s\n' \
+                "${managed_line}" >> "${legacy_target}"
+            fi
+          done <<< "${managed_lines}"
+
+          legacy_backup="${HOME}/.bash_profile.proof-assistant-backup"
+          legacy_suffix=0
+          while [[ -e "${legacy_backup}" || -L "${legacy_backup}" ]]; do
+            legacy_suffix=$((legacy_suffix + 1))
+            legacy_backup="${HOME}/.bash_profile.proof-assistant-backup-${legacy_suffix}"
+          done
+          mv "${HOME}/.bash_profile" "${legacy_backup}"
+          echo "Migrated legacy installer-only .bash_profile to ${legacy_backup}"
+      fi
+
+      # Bash reads only the first existing login profile in this order. Never
+      # create .bash_profile or .bash_login here: doing so would shadow an
+      # existing .profile and can suppress its .bashrc loader and other setup.
+      config="${HOME}/.profile"
+      for candidate in \
+        "${HOME}/.bash_profile" \
+        "${HOME}/.bash_login" \
+        "${HOME}/.profile"; do
+        if [[ -L "${candidate}" && ! -e "${candidate}" ]]; then
+          continue
+        fi
+        if [[ ! -e "${candidate}" ]]; then
+          continue
+        fi
+        if [[ -f "${candidate}" ]]; then
+          if [[ -r "${candidate}" ]]; then
+            config="${candidate}"
+            break
+          fi
+          continue
+        fi
+        if [[ -r "${candidate}" ]]; then
+          echo "Refusing readable non-regular Bash startup file: ${candidate}" >&2
+          return 2
+        fi
+      done
+      configs=("${config}" "${HOME}/.bashrc")
       ;;
     fish)
-      config="${HOME}/.config/fish/config.fish"
+      config_root="${XDG_CONFIG_HOME:-${HOME}/.config}"
+      config="${config_root}/fish/config.fish"
       configs=("${config}")
       printf -v quoted_path '%q' "${path_dir}"
       path_line="fish_add_path --path ${quoted_path}"
+      legacy_path_line=""
       ;;
     *)
       configs=("${HOME}/.profile")
-      path_line="case \":\$PATH:\" in *\":${quoted_path}:\"*) ;; *) export PATH=${quoted_path}:\"\$PATH\";; esac"
+      path_line="case \":\$PATH:\" in *:${quoted_path}:*) ;; *) export PATH=${quoted_path}:\"\$PATH\";; esac"
+      legacy_path_line="case \":\$PATH:\" in *\":${quoted_path}:\"*) ;; *) export PATH=${quoted_path}:\"\$PATH\";; esac"
       ;;
   esac
 
   for config in "${configs[@]}"; do
+    if [[ -L "${config}" && ! -e "${config}" ]]; then
+      echo "Refusing to update broken startup-file symlink: ${config}" >&2
+      return 2
+    fi
+    if [[ -e "${config}" && ! -f "${config}" ]]; then
+      echo "Refusing to update non-regular startup file: ${config}" >&2
+      return 2
+    fi
+    if [[ -e "${config}" && ! -w "${config}" ]]; then
+      echo "Cannot write shell startup file: ${config}" >&2
+      return 2
+    fi
     mkdir -p "$(dirname "${config}")"
-    if ! grep -Fqx "${path_line}" "${config}" 2>/dev/null; then
+    if ! grep -Fqx "${path_line}" "${config}" 2>/dev/null \
+      && { [[ -z "${legacy_path_line}" ]] \
+        || ! grep -Fqx "${legacy_path_line}" "${config}" 2>/dev/null; }; then
       printf '\n# Added by Proof Assistant installer\n%s\n' "${path_line}" >> "${config}"
     fi
   done

@@ -34,6 +34,7 @@ def _fake_command_path(root: Path) -> Path:
         "getconf",
         "grep",
         "mkdir",
+        "mv",
         "sh",
         "uname",
     )
@@ -98,9 +99,22 @@ def _bootstrap_harness(
     block_install_dir: bool = False,
     precreate_venv: bool = True,
     preexisting_local_uv: bool = False,
+    shell: str = "/bin/bash",
+    startup_files: dict[str, str] | None = None,
+    startup_links: dict[str, str] | None = None,
+    environment: dict[str, str] | None = None,
+    runs: int = 1,
 ) -> tuple[subprocess.CompletedProcess[str], Path, Path, Path]:
     home = tmp_path / "home"
     home.mkdir()
+    for relative, content in (startup_files or {}).items():
+        startup = home / relative
+        startup.parent.mkdir(parents=True, exist_ok=True)
+        startup.write_text(content, encoding="utf-8")
+    for relative, target in (startup_links or {}).items():
+        startup = home / relative
+        startup.parent.mkdir(parents=True, exist_ok=True)
+        startup.symlink_to(target)
     install_dir = custom_install_dir or home / ".local/bin"
     if block_install_dir:
         install_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -171,6 +185,7 @@ def _bootstrap_harness(
     env.update(
         {
             "HOME": str(home),
+            "SHELL": shell,
             "PATH": str(commands),
             "FAKE_INSTALLER": str(fake_installer),
             "FAKE_LOG": str(log),
@@ -186,9 +201,15 @@ def _bootstrap_harness(
             "PROOF_ASSISTANT_MIN_MEMORY_GIB": "1",
         }
     )
-    result = subprocess.run(
-        [str(INSTALLER)], text=True, capture_output=True, check=False, env=env
-    )
+    env.update(environment or {})
+    result: subprocess.CompletedProcess[str] | None = None
+    for _ in range(runs):
+        result = subprocess.run(
+            [str(INSTALLER)], text=True, capture_output=True, check=False, env=env
+        )
+        if result.returncode != 0:
+            break
+    assert result is not None
     return result, log, home, install_dir
 
 
@@ -637,6 +658,10 @@ def test_uncreatable_uv_install_directory_exits_two_before_download(tmp_path):
 def test_installer_configures_the_detected_shell_startup_path(tmp_path):
     result, _log, home, _install_dir = _bootstrap_harness(tmp_path)
     assert result.returncode == 0, result.stderr
+    assert not (home / ".bash_profile").exists()
+    assert not (home / ".bash_login").exists()
+    assert (home / ".profile").is_file()
+    assert (home / ".bashrc").is_file()
     startup_files = [
         home / ".zprofile",
         home / ".zshrc",
@@ -652,7 +677,7 @@ def test_installer_configures_the_detected_shell_startup_path(tmp_path):
 
 
 def test_installer_does_not_duplicate_shell_startup_path(tmp_path):
-    result, _log, home, _install_dir = _bootstrap_harness(tmp_path)
+    result, _log, home, _install_dir = _bootstrap_harness(tmp_path, runs=2)
     assert result.returncode == 0, result.stderr
     startup_files = [
         home / ".zprofile",
@@ -668,3 +693,216 @@ def test_installer_does_not_duplicate_shell_startup_path(tmp_path):
     assert all(
         text.count("Added by Proof Assistant installer") == 1 for text in configured
     )
+
+
+def test_installer_preserves_existing_bash_profile_and_bashrc(tmp_path):
+    bash_profile = 'export EXISTING_LOGIN_SETTING="keep me"\n. "$HOME/.bashrc"'
+    bashrc = 'alias existing_alias="printf preserved"\n'
+    result, _log, home, _install_dir = _bootstrap_harness(
+        tmp_path,
+        startup_files={
+            ".bash_profile": bash_profile,
+            ".bashrc": bashrc,
+        },
+        runs=2,
+    )
+
+    assert result.returncode == 0, result.stderr
+    installed_profile = (home / ".bash_profile").read_text(encoding="utf-8")
+    installed_bashrc = (home / ".bashrc").read_text(encoding="utf-8")
+    assert installed_profile.startswith(bash_profile + "\n")
+    assert installed_bashrc.startswith(bashrc)
+    assert installed_profile.count("EXISTING_LOGIN_SETTING") == 1
+    assert installed_profile.count('. "$HOME/.bashrc"') == 1
+    assert installed_bashrc.count("existing_alias") == 1
+    assert installed_profile.count("Added by Proof Assistant installer") == 1
+    assert installed_bashrc.count("Added by Proof Assistant installer") == 1
+
+
+def test_installer_recognizes_previous_guard_without_appending(tmp_path):
+    path_dir = tmp_path / "home" / ".venvs" / "proof-assistant" / "bin"
+    previous_guard = (
+        "# Added by Proof Assistant installer\n"
+        f'case ":$PATH:" in *":{path_dir}:"*) ;; *) '
+        f'export PATH={path_dir}:"$PATH";; esac\n'
+    )
+    result, _log, home, _install_dir = _bootstrap_harness(
+        tmp_path,
+        startup_files={
+            ".bash_profile": "export LOGIN_SENTINEL=1\n" + previous_guard,
+            ".bashrc": "export BASHRC_SENTINEL=1\n" + previous_guard,
+        },
+        runs=2,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (home / ".bash_profile").read_text(encoding="utf-8") == (
+        "export LOGIN_SENTINEL=1\n" + previous_guard
+    )
+    assert (home / ".bashrc").read_text(encoding="utf-8") == (
+        "export BASHRC_SENTINEL=1\n" + previous_guard
+    )
+
+
+def test_installer_uses_profile_without_creating_higher_priority_bash_file(
+    tmp_path,
+):
+    profile = 'export PROFILE_ONLY_SETTING="preserved"\n. "$HOME/.bashrc"\n'
+    result, _log, home, _install_dir = _bootstrap_harness(
+        tmp_path,
+        startup_files={".profile": profile},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not (home / ".bash_profile").exists()
+    assert not (home / ".bash_login").exists()
+    installed = (home / ".profile").read_text(encoding="utf-8")
+    assert installed.startswith(profile)
+    assert installed.count("PROFILE_ONLY_SETTING") == 1
+    assert installed.count("Added by Proof Assistant installer") == 1
+
+
+def test_installer_respects_existing_bash_login_precedence(tmp_path):
+    result, _log, home, _install_dir = _bootstrap_harness(
+        tmp_path,
+        startup_files={
+            ".bash_login": "export LOGIN_SENTINEL=1\n",
+            ".profile": "export PROFILE_SENTINEL=1\n",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not (home / ".bash_profile").exists()
+    assert "Added by Proof Assistant installer" in (
+        home / ".bash_login"
+    ).read_text(encoding="utf-8")
+    assert (home / ".profile").read_text(encoding="utf-8") == (
+        "export PROFILE_SENTINEL=1\n"
+    )
+
+
+def test_installer_preserves_existing_zsh_profiles(tmp_path):
+    zprofile = "export ZPROFILE_SENTINEL=1"
+    zshrc = "export ZSHRC_SENTINEL=1\n"
+    result, _log, home, _install_dir = _bootstrap_harness(
+        tmp_path,
+        shell="/bin/zsh",
+        startup_files={".zprofile": zprofile, ".zshrc": zshrc},
+        runs=2,
+    )
+
+    assert result.returncode == 0, result.stderr
+    installed_zprofile = (home / ".zprofile").read_text(encoding="utf-8")
+    installed_zshrc = (home / ".zshrc").read_text(encoding="utf-8")
+    assert installed_zprofile.startswith(zprofile + "\n")
+    assert installed_zshrc.startswith(zshrc)
+    assert installed_zprofile.count("ZPROFILE_SENTINEL") == 1
+    assert installed_zshrc.count("ZSHRC_SENTINEL") == 1
+    assert installed_zprofile.count("Added by Proof Assistant installer") == 1
+    assert installed_zshrc.count("Added by Proof Assistant installer") == 1
+
+
+def test_installer_migrates_only_legacy_owned_bash_profile(tmp_path):
+    path_dir = tmp_path / "home" / ".venvs" / "proof-assistant" / "bin"
+    legacy = (
+        "\n# Added by Proof Assistant installer\n"
+        f'case ":$PATH:" in *":{path_dir}:"*) ;; *) '
+        f'export PATH={path_dir}:"$PATH";; esac\n'
+    )
+    profile = 'export PROFILE_SENTINEL=1\n. "$HOME/.bashrc"\n'
+    result, _log, home, _install_dir = _bootstrap_harness(
+        tmp_path,
+        startup_files={".bash_profile": legacy, ".profile": profile},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not (home / ".bash_profile").exists()
+    assert (home / ".bash_profile.proof-assistant-backup").read_text(
+        encoding="utf-8"
+    ) == legacy
+    installed = (home / ".profile").read_text(encoding="utf-8")
+    assert installed.startswith(profile)
+    assert installed.count("Added by Proof Assistant installer") == 1
+
+
+def test_installer_transfers_other_managed_path_before_migration(tmp_path):
+    other_path = tmp_path / "home" / ".local" / "bin"
+    installer_path = tmp_path / "home" / ".venvs" / "proof-assistant" / "bin"
+    legacy = (
+        "# Added by Proof Assistant\n"
+        f'export PATH={other_path}:"$PATH"\n'
+        "\n# Added by Proof Assistant installer\n"
+        f'case ":$PATH:" in *":{installer_path}:"*) ;; *) '
+        f'export PATH={installer_path}:"$PATH";; esac\n'
+    )
+    result, _log, home, _install_dir = _bootstrap_harness(
+        tmp_path,
+        startup_files={".bash_profile": legacy},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not (home / ".bash_profile").exists()
+    assert (home / ".bash_profile.proof-assistant-backup").read_text(
+        encoding="utf-8"
+    ) == legacy
+    installed = (home / ".profile").read_text(encoding="utf-8")
+    assert str(other_path) in installed
+    assert str(installer_path) in installed
+
+
+def test_installer_refuses_readable_nonregular_bash_candidate(tmp_path):
+    result, _log, _home, _install_dir = _bootstrap_harness(
+        tmp_path,
+        startup_links={".bash_profile": "."},
+    )
+
+    assert result.returncode == 2
+    assert "Refusing readable non-regular Bash startup file" in result.stderr
+
+
+def test_installer_skips_broken_bash_login_candidate(tmp_path):
+    profile = "export PROFILE_SENTINEL=1\n"
+    result, _log, home, _install_dir = _bootstrap_harness(
+        tmp_path,
+        startup_files={".profile": profile},
+        startup_links={".bash_profile": "missing-profile"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (home / ".bash_profile").is_symlink()
+    assert not (home / "missing-profile").exists()
+    installed = (home / ".profile").read_text(encoding="utf-8")
+    assert installed.startswith(profile)
+    assert installed.count("Added by Proof Assistant installer") == 1
+
+
+def test_installer_honors_zdotdir(tmp_path):
+    zdotdir = tmp_path / "home" / "shell" / "zsh"
+    result, _log, home, _install_dir = _bootstrap_harness(
+        tmp_path,
+        shell="/bin/zsh",
+        environment={"ZDOTDIR": str(zdotdir)},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (zdotdir / ".zprofile").is_file()
+    assert (zdotdir / ".zshrc").is_file()
+    assert not (home / ".zprofile").exists()
+    assert not (home / ".zshrc").exists()
+
+
+def test_installer_honors_fish_xdg_config_home(tmp_path):
+    config_home = tmp_path / "home" / "xdg"
+    result, _log, home, _install_dir = _bootstrap_harness(
+        tmp_path,
+        shell="/usr/bin/fish",
+        environment={"XDG_CONFIG_HOME": str(config_home)},
+        runs=2,
+    )
+
+    assert result.returncode == 0, result.stderr
+    fish_config = config_home / "fish" / "config.fish"
+    installed = fish_config.read_text(encoding="utf-8")
+    assert installed.count("Added by Proof Assistant installer") == 1
+    assert "fish_add_path --path" in installed
+    assert not (home / ".config" / "fish" / "config.fish").exists()

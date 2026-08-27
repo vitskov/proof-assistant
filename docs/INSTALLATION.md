@@ -108,11 +108,31 @@ export PATH="$HOME/.venvs/proof-assistant/bin:$PATH"
 ```
 
 The installer also adds this path automatically to the startup files for the
-shell named by `$SHELL`: `.zprofile`/`.zshrc` for zsh, `.bash_profile`/`.bashrc`
-for bash, `~/.config/fish/config.fish` for fish, or `~/.profile` for other
-POSIX shells. Existing entries are not duplicated. Open a new terminal, or
-source the relevant file, for the command to become available in the current
-shell.
+shell named by `$SHELL`. It appends one guarded line and preserves every byte of
+existing setup before that addition. For zsh it updates `.zprofile` and `.zshrc`
+under `$ZDOTDIR` when set, otherwise under `$HOME`. For fish it updates
+`fish/config.fish` under `$XDG_CONFIG_HOME` when set, otherwise
+`~/.config/fish/config.fish`. For other POSIX shells it updates `~/.profile`.
+
+For Bash, it updates `.bashrc` plus the login file Bash already selects: the
+first readable regular file among `.bash_profile`, `.bash_login`, and `.profile`,
+or `.profile` when none qualifies. It never creates a higher-priority
+`.bash_profile` or `.bash_login`, because doing that would make Bash ignore an
+existing `.profile` and could suppress its `.bashrc` loader and other login
+setup. Repeated installs are byte-idempotent after the first addition. Open a
+new terminal, or source the relevant file, for the command to become available
+in the current shell.
+
+Older setup flows could create a `.bash_profile` containing only one or more
+Proof Assistant-managed PATH blocks, thereby shadowing the user's `.profile`.
+A current reinstall migrates only a file composed entirely of recognized
+managed marker/PATH pairs: it transfers every directory as a guarded entry to
+the next effective login profile, moves the original to
+`.bash_profile.proof-assistant-backup` (adding a numeric suffix if necessary),
+and resumes normal Bash precedence. Any unrelated byte or command prevents
+automatic migration. Startup-file symlinks are followed only when they resolve
+to regular files; broken symlinks and readable special files are never
+overwritten or skipped silently.
 
 The cache keeps its historical `repoprover-codex` directory name on purpose.
 Changing the default during the product rename would create a second shared
