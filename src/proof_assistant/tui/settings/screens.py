@@ -45,6 +45,8 @@ from proof_assistant.workflow.contracts import (
     InstallResult,
     MachineSettingsSnapshot,
     MachineSettingsUpdateRequest,
+    ProjectAIOverride,
+    ProjectVerificationSettingsSnapshot,
     ProviderConfig,
     ProviderSetupSnapshot,
     SecretSubmission,
@@ -448,6 +450,7 @@ class AIProviderSettingsScreen(NoticeScreen):
         self.project = project
         self.first_run = first_run
         self._policies: tuple[TaskModelPolicy, ...] = ()
+        self.project_settings: ProjectVerificationSettingsSnapshot | None = None
 
     def compose(self) -> ComposeResult:
         snapshot = self.snapshot
@@ -468,7 +471,9 @@ class AIProviderSettingsScreen(NoticeScreen):
                 if self.first_run
                 else "Provider settings are machine-wide. Every displayed status "
                 "is a sanitized backend observation; no credential values are "
-                "returned to or retained by this screen."
+                "returned to or retained by this screen. When opened from a project, "
+                "the separate project override below changes only future runs of that "
+                "project."
             )
             yield TextArea(
                 _provider_summary(snapshot)
@@ -586,6 +591,52 @@ class AIProviderSettingsScreen(NoticeScreen):
                 soft_wrap=False,
                 id="ai-task-policies",
             )
+            if self.project is not None:
+                yield CopyableText("This project's verification AI", classes="section")
+                yield CopyableText(
+                    "Loading the project-specific provider choice…",
+                    id="project-ai-summary",
+                )
+                yield Label("Provider for future runs of this project")
+                yield Select(
+                    tuple((_driver_label(driver), driver.value) for driver in DriverId),
+                    value=configured_driver.value,
+                    allow_blank=False,
+                    id="project-ai-driver",
+                    disabled=True,
+                )
+                yield Label("Model for future runs of this project")
+                yield Select(
+                    (("Loading models…", "__loading__"),),
+                    allow_blank=False,
+                    id="project-ai-model",
+                    disabled=True,
+                )
+                yield Label("Reasoning / difficulty for future runs")
+                yield Select(
+                    (("Loading difficulties…", "__loading__"),),
+                    allow_blank=False,
+                    id="project-ai-difficulty",
+                    disabled=True,
+                )
+                with Horizontal(classes="toolbar"):
+                    yield Button(
+                        "Save for this project",
+                        id="save-project-ai",
+                        variant="success",
+                        disabled=True,
+                    )
+                    yield Button(
+                        "Use machine defaults",
+                        id="reset-project-ai",
+                        disabled=True,
+                    )
+                yield CopyableText(
+                    "A project override stores only provider, model, and difficulty. "
+                    "Credentials remain machine-owned, and an already-running job "
+                    "keeps the settings with which it started.",
+                    classes="muted",
+                )
             with Horizontal(classes="toolbar"):
                 yield Button(
                     "Continue to projects" if self.first_run else "Main menu",
@@ -613,6 +664,7 @@ class AIProviderSettingsScreen(NoticeScreen):
         if self.snapshot is not None:
             self._render_selected_provider()
             self._load_task_policies()
+            self._load_project_settings()
         else:
             self.refresh_setup()
 
@@ -635,10 +687,19 @@ class AIProviderSettingsScreen(NoticeScreen):
         self._save_settings()
 
     def on_select_changed(self, event: Select.Changed) -> None:
-        if event.select.id == "ai-configure-driver" and self.snapshot is not None:
+        if event.select.id == "ai-primary-driver" and self.snapshot is not None:
+            selected = event.select.value
+            if selected is not Select.BLANK:
+                self.query_one("#ai-configure-driver", Select).value = str(selected)
+                self._render_selected_provider()
+        elif event.select.id == "ai-configure-driver" and self.snapshot is not None:
             self._render_selected_provider()
         elif event.select.id == "ai-provider-model" and self.snapshot is not None:
             self._render_difficulties()
+        elif event.select.id == "project-ai-driver" and self.snapshot is not None:
+            self._render_project_ai_choices()
+        elif event.select.id == "project-ai-model" and self.snapshot is not None:
+            self._render_project_ai_difficulties()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         button_id = event.button.id
@@ -654,6 +715,10 @@ class AIProviderSettingsScreen(NoticeScreen):
             self._store_credential()
         elif button_id == "delete-ai-key":
             self._delete_credential()
+        elif button_id == "save-project-ai":
+            self._save_project_settings()
+        elif button_id == "reset-project-ai":
+            self._reset_project_settings()
         elif button_id == "ai-setup-continue":
             if self.snapshot is not None and self.snapshot.primary_ready:
                 if self.first_run:
@@ -691,6 +756,223 @@ class AIProviderSettingsScreen(NoticeScreen):
 
         self._record_setup(snapshot, self._policies)
         self._load_task_policies()
+        self._load_project_settings()
+
+    def _load_project_settings(self) -> None:
+        project = self.project
+        if project is None:
+            return
+
+        def load() -> None:
+            try:
+                project_settings = (
+                    self.proof_app.service.get_project_verification_settings(project)
+                )
+            except Exception as exc:
+                self.proof_app.call_from_thread(
+                    self.show_notice,
+                    f"Project AI settings could not be loaded: {exc}",
+                    error=True,
+                )
+                return
+            self.proof_app.call_from_thread(
+                self._record_project_settings, project_settings
+            )
+
+        self.run_worker(load, thread=True, exclusive=True, group="project-ai-settings")
+
+    def _record_project_settings(
+        self, project_settings: ProjectVerificationSettingsSnapshot
+    ) -> None:
+        if not self.is_mounted or not self.query("#project-ai-summary").nodes:
+            return
+        self.project_settings = project_settings
+        self._render_project_ai_choices(reset_driver=True)
+        scope = (
+            "inherits the current machine proof defaults"
+            if project_settings.inherited
+            else "uses a project-specific override"
+        )
+        effective = project_settings.effective
+        validity = (
+            "ready"
+            if project_settings.valid
+            else f"needs attention: {project_settings.validation_error}"
+        )
+        self.query_one("#project-ai-summary", TextArea).text = (
+            f"Project: {project_settings.project_path}\n"
+            f"Revision: {project_settings.revision}\n"
+            f"Scope: {scope}\n"
+            f"Status: {validity}\n"
+            f"Effective next run: {effective.ai_driver} / {effective.model} / "
+            f"{effective.effort}"
+        )
+        self.query_one(
+            "#reset-project-ai", Button
+        ).disabled = project_settings.inherited
+
+    def _render_project_ai_choices(self, *, reset_driver: bool = False) -> None:
+        snapshot = self.snapshot
+        project_settings = self.project_settings
+        if (
+            snapshot is None
+            or project_settings is None
+            or not self.query("#project-ai-driver").nodes
+        ):
+            return
+        driver_select = self.query_one("#project-ai-driver", Select)
+        if reset_driver:
+            driver_select.disabled = False
+            driver_select.value = project_settings.effective.ai_driver
+        driver = DriverId(_select_value(driver_select))
+        status = _status_for(snapshot, driver)
+        catalog = status.catalog
+        options: list[tuple[str, str]] = []
+        if catalog is not None:
+            options.extend(
+                (f"{model.display_name} [{model.model_id}]", model.model_id)
+                for model in catalog.models
+            )
+        current_model = (
+            project_settings.effective.model
+            if driver.value == project_settings.effective.ai_driver
+            else None
+        )
+        if current_model is not None and current_model not in {
+            value for _, value in options
+        }:
+            options.append(
+                (
+                    f"{current_model} [configured; not in current catalog]",
+                    current_model,
+                )
+            )
+        model_select = self.query_one("#project-ai-model", Select)
+        model_select.set_options(options)
+        model_select.disabled = not options
+        if current_model in {value for _, value in options}:
+            model_select.value = current_model
+        elif options:
+            model_select.value = options[0][1]
+        self._render_project_ai_difficulties()
+        self.query_one("#save-project-ai", Button).disabled = not (
+            status.ready and bool(options)
+        )
+
+    def _render_project_ai_difficulties(self) -> None:
+        snapshot = self.snapshot
+        if snapshot is None or not self.query("#project-ai-model").nodes:
+            return
+        driver = DriverId(_select_value(self.query_one("#project-ai-driver", Select)))
+        status = _status_for(snapshot, driver)
+        selected = self.query_one("#project-ai-model", Select).value
+        descriptor = None
+        if status.catalog is not None and selected is not Select.BLANK:
+            descriptor = next(
+                (
+                    model
+                    for model in status.catalog.models
+                    if model.model_id == str(selected)
+                ),
+                None,
+            )
+        difficulties = descriptor.difficulties if descriptor is not None else ()
+        difficulty_select = self.query_one("#project-ai-difficulty", Select)
+        difficulty_options = tuple(
+            (
+                difficulty.value.replace("xhigh", "Extra high").title(),
+                difficulty.value,
+            )
+            for difficulty in difficulties
+        )
+        difficulty_select.set_options(
+            difficulty_options
+            or (("Choose a provider and model first", "__loading__"),)
+        )
+        difficulty_select.disabled = not difficulties
+        preferred = (
+            self.project_settings.effective.effort
+            if self.project_settings is not None
+            and driver.value == self.project_settings.effective.ai_driver
+            else Difficulty.HIGH.value
+        )
+        allowed = tuple(difficulty.value for difficulty in difficulties)
+        if allowed:
+            difficulty_select.value = (
+                preferred if preferred in allowed else next(iter(allowed))
+            )
+
+    def _save_project_settings(self) -> None:
+        project = self.project
+        if project is None or self.project_settings is None:
+            self.show_notice("Project AI settings are still loading.", error=True)
+            return
+        try:
+            override = ProjectAIOverride(
+                ai_driver=DriverId(
+                    _select_value(self.query_one("#project-ai-driver", Select))
+                ),
+                model=_select_value(self.query_one("#project-ai-model", Select)),
+                difficulty=Difficulty(
+                    _select_value(self.query_one("#project-ai-difficulty", Select))
+                ),
+            )
+        except (ValueError, LookupError) as exc:
+            self.show_notice(f"Invalid project AI setting: {exc}", error=True)
+            return
+        expected_revision = self.project_settings.revision
+        self.show_notice("Saving the project-specific provider choice…")
+
+        def save() -> None:
+            try:
+                updated = self.proof_app.service.update_project_verification_settings(
+                    project,
+                    override,
+                    expected_revision=expected_revision,
+                )
+            except Exception as exc:
+                self.proof_app.call_from_thread(
+                    self.show_notice,
+                    f"Project AI settings were not saved: {exc}",
+                    error=True,
+                )
+                return
+            self.proof_app.call_from_thread(self._record_project_settings, updated)
+            self.proof_app.call_from_thread(
+                self.show_notice,
+                "Project provider choice saved. It applies to the next verification run.",
+            )
+
+        self.run_worker(save, thread=True, exclusive=True, group="project-ai-settings")
+
+    def _reset_project_settings(self) -> None:
+        project = self.project
+        if project is None or self.project_settings is None:
+            self.show_notice("Project AI settings are still loading.", error=True)
+            return
+        expected_revision = self.project_settings.revision
+        self.show_notice("Restoring this project to the machine proof defaults…")
+
+        def reset() -> None:
+            try:
+                updated = self.proof_app.service.reset_project_verification_settings(
+                    project,
+                    expected_revision=expected_revision,
+                )
+            except Exception as exc:
+                self.proof_app.call_from_thread(
+                    self.show_notice,
+                    f"Project AI settings were not reset: {exc}",
+                    error=True,
+                )
+                return
+            self.proof_app.call_from_thread(self._record_project_settings, updated)
+            self.proof_app.call_from_thread(
+                self.show_notice,
+                "This project now inherits the current machine proof defaults.",
+            )
+
+        self.run_worker(reset, thread=True, exclusive=True, group="project-ai-settings")
 
     def _load_task_policies(self) -> None:
         """Load policy DTOs without redundantly probing every provider again."""
@@ -1116,13 +1398,15 @@ class SettingsHomeScreen(NoticeScreen):
         with VerticalScroll(id="page"):
             yield CopyableText("Settings", classes="title")
             yield CopyableText(
-                "Settings are machine-wide and apply to every Proof Assistant "
-                "project on this machine. Project-specific overlays are not enabled.\n"
+                "Concurrency, resources, and provider connections are machine-wide. "
+                "When Settings is opened from a project dashboard, AI Providers also "
+                "offers a provider/model/difficulty override for that project's future "
+                "verification runs.\n"
                 + (
-                    f"Calibration context: {self.project}"
+                    f"Project context: {self.project}"
                     if self.project is not None
-                    else "Calibration context: none. Open Settings from a project "
-                    "dashboard to benchmark or reset that project's Lean profile."
+                    else "Project context: none. Open Settings from a project dashboard "
+                    "to edit its verification AI or calibrate its Lean profile."
                 )
             )
             yield TextArea(

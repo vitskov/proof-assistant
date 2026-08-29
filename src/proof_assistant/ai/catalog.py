@@ -95,6 +95,16 @@ DRIVER_DEFINITIONS: dict[DriverId, DriverDefinition] = {
         api_models_url=None,
         difficulties=_CLAUDE_DIFFICULTIES,
         curated_models=(
+            _model(
+                "best",
+                _CLAUDE_DIFFICULTIES,
+                "Claude Best (Fable when entitled; otherwise Opus)",
+            ),
+            _model(
+                "fable",
+                _CLAUDE_DIFFICULTIES,
+                "Claude Fable (account entitlement required)",
+            ),
             _model("opus", _CLAUDE_DIFFICULTIES, "Claude Opus (account alias)"),
             _model("sonnet", _CLAUDE_DIFFICULTIES, "Claude Sonnet (account alias)"),
             _model("haiku", _CLAUDE_DIFFICULTIES, "Claude Haiku (account alias)"),

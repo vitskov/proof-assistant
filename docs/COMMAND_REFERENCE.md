@@ -84,7 +84,9 @@ workflow contracts.
 
 ## AI provider setup
 
-Provider policy is machine-wide. `setup` is an alias for `ai`.
+Provider connections, credentials, and defaults are machine-wide. Existing
+projects may override the provider, model, and difficulty for future runs from
+the project's **Settings** panel. `setup` is an alias for `ai`.
 
 ```bash
 proof-assistant ai status [--driver DRIVER]
@@ -105,6 +107,9 @@ by its catalog.
 - `ai models` labels the catalog `live_account`, `curated_fallback`, or
   `unavailable`.
 - `ai select` persists the primary driver and optional provider defaults.
+- A project's Settings panel can persist or reset its own
+  provider/model/difficulty override; credentials stay machine-owned and
+  running jobs keep their submitted settings.
 - `ai install` prints the exact allowlisted user-local plan and changes
   nothing unless `--yes` approves that plan.
 - `ai credential` uses a hidden prompt by default. `--stdin` consumes one line

@@ -43,6 +43,7 @@ from ..ai import (
 from ..ai import (
     TaskModelPolicy as TaskModelPolicy,
 )
+from ..ai.contracts import validate_model_identifier
 
 CONTRACT_SCHEMA_VERSION = 9
 
@@ -158,7 +159,7 @@ class FailureKind(StrEnum):
 
 
 class SettingsScopeKind(StrEnum):
-    """Persistence scope; PROJECT is reserved for a future overlay."""
+    """Persistence scope for concurrency/resource settings."""
 
     MACHINE = "MACHINE"
     PROJECT = "PROJECT"
@@ -182,6 +183,37 @@ class VerificationSettings:
     setup_timeout: float = 1800.0
     request_timeout: float = 120.0
     gc_timeout: float = 900.0
+
+
+@dataclass(frozen=True)
+class ProjectAIOverride:
+    """Public, secret-free provider choice persisted for one managed project."""
+
+    ai_driver: DriverId
+    model: str
+    difficulty: Difficulty
+
+    def __post_init__(self) -> None:
+        validate_model_identifier(self.model, field_name="project AI model")
+
+
+@dataclass(frozen=True)
+class ProjectVerificationSettingsSnapshot:
+    """Resolved project AI preference plus current machine-derived run settings."""
+
+    project_path: Path
+    revision: int
+    override: ProjectAIOverride | None
+    effective: VerificationSettings
+    validation_error: str | None = None
+
+    @property
+    def inherited(self) -> bool:
+        return self.override is None
+
+    @property
+    def valid(self) -> bool:
+        return self.validation_error is None
 
 
 @dataclass(frozen=True)
@@ -799,7 +831,25 @@ class CancellationToken(Protocol):
 class WorkflowServiceContract(Protocol):
     def default_task_text(self) -> str: ...
 
-    def default_verification_settings(self) -> VerificationSettings: ...
+    def default_verification_settings(
+        self, project: Path | None = None
+    ) -> VerificationSettings: ...
+
+    def get_project_verification_settings(
+        self, project: Path
+    ) -> ProjectVerificationSettingsSnapshot: ...
+
+    def update_project_verification_settings(
+        self,
+        project: Path,
+        override: ProjectAIOverride,
+        *,
+        expected_revision: int,
+    ) -> ProjectVerificationSettingsSnapshot: ...
+
+    def reset_project_verification_settings(
+        self, project: Path, *, expected_revision: int
+    ) -> ProjectVerificationSettingsSnapshot: ...
 
     def get_ai_setup(self) -> ProviderSetupSnapshot: ...
 

@@ -1628,7 +1628,7 @@ def cmd_ai_models(args: argparse.Namespace) -> int:
 
     driver = DriverId(args.driver)
     try:
-        catalog = _ai_provider_service().discover_models(driver)
+        catalog = _ai_provider_service().discover_usable_models(driver)
     except Exception as exc:
         print(f"ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2

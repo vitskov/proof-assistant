@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 from textual.pilot import Pilot
@@ -36,6 +37,11 @@ from proof_assistant.tui.settings import (
     AIAccountVerificationConfirmationScreen,
     AIInstallConfirmationScreen,
     AIProviderSettingsScreen,
+)
+from proof_assistant.workflow import (
+    ProjectAIOverride,
+    ProjectVerificationSettingsSnapshot,
+    VerificationSettings,
 )
 
 
@@ -77,12 +83,26 @@ def _catalog(driver: DriverId) -> ModelCatalog:
                 (Difficulty.AUTO, Difficulty.LOW, Difficulty.HIGH),
             ),
         ),
-        DriverId.CLAUDE_CLI: (
+        DriverId.CLAUDE_CLI: tuple(
             ModelDescriptor(
-                "sonnet",
-                "Claude Sonnet",
-                (Difficulty.AUTO, Difficulty.HIGH),
-            ),
+                model_id,
+                f"Claude {display_name}",
+                (
+                    Difficulty.AUTO,
+                    Difficulty.LOW,
+                    Difficulty.MEDIUM,
+                    Difficulty.HIGH,
+                    Difficulty.XHIGH,
+                    Difficulty.MAX,
+                ),
+            )
+            for model_id, display_name in (
+                ("best", "Best"),
+                ("fable", "Fable"),
+                ("opus", "Opus"),
+                ("sonnet", "Sonnet"),
+                ("haiku", "Haiku"),
+            )
         ),
         DriverId.COPILOT_CLI: (
             ModelDescriptor("auto", "Automatic", (Difficulty.AUTO,)),
@@ -196,6 +216,9 @@ class ProviderWorkflowFake:
     def __init__(self, snapshot: ProviderSetupSnapshot) -> None:
         self.snapshot = snapshot
         self.updates: list[tuple[ProviderConfig, int]] = []
+        self.project_snapshots: dict[Path, ProjectVerificationSettingsSnapshot] = {}
+        self.project_updates: list[tuple[Path, ProjectAIOverride, int]] = []
+        self.project_resets: list[tuple[Path, int]] = []
         self.install_previews: list[DriverId] = []
         self.install_calls: list[tuple[InstallPlan, str]] = []
         self.credential_calls: list[tuple[DriverId, CredentialSource]] = []
@@ -221,6 +244,25 @@ class ProviderWorkflowFake:
             "/Users/test/.local/bin",
             "consent-test-token",
             "Install Claude Code into the user-owned prefix.",
+        )
+
+    def _machine_effective_settings(self) -> VerificationSettings:
+        driver = self.snapshot.primary_driver
+        preference = self.snapshot.settings.config.preference_for(driver)
+        status = _status_by_driver(self.snapshot, driver)
+        catalog_models = status.catalog.models if status.catalog is not None else ()
+        model = preference.model or (
+            catalog_models[0].model_id if catalog_models else "auto"
+        )
+        difficulty = (
+            Difficulty.HIGH
+            if preference.difficulty is Difficulty.AUTO
+            else preference.difficulty
+        )
+        return VerificationSettings(
+            ai_driver=driver.value,
+            model=model,
+            effort=difficulty.value,
         )
 
     def list_projects(self) -> tuple[()]:
@@ -252,6 +294,58 @@ class ProviderWorkflowFake:
             primary_ready=_status_by_driver(self.snapshot, config.primary_driver).ready,
         )
         return self.snapshot
+
+    def get_project_verification_settings(
+        self, project: Path
+    ) -> ProjectVerificationSettingsSnapshot:
+        return self.project_snapshots.setdefault(
+            project,
+            ProjectVerificationSettingsSnapshot(
+                project_path=project,
+                revision=0,
+                override=None,
+                effective=self._machine_effective_settings(),
+            ),
+        )
+
+    def update_project_verification_settings(
+        self,
+        project: Path,
+        override: ProjectAIOverride,
+        *,
+        expected_revision: int,
+    ) -> ProjectVerificationSettingsSnapshot:
+        current = self.get_project_verification_settings(project)
+        assert current.revision == expected_revision
+        self.project_updates.append((project, override, expected_revision))
+        updated = ProjectVerificationSettingsSnapshot(
+            project_path=project,
+            revision=expected_revision + 1,
+            override=override,
+            effective=replace(
+                current.effective,
+                ai_driver=override.ai_driver.value,
+                model=override.model,
+                effort=override.difficulty.value,
+            ),
+        )
+        self.project_snapshots[project] = updated
+        return updated
+
+    def reset_project_verification_settings(
+        self, project: Path, *, expected_revision: int
+    ) -> ProjectVerificationSettingsSnapshot:
+        current = self.get_project_verification_settings(project)
+        assert current.revision == expected_revision
+        self.project_resets.append((project, expected_revision))
+        updated = ProjectVerificationSettingsSnapshot(
+            project_path=project,
+            revision=expected_revision + 1,
+            override=None,
+            effective=self._machine_effective_settings(),
+        )
+        self.project_snapshots[project] = updated
+        return updated
 
     def preview_ai_driver_install(self, driver: DriverId) -> InstallPlan:
         self.install_previews.append(driver)
@@ -417,6 +511,186 @@ async def test_landing_and_revisioned_model_difficulty_update() -> None:
         assert preference.difficulty is Difficulty.XHIGH
         task_text = screen.query_one("#ai-task-policies", TextArea).text
         assert "proof:" in task_text and "resolved by the backend" in task_text
+
+
+@async_test
+async def test_changing_machine_primary_configures_and_saves_claude_fable() -> None:
+    service = ProviderWorkflowFake(_snapshot())
+    app = ProofAssistantApp(service)  # type: ignore[arg-type]
+
+    async with app.run_test(size=(140, 48)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        app.show_ai_provider_settings()
+        await wait_for(pilot, lambda: isinstance(app.screen, AIProviderSettingsScreen))
+        screen = app.screen
+        assert isinstance(screen, AIProviderSettingsScreen)
+        await wait_for(
+            pilot,
+            lambda: not screen.query_one("#ai-primary-driver", Select).disabled,
+        )
+
+        screen.query_one("#ai-primary-driver", Select).value = DriverId.CLAUDE_CLI.value
+        await wait_for(
+            pilot,
+            lambda: (
+                screen.query_one("#ai-configure-driver", Select).value
+                == DriverId.CLAUDE_CLI.value
+            ),
+        )
+        model = screen.query_one("#ai-provider-model", Select)
+        model_values = {str(value) for _, value in model._options}
+        assert {"best", "fable", "opus", "sonnet", "haiku"} <= model_values
+        assert "gpt-5.6-sol" not in model_values
+
+        model.value = "fable"
+        await wait_for(
+            pilot,
+            lambda: (
+                "high"
+                in {
+                    str(value)
+                    for _, value in screen.query_one(
+                        "#ai-provider-difficulty", Select
+                    )._options
+                }
+            ),
+        )
+        screen.query_one("#ai-provider-difficulty", Select).value = "high"
+        screen._save_settings()
+        await wait_for(pilot, lambda: bool(service.updates))
+
+        config, revision = service.updates[-1]
+        assert revision == 1
+        assert config.primary_driver is DriverId.CLAUDE_CLI
+        claude = config.preference_for(DriverId.CLAUDE_CLI)
+        assert claude.model == "fable"
+        assert claude.difficulty is Difficulty.HIGH
+        assert config.preference_for(DriverId.CODEX_CLI).model is None
+
+
+@async_test
+async def test_project_provider_override_is_isolated_and_can_reset_to_inheritance() -> (
+    None
+):
+    project = Path("/test/managed-project")
+    service = ProviderWorkflowFake(_snapshot())
+    app = ProofAssistantApp(service)  # type: ignore[arg-type]
+
+    async with app.run_test(size=(140, 52)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        app.show_ai_provider_settings(project=project)
+        await wait_for(pilot, lambda: isinstance(app.screen, AIProviderSettingsScreen))
+        screen = app.screen
+        assert isinstance(screen, AIProviderSettingsScreen)
+        await wait_for(
+            pilot,
+            lambda: (
+                screen.project_settings is not None
+                and not screen.query_one("#project-ai-driver", Select).disabled
+            ),
+        )
+
+        loaded = screen.project_settings
+        assert loaded is not None and loaded.inherited
+        assert loaded.effective.ai_driver == DriverId.CODEX_CLI.value
+        assert screen.query_one("#project-ai-driver", Select).value == "codex_cli"
+        assert screen.query_one("#project-ai-model", Select).value == "gpt-5.6-sol"
+
+        screen.query_one("#project-ai-driver", Select).value = DriverId.CLAUDE_CLI.value
+        await wait_for(
+            pilot,
+            lambda: (
+                "fable"
+                in {
+                    str(value)
+                    for _, value in screen.query_one(
+                        "#project-ai-model", Select
+                    )._options
+                }
+            ),
+        )
+        screen.query_one("#project-ai-model", Select).value = "fable"
+        await wait_for(
+            pilot,
+            lambda: (
+                "high"
+                in {
+                    str(value)
+                    for _, value in screen.query_one(
+                        "#project-ai-difficulty", Select
+                    )._options
+                }
+            ),
+        )
+        screen.query_one("#project-ai-difficulty", Select).value = "high"
+        screen._save_project_settings()
+        await wait_for(pilot, lambda: bool(service.project_updates))
+
+        saved_project, override, revision = service.project_updates[-1]
+        assert (saved_project, revision) == (project, 0)
+        assert override == ProjectAIOverride(
+            DriverId.CLAUDE_CLI,
+            "fable",
+            Difficulty.HIGH,
+        )
+        assert service.updates == []
+        assert service.snapshot.primary_driver is DriverId.CODEX_CLI
+        assert service.project_snapshots[project].effective.ai_driver == "claude_cli"
+        assert service.project_snapshots[project].effective.model == "fable"
+
+        await wait_for(
+            pilot,
+            lambda: not screen.query_one("#reset-project-ai", Button).disabled,
+        )
+        screen._reset_project_settings()
+        await wait_for(pilot, lambda: bool(service.project_resets))
+        reset = service.project_snapshots[project]
+        assert service.project_resets == [(project, 1)]
+        assert reset.inherited
+        assert reset.revision == 2
+        assert reset.effective.ai_driver == DriverId.CODEX_CLI.value
+        assert reset.effective.model == "gpt-5.6-sol"
+
+
+@async_test
+async def test_switching_project_provider_removes_stale_codex_model_ids() -> None:
+    project = Path("/test/managed-project")
+    service = ProviderWorkflowFake(_snapshot())
+    app = ProofAssistantApp(service)  # type: ignore[arg-type]
+
+    async with app.run_test(size=(140, 52)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        app.show_ai_provider_settings(project=project)
+        await wait_for(pilot, lambda: isinstance(app.screen, AIProviderSettingsScreen))
+        screen = app.screen
+        assert isinstance(screen, AIProviderSettingsScreen)
+        await wait_for(
+            pilot,
+            lambda: (
+                screen.project_settings is not None
+                and screen.query_one("#project-ai-model", Select).value == "gpt-5.6-sol"
+            ),
+        )
+
+        screen.query_one("#project-ai-driver", Select).value = DriverId.CLAUDE_CLI.value
+        await wait_for(
+            pilot,
+            lambda: (
+                "fable"
+                in {
+                    str(value)
+                    for _, value in screen.query_one(
+                        "#project-ai-model", Select
+                    )._options
+                }
+            ),
+        )
+        model_values = {
+            str(value)
+            for _, value in screen.query_one("#project-ai-model", Select)._options
+        }
+        assert model_values == {"best", "fable", "opus", "sonnet", "haiku"}
+        assert not {"gpt-5.6-sol", "gpt-5.6-terra"} & model_values
 
 
 @async_test

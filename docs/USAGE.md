@@ -360,9 +360,13 @@ account model-list command. Copilot's authentication check also remains
 unknown until the user explicitly approves one tiny no-tools request; normal
 startup and refresh never send that request.
 
-Provider settings apply to every project on the machine. Task selection is
-resolved by the backend, and a selected driver still shares the same global AI
-admission controller with all other AI task classes. See
+Provider connections and credentials remain machine-owned. When Settings is
+opened from an existing project, **This project's verification AI** can select
+any ready provider plus one of its available models and difficulties for that
+project. **Use machine defaults** removes the override. The choice affects
+future verification submissions only; each running job keeps the settings it
+started with. A selected driver still shares the same global AI admission
+controller with all other AI task classes. See
 [AI providers and first-time setup](AI_PROVIDERS.md) for commands, credential
 handling, model policy, and execution isolation.
 
@@ -382,11 +386,12 @@ machine to automatic policy. The separate **Legacy settings** page contains
 logical proof-worker count, batch size, and the compatibility per-worker Lean
 pool; these do not replace the three resource controllers.
 
-Settings apply to every project on this machine. A project-overlay scope is
-reserved in the backend contracts but is not enabled. See [Concurrency and
-resource management](CONCURRENCY.md) for formulas, precedence, CLI/environment
-overrides, pressure behavior, benchmarks, provenance, and the upstream
-RepoProver migration map.
+Concurrency and resource settings apply to every project on this machine. The
+project-specific AI override described above covers only provider, model, and
+difficulty; it does not create independent per-project resource limits. See
+[Concurrency and resource management](CONCURRENCY.md) for formulas,
+precedence, CLI/environment overrides, pressure behavior, benchmarks,
+provenance, and the upstream RepoProver migration map.
 
 ## Advanced status commands
 

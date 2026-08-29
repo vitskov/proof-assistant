@@ -959,7 +959,20 @@ class ProofAssistantApp(App[None]):
     ) -> None:
         """Submit a detached backend job, then observe its durable event stream."""
 
-        chosen_settings = settings or self.service.default_verification_settings()
+        if settings is None:
+            try:
+                chosen_settings = self.service.default_verification_settings(
+                    project.project_path
+                )
+            except Exception as exc:
+                self.show_error(
+                    "Verification AI settings are not usable",
+                    str(exc),
+                    project.project_path,
+                )
+                return
+        else:
+            chosen_settings = settings
         progress_screen = ProgressScreen(
             "Submitting detached verification",
             project=project.project_path,

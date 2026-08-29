@@ -86,6 +86,9 @@ it is not ready, **Set up your primary AI driver** lets you inspect or install a
 CLI, copy its native login step, choose an API credential source, and select a
 model/difficulty. A CLI install requires review and explicit approval, and the
 Copilot quota-consuming account probe is never sent without separate consent.
+After a project exists, its Settings panel can choose a different ready
+provider, model, and difficulty for future verification runs without moving
+credentials into the project or changing an already-running job.
 See
 [AI providers and first-time setup](docs/AI_PROVIDERS.md).
 

@@ -110,8 +110,30 @@ claude auth login
 
 Proof Assistant checks `claude auth status --text`. Claude Code does not expose
 a documented noninteractive account model-list operation, so the current
-catalog contains clearly labeled account aliases (`opus`, `sonnet`, and
-`haiku`) rather than claiming a live inventory.
+catalog contains clearly labeled account aliases (`best`, `fable`, `opus`,
+`sonnet`, and `haiku`) rather than claiming a live inventory. `best` asks
+Claude Code for its strongest available model: Fable 5 when the account and
+organization are entitled to it, otherwise the latest Opus. Selecting `fable`
+explicitly requests Fable and can fail when the account is not entitled.
+
+Fable support requires Claude Code 2.1.170 or newer. Anthropic describes Fable
+as the option for the hardest and longest-running work; it can require usage
+credits and is not available to every account or organization. Proof Assistant
+therefore uses `best` rather than `fable` as the automatic proof default, so
+Claude Code can apply the documented Opus fallback. The packaged Claude task
+defaults are:
+
+- `best` for proof construction and independent duplicate proofs;
+- `opus` for clarification, diagnosis, and review;
+- `sonnet` for proof sketches and maintenance;
+- `haiku` for reporting; and
+- explicit `fable` selection when the user knows the account has access and
+  wants to require it.
+
+See Anthropic's [Claude Code model
+configuration](https://code.claude.com/docs/en/model-config) and [model
+overview](https://platform.claude.com/docs/en/models/overview). Proof
+Assistant does not send a paid test request merely to discover Fable access.
 
 ### GitHub Copilot CLI
 
@@ -203,19 +225,31 @@ the TUI/catalog output. A selection unsupported by that driver/model is
 rejected before execution. In particular, named levels are not assumed to map
 identically between providers.
 
-Selection precedence inside the machine policy is deterministic:
+Selection precedence is deterministic:
 
 ```text
+explicit settings supplied for one run
+  > project provider/model/difficulty override
+  > machine task/provider policy
+
 task-specific driver       > machine primary driver
 task-specific model        > provider model       > task recommendation
 task-specific difficulty   > provider difficulty  > task recommendation
 ```
 
-The 0.1 TUI edits the primary driver and each provider's model, difficulty, and
-credential source. It displays the resolved task policies; the data contract
-already separates per-task policy so a future editor does not require a new
-backend boundary. The noninteractive `manuscript verify` command also accepts
-explicit `--ai-driver`, `--model`, and `--effort` values for that run.
+The TUI edits the machine's primary driver, provider connections, model,
+difficulty, and credential source. From an existing project's dashboard, the
+same panel can also save a project-only provider/model/difficulty override or
+reset that project to the machine policy. The override is stored in
+`.repoprover/verification-settings.json`; it never contains credentials. It is
+resolved when a verification is submitted, and the resulting settings are
+frozen in the durable job, so changing the panel does not mutate a running job.
+If a saved model later disappears, a CLI is downgraded, or authentication
+expires, Settings keeps the stored revision visible and allows **Use machine
+defaults**; Proof Assistant blocks a new run instead of silently substituting a
+different model.
+The noninteractive `manuscript verify` command also accepts explicit
+`--ai-driver`, `--model`, and `--effort` values for that run.
 
 ### Live and curated catalogs
 

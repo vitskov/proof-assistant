@@ -24,6 +24,7 @@ from ..ai import (
     MachineProviderConfigStore,
     ModelCatalog,
     ProviderConfig,
+    ProviderError,
     ProviderService,
     ProviderSetupSnapshot,
     SecretSubmission,
@@ -161,6 +162,7 @@ from .contracts import (
     ProgressEvent,
     ProgressPhase,
     ProgressSink,
+    ProjectAIOverride,
     ProjectAvailability,
     ProjectCatalogEntry,
     ProjectDeletionAvailability,
@@ -168,6 +170,7 @@ from .contracts import (
     ProjectDeletionResult,
     ProjectDestinationInspection,
     ProjectSummary,
+    ProjectVerificationSettingsSnapshot,
     ReportDocument,
     ResourceTelemetryView,
     SettingResolution,
@@ -184,6 +187,7 @@ from .contracts import (
 )
 from .jobs import VerificationJobStore, request_fingerprint
 from .preferences import LocalPreferenceStore
+from .project_ai import ProjectAISettingsStore
 
 _EnumT = TypeVar("_EnumT", bound=StrEnum)
 
@@ -386,13 +390,30 @@ class ProofAssistantWorkflow:
         """Return the validated instructions seeded into the TUI task editor."""
         return DEFAULT_TASK_INSTRUCTIONS
 
-    def default_verification_settings(self) -> VerificationSettings:
-        """Return run defaults resolved from the machine-scoped legacy section."""
+    def default_verification_settings(
+        self, project: Path | None = None
+    ) -> VerificationSettings:
+        """Resolve current machine defaults plus an optional project AI override."""
+
+        if project is not None:
+            snapshot = self.get_project_verification_settings(project)
+            if snapshot.validation_error is not None:
+                raise ValueError(
+                    "The project's AI override is not currently usable: "
+                    + snapshot.validation_error
+                )
+            return snapshot.effective
+        return self._machine_verification_settings()
+
+    def _machine_verification_settings(self) -> VerificationSettings:
+        """Return run defaults resolved only from machine-scoped policy."""
 
         resolved = self._resolved_concurrency()
         legacy = resolved.config.legacy
         try:
             policy = self._configured_task_policy(TaskKind.PROOF)
+        except ProviderError:
+            raise
         except Exception:
             configured = self._provider_service.config_store.load().config
             driver_id = configured.primary_driver
@@ -422,6 +443,120 @@ class ProofAssistantWorkflow:
             lean_pool_size=legacy.lean_pool_size,
         )
 
+    @staticmethod
+    def _project_ai_store(project: Path) -> ProjectAISettingsStore:
+        managed = validate_managed_project_path(project)
+        IncrementalSession(managed)._load_config()
+        return ProjectAISettingsStore(managed)
+
+    def _validate_project_ai_override(self, override: ProjectAIOverride) -> None:
+        settings = self._provider_service.config_store.load()
+        preference = settings.config.preference_for(override.ai_driver)
+        if not preference.enabled:
+            raise ValueError(
+                f"AI driver {override.ai_driver.value} is disabled in machine settings"
+            )
+        status = self._provider_service.inspect_driver(
+            override.ai_driver,
+            preference=preference,
+        )
+        if not status.ready:
+            raise ValueError(
+                f"AI driver {override.ai_driver.value} is not installed and authenticated"
+            )
+        catalog = status.catalog
+        if catalog is None:
+            raise ValueError(
+                f"AI driver {override.ai_driver.value} has no model catalog"
+            )
+        if not catalog.contract_approved:
+            raise ValueError(
+                f"AI driver {override.ai_driver.value} has no validated model catalog"
+            )
+        self._provider_service.validate_difficulty(
+            override.ai_driver,
+            override.model,
+            override.difficulty,
+            catalog=catalog,
+        )
+
+    def _project_settings_snapshot(
+        self,
+        store: ProjectAISettingsStore,
+        revision: int,
+        override: ProjectAIOverride | None,
+        *,
+        validate: bool,
+        machine_settings: VerificationSettings | None = None,
+    ) -> ProjectVerificationSettingsSnapshot:
+        effective = machine_settings or self._machine_verification_settings()
+        validation_error = None
+        if override is not None:
+            effective = replace(
+                effective,
+                ai_driver=override.ai_driver.value,
+                model=override.model,
+                effort=override.difficulty.value,
+            )
+            if validate:
+                try:
+                    self._validate_project_ai_override(override)
+                except ValueError as exc:
+                    validation_error = str(exc)
+        return ProjectVerificationSettingsSnapshot(
+            project_path=store.project_path,
+            revision=revision,
+            override=override,
+            effective=effective,
+            validation_error=validation_error,
+        )
+
+    def get_project_verification_settings(
+        self, project: Path
+    ) -> ProjectVerificationSettingsSnapshot:
+        """Return the resolved AI choice for future runs of one managed project."""
+
+        store = self._project_ai_store(project)
+        revision, override = store.load()
+        return self._project_settings_snapshot(store, revision, override, validate=True)
+
+    def update_project_verification_settings(
+        self,
+        project: Path,
+        override: ProjectAIOverride,
+        *,
+        expected_revision: int,
+    ) -> ProjectVerificationSettingsSnapshot:
+        """Persist a validated, secret-free project AI override."""
+
+        machine_settings = self._machine_verification_settings()
+        self._validate_project_ai_override(override)
+        store = self._project_ai_store(project)
+        revision, saved = store.save(override, expected_revision=expected_revision)
+        return self._project_settings_snapshot(
+            store,
+            revision,
+            saved,
+            validate=False,
+            machine_settings=machine_settings,
+        )
+
+    def reset_project_verification_settings(
+        self, project: Path, *, expected_revision: int
+    ) -> ProjectVerificationSettingsSnapshot:
+        """Restore machine inheritance without changing any active job."""
+
+        machine_settings = self._machine_verification_settings()
+        store = self._project_ai_store(project)
+        revision, override = store.save(None, expected_revision=expected_revision)
+        return self._project_settings_snapshot(
+            store,
+            revision,
+            override,
+            validate=False,
+            machine_settings=machine_settings,
+        )
+
     def _configured_task_policy(self, task: TaskKind) -> TaskModelPolicy:
         """Resolve a task against the account-visible catalog when available."""
 
@@ -432,7 +567,7 @@ class ProofAssistantWorkflow:
             if preference is not None and preference.driver is not None
             else settings.config.primary_driver
         )
-        catalog = self._provider_service.discover_models(
+        catalog = self._provider_service.discover_usable_models(
             driver,
             preference=settings.config.preference_for(driver),
         )

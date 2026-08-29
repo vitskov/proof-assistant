@@ -612,7 +612,10 @@ class FakeWorkflowService:
     def default_task_text(self) -> str:
         return "Verify every claimed theorem without sorry or new axioms."
 
-    def default_verification_settings(self) -> VerificationSettings:
+    def default_verification_settings(
+        self, project: Path | None = None
+    ) -> VerificationSettings:
+        del project
         return self.default_settings
 
     def get_machine_settings(

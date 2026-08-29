@@ -316,6 +316,35 @@ def _catalog_fallback(driver: DriverId, detail: str) -> ModelCatalog:
     )
 
 
+def _claude_catalog_for_version(
+    catalog: ModelCatalog, version: str | None
+) -> ModelCatalog:
+    """Hide Fable-era aliases from Claude Code releases that cannot use them."""
+
+    if catalog.driver is not DriverId.CLAUDE_CLI:
+        return catalog
+    match = re.search(r"(?<!\d)(\d+)\.(\d+)(?:\.(\d+))?", version or "")
+    parsed = (
+        tuple(int(part or 0) for part in match.groups()) if match is not None else None
+    )
+    if parsed is not None and parsed >= (2, 1, 170):
+        return catalog
+    models = tuple(
+        model for model in catalog.models if model.model_id not in {"best", "fable"}
+    )
+    detail = (
+        f"{catalog.detail} Claude Code 2.1.170 or newer is required for the "
+        "best and fable aliases."
+    )
+    return ModelCatalog(
+        driver=catalog.driver,
+        models=models,
+        source=catalog.source,
+        detail=detail,
+        contract_approved=catalog.contract_approved and bool(models),
+    )
+
+
 def _difficulty(value: object) -> Difficulty | None:
     raw = str(getattr(value, "value", value)).casefold().replace("-", "")
     aliases = {"extra_high": "xhigh", "extra-high": "xhigh"}
@@ -603,6 +632,8 @@ class ProviderService:
             if discover_models
             else None
         )
+        if catalog is not None and driver is DriverId.CLAUDE_CLI:
+            catalog = _claude_catalog_for_version(catalog, version)
         return DriverStatus(
             driver=driver,
             transport=definition.transport,
@@ -733,6 +764,21 @@ class ProviderService:
             detail="Live models reported by Codex app-server.",
             contract_approved=True,
         )
+
+    def discover_usable_models(
+        self,
+        driver: DriverId,
+        *,
+        preference: DriverPreference | None = None,
+    ) -> ModelCatalog:
+        """Apply installed-CLI capability gates to the provider model catalog."""
+
+        selected = self._preference(driver, preference)
+        if driver is DriverId.CLAUDE_CLI and self._resolve_executable(driver):
+            status = self.inspect_driver(driver, preference=selected)
+            if status.catalog is not None:
+                return status.catalog
+        return self.discover_models(driver, preference=selected)
 
     def _discover_codex_models_native(self, executable: str) -> ModelCatalog:
         """Use the long-lived app-server protocol and always close the child."""
@@ -1306,7 +1352,7 @@ class ProviderService:
         def catalog_for(driver: DriverId) -> ModelCatalog:
             catalog = catalogs.get(driver)
             if catalog is None:
-                catalog = self.discover_models(
+                catalog = self.discover_usable_models(
                     driver, preference=config.preference_for(driver)
                 )
                 catalogs[driver] = catalog
@@ -1349,13 +1395,15 @@ class ProviderService:
             else loaded.config.primary_driver
         )
         driver_preference = loaded.config.preference_for(driver)
-        available = catalog or self.discover_models(
+        available = catalog or self.discover_usable_models(
             driver, preference=driver_preference
         )
         explicit_model = (
             task_preference.model if task_preference is not None else None
         ) or driver_preference.model
-        model = explicit_model or self._recommended_model(task, available.models)
+        model = explicit_model or self._recommended_model(
+            task, driver, available.models
+        )
         explicit_difficulty = (
             task_preference.difficulty
             if task_preference is not None
@@ -1390,10 +1438,33 @@ class ProviderService:
 
     @staticmethod
     def _recommended_model(
-        task: TaskKind, models: tuple[ModelDescriptor, ...]
+        task: TaskKind,
+        driver: DriverId,
+        models: tuple[ModelDescriptor, ...],
     ) -> str | None:
         if not models:
             return None
+        if driver is DriverId.CLAUDE_CLI:
+            available = {item.model_id for item in models}
+            if task in {TaskKind.PROOF, TaskKind.DUPLICATE_PROOF}:
+                preferences = ("best", "fable", "opus", "sonnet", "haiku")
+            elif task in {
+                TaskKind.CLARIFICATION,
+                TaskKind.DIAGNOSTIC,
+                TaskKind.REVIEW,
+            }:
+                preferences = ("opus", "best", "fable", "sonnet", "haiku")
+            elif task in {TaskKind.SKETCH, TaskKind.MAINTENANCE}:
+                preferences = ("sonnet", "opus", "best", "fable", "haiku")
+            else:
+                preferences = ("haiku", "sonnet", "opus", "best", "fable")
+            alias_model = next(
+                (model_id for model_id in preferences if model_id in available),
+                None,
+            )
+            if alias_model is not None:
+                return alias_model
+
         strong_tokens = ("sol", "opus", "pro", "reason", "o3", "o4")
         light_tokens = ("luna", "haiku", "flash", "mini", "nano")
 

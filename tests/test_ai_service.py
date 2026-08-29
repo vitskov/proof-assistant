@@ -24,6 +24,7 @@ from proof_assistant.ai import (
     SetupActionState,
     ShellPathManager,
     TaskKind,
+    TaskPreference,
     UnsupportedDifficultyError,
 )
 
@@ -798,6 +799,237 @@ def test_task_policy_uses_task_override_catalog_and_validates_difficulty(tmp_pat
 
     with pytest.raises(UnsupportedDifficultyError):
         core.validate_difficulty(DriverId.GEMINI_API, "gemini", Difficulty.XHIGH)
+
+
+def test_claude_catalog_is_non_live_and_documents_current_aliases(tmp_path):
+    catalog = service(
+        tmp_path,
+        commands=FakeCommands(),
+        executables=FakeExecutables(),
+        http=FakeHttp(HttpResponse(500, b"")),
+        credentials=FakeCredentials(),
+        path_manager=FakePathManager(),
+    ).discover_models(DriverId.CLAUDE_CLI)
+
+    assert catalog.source is DiscoverySource.CURATED_FALLBACK
+    assert not catalog.live
+    assert "not a live catalog" in catalog.detail
+    assert [item.model_id for item in catalog.models] == [
+        "best",
+        "fable",
+        "opus",
+        "sonnet",
+        "haiku",
+    ]
+    by_id = {item.model_id: item for item in catalog.models}
+    assert "Fable when entitled; otherwise Opus" in by_id["best"].display_name
+    assert "entitlement required" in by_id["fable"].display_name
+    assert all(
+        item.difficulties
+        == (
+            Difficulty.AUTO,
+            Difficulty.LOW,
+            Difficulty.MEDIUM,
+            Difficulty.HIGH,
+            Difficulty.XHIGH,
+            Difficulty.MAX,
+        )
+        for item in catalog.models
+    )
+
+
+@pytest.mark.parametrize(
+    ("version", "expected_models"),
+    (
+        ("2.1.169 (Claude Code)", ("opus", "sonnet", "haiku")),
+        (
+            "2.1.170 (Claude Code)",
+            ("best", "fable", "opus", "sonnet", "haiku"),
+        ),
+    ),
+)
+def test_claude_inspection_gates_fable_aliases_by_cli_version(
+    tmp_path, version, expected_models
+):
+    def handler(argv, input_text):
+        del input_text
+        if argv == ("/tools/claude", "--version"):
+            return CommandResult(0, version)
+        if argv == ("/tools/claude", "auth", "status", "--text"):
+            return CommandResult(0, "logged in")
+        raise AssertionError(argv)
+
+    status = service(
+        tmp_path,
+        commands=FakeCommands(handler),
+        executables=FakeExecutables({"claude": "/tools/claude"}),
+        http=FakeHttp(HttpResponse(500, b"")),
+        credentials=FakeCredentials(),
+        path_manager=FakePathManager(),
+    ).inspect_driver(DriverId.CLAUDE_CLI)
+
+    assert status.ready
+    assert status.catalog is not None
+    assert tuple(model.model_id for model in status.catalog.models) == expected_models
+    if "fable" not in expected_models:
+        assert "2.1.170 or newer" in status.catalog.detail
+
+
+def test_machine_defaults_reject_fable_after_claude_cli_downgrade(tmp_path):
+    from proof_assistant.workflow.service import ProofAssistantWorkflow
+
+    def handler(argv, input_text):
+        del input_text
+        if argv == ("/tools/claude", "--version"):
+            return CommandResult(0, "2.1.169 (Claude Code)")
+        if argv == ("/tools/claude", "auth", "status", "--text"):
+            return CommandResult(0, "logged in")
+        raise AssertionError(argv)
+
+    core = service(
+        tmp_path,
+        commands=FakeCommands(handler),
+        executables=FakeExecutables({"claude": "/tools/claude"}),
+        http=FakeHttp(HttpResponse(500, b"")),
+        credentials=FakeCredentials(),
+        path_manager=FakePathManager(),
+    )
+    current = core.config_store.load()
+    preferences = tuple(
+        replace(
+            preference,
+            model="fable",
+            difficulty=Difficulty.HIGH,
+        )
+        if preference.driver is DriverId.CLAUDE_CLI
+        else preference
+        for preference in current.config.drivers
+    )
+    core.config_store.save(
+        replace(
+            current.config,
+            primary_driver=DriverId.CLAUDE_CLI,
+            drivers=preferences,
+        ),
+        expected_revision=current.revision,
+    )
+    workflow = ProofAssistantWorkflow(
+        catalog_root=tmp_path / "catalog.json",
+        cache_home=str(tmp_path / "cache"),
+        machine_config_path=tmp_path / "machine" / "settings.yaml",
+        provider_service=core,
+        use_codex_clarification=False,
+    )
+
+    with pytest.raises(ProviderConfigError, match="not present"):
+        workflow.default_verification_settings()
+
+
+@pytest.mark.parametrize(
+    ("task", "expected_model", "expected_difficulty"),
+    [
+        (TaskKind.PROOF, "best", Difficulty.HIGH),
+        (TaskKind.DUPLICATE_PROOF, "best", Difficulty.HIGH),
+        (TaskKind.CLARIFICATION, "opus", Difficulty.HIGH),
+        (TaskKind.DIAGNOSTIC, "opus", Difficulty.HIGH),
+        (TaskKind.REVIEW, "opus", Difficulty.HIGH),
+        (TaskKind.SKETCH, "sonnet", Difficulty.MEDIUM),
+        (TaskKind.MAINTENANCE, "sonnet", Difficulty.MEDIUM),
+        (TaskKind.REPORTING, "haiku", Difficulty.LOW),
+    ],
+)
+def test_claude_task_policy_routes_by_task(
+    tmp_path, task, expected_model, expected_difficulty
+):
+    core = service(
+        tmp_path,
+        commands=FakeCommands(),
+        executables=FakeExecutables(),
+        http=FakeHttp(HttpResponse(500, b"")),
+        credentials=FakeCredentials(),
+        path_manager=FakePathManager(),
+    )
+    current = core.config_store.load()
+    settings = core.config_store.save(
+        replace(current.config, primary_driver=DriverId.CLAUDE_CLI),
+        expected_revision=current.revision,
+    )
+    policy = core.recommend_task_policy(task, settings=settings)
+
+    assert policy.model == expected_model
+    assert policy.difficulty is expected_difficulty
+
+
+@pytest.mark.parametrize(
+    ("models", "expected_model"),
+    [
+        (("fable", "opus"), "fable"),
+        (("opus", "sonnet"), "opus"),
+        (("sonnet", "haiku"), "sonnet"),
+    ],
+)
+def test_claude_proof_policy_falls_back_deterministically(
+    tmp_path, models, expected_model
+):
+    core = service(
+        tmp_path,
+        commands=FakeCommands(),
+        executables=FakeExecutables(),
+        http=FakeHttp(HttpResponse(500, b"")),
+        credentials=FakeCredentials(),
+        path_manager=FakePathManager(),
+    )
+    current = core.config_store.load()
+    settings = core.config_store.save(
+        replace(current.config, primary_driver=DriverId.CLAUDE_CLI),
+        expected_revision=current.revision,
+    )
+    catalog = ModelCatalog(
+        driver=DriverId.CLAUDE_CLI,
+        models=tuple(
+            ModelDescriptor(model_id, model_id, (Difficulty.AUTO, Difficulty.HIGH))
+            for model_id in models
+        ),
+        source=DiscoverySource.CURATED_FALLBACK,
+        contract_approved=True,
+    )
+
+    policy = core.recommend_task_policy(
+        TaskKind.PROOF, settings=settings, catalog=catalog
+    )
+    assert policy.model == expected_model
+
+
+def test_claude_task_model_override_wins_over_provider_override(tmp_path):
+    core = service(
+        tmp_path,
+        commands=FakeCommands(),
+        executables=FakeExecutables(),
+        http=FakeHttp(HttpResponse(500, b"")),
+        credentials=FakeCredentials(),
+        path_manager=FakePathManager(),
+    )
+    current = core.config_store.load()
+    preferences = tuple(
+        replace(item, model="sonnet")
+        if item.driver is DriverId.CLAUDE_CLI
+        else item
+        for item in current.config.drivers
+    )
+    settings = core.config_store.save(
+        replace(
+            current.config,
+            primary_driver=DriverId.CLAUDE_CLI,
+            drivers=preferences,
+            tasks=(TaskPreference(TaskKind.PROOF, model="haiku"),),
+        ),
+        expected_revision=current.revision,
+    )
+
+    policy = core.recommend_task_policy(TaskKind.PROOF, settings=settings)
+    assert policy.model == "haiku"
+    assert policy.difficulty is Difficulty.HIGH
+    assert policy.explanation == "Uses an explicit machine/task override."
 
 
 def test_setup_snapshot_requires_auth_and_contract_approved_catalog(tmp_path):
