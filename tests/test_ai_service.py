@@ -380,7 +380,9 @@ def test_shell_path_manager_uses_existing_bash_login_file(tmp_path):
 
 def test_shell_path_manager_migrates_legacy_owned_bash_profile(tmp_path):
     bin_path = tmp_path / ".local" / "bin"
-    legacy = b"# Added by Proof Assistant\n" + f'export PATH={bin_path}:"$PATH"\n'.encode()
+    legacy = (
+        b"# Added by Proof Assistant\n" + f'export PATH={bin_path}:"$PATH"\n'.encode()
+    )
     bash_profile = tmp_path / ".bash_profile"
     bash_profile.write_bytes(legacy)
     profile = tmp_path / ".profile"
@@ -510,9 +512,7 @@ def test_shell_path_manager_honors_custom_zsh_and_fish_roots(tmp_path):
     )
     fish.ensure(bin_path)
     fish.ensure(bin_path)
-    fish_config = (xdg_config / "fish" / "config.fish").read_text(
-        encoding="utf-8"
-    )
+    fish_config = (xdg_config / "fish" / "config.fish").read_text(encoding="utf-8")
     assert fish_config.count("# Added by Proof Assistant") == 1
     assert "fish_add_path --path" in fish_config
 
@@ -929,7 +929,7 @@ def test_machine_defaults_reject_fable_after_claude_cli_downgrade(tmp_path):
     ("task", "expected_model", "expected_difficulty"),
     [
         (TaskKind.PROOF, "best", Difficulty.HIGH),
-        (TaskKind.DUPLICATE_PROOF, "best", Difficulty.HIGH),
+        (TaskKind.DUPLICATE_PROOF, "fable", Difficulty.XHIGH),
         (TaskKind.CLARIFICATION, "opus", Difficulty.HIGH),
         (TaskKind.DIAGNOSTIC, "opus", Difficulty.HIGH),
         (TaskKind.REVIEW, "opus", Difficulty.HIGH),
@@ -958,6 +958,40 @@ def test_claude_task_policy_routes_by_task(
 
     assert policy.model == expected_model
     assert policy.difficulty is expected_difficulty
+
+
+def test_role_recommendation_never_selects_none(tmp_path):
+    core = service(
+        tmp_path,
+        commands=FakeCommands(),
+        executables=FakeExecutables(),
+        http=FakeHttp(HttpResponse(500, b"")),
+        credentials=FakeCredentials(),
+        path_manager=FakePathManager(),
+    )
+    current = core.config_store.load()
+    catalog = ModelCatalog(
+        driver=DriverId.COPILOT_CLI,
+        models=(
+            ModelDescriptor(
+                "auto",
+                "Automatic",
+                (Difficulty.NONE, Difficulty.AUTO),
+            ),
+        ),
+        source=DiscoverySource.CURATED_FALLBACK,
+        contract_approved=True,
+    )
+    settings = replace(
+        current,
+        config=replace(current.config, primary_driver=DriverId.COPILOT_CLI),
+    )
+
+    policy = core.recommend_task_policy(
+        TaskKind.REPORTING, settings=settings, catalog=catalog
+    )
+
+    assert policy.difficulty is Difficulty.AUTO
 
 
 @pytest.mark.parametrize(
@@ -1011,9 +1045,7 @@ def test_claude_task_model_override_wins_over_provider_override(tmp_path):
     )
     current = core.config_store.load()
     preferences = tuple(
-        replace(item, model="sonnet")
-        if item.driver is DriverId.CLAUDE_CLI
-        else item
+        replace(item, model="sonnet") if item.driver is DriverId.CLAUDE_CLI else item
         for item in current.config.drivers
     )
     settings = core.config_store.save(
@@ -1030,6 +1062,64 @@ def test_claude_task_model_override_wins_over_provider_override(tmp_path):
     assert policy.model == "haiku"
     assert policy.difficulty is Difficulty.HIGH
     assert policy.explanation == "Uses an explicit machine/task override."
+
+
+def test_provider_default_matrix_ignores_stale_global_and_task_overrides(tmp_path):
+    core = service(
+        tmp_path,
+        commands=FakeCommands(),
+        executables=FakeExecutables(),
+        http=FakeHttp(HttpResponse(500, b"")),
+        credentials=FakeCredentials(),
+        path_manager=FakePathManager(),
+    )
+    current = core.config_store.load()
+    drivers = tuple(
+        replace(item, model="haiku", difficulty=Difficulty.LOW)
+        if item.driver is DriverId.CLAUDE_CLI
+        else item
+        for item in current.config.drivers
+    )
+    settings = replace(
+        current,
+        config=replace(
+            current.config,
+            primary_driver=DriverId.CLAUDE_CLI,
+            drivers=drivers,
+            tasks=(
+                TaskPreference(
+                    TaskKind.PROOF,
+                    driver=DriverId.CODEX_CLI,
+                    model="gpt-5.6-luna",
+                    difficulty=Difficulty.LOW,
+                ),
+            ),
+        ),
+    )
+
+    policies = core.recommend_driver_task_policies(
+        DriverId.CLAUDE_CLI, settings=settings
+    )
+
+    resolved = {
+        item.task: (item.driver, item.model, item.difficulty) for item in policies
+    }
+    assert set(resolved) == set(TaskKind)
+    assert resolved[TaskKind.PROOF] == (
+        DriverId.CLAUDE_CLI,
+        "best",
+        Difficulty.HIGH,
+    )
+    assert resolved[TaskKind.DUPLICATE_PROOF] == (
+        DriverId.CLAUDE_CLI,
+        "fable",
+        Difficulty.XHIGH,
+    )
+    assert resolved[TaskKind.REPORTING] == (
+        DriverId.CLAUDE_CLI,
+        "haiku",
+        Difficulty.LOW,
+    )
 
 
 def test_setup_snapshot_requires_auth_and_contract_approved_catalog(tmp_path):

@@ -41,11 +41,17 @@ from ..ai import (
     SecretSubmission as SecretSubmission,
 )
 from ..ai import (
+    TaskKind as TaskKind,
+)
+from ..ai import (
     TaskModelPolicy as TaskModelPolicy,
+)
+from ..ai import (
+    TaskPreference as TaskPreference,
 )
 from ..ai.contracts import validate_model_identifier
 
-CONTRACT_SCHEMA_VERSION = 9
+CONTRACT_SCHEMA_VERSION = 10
 
 
 class WorkflowState(StrEnum):
@@ -172,6 +178,23 @@ class BenchmarkKind(StrEnum):
 
 
 @dataclass(frozen=True)
+class VerificationRoleSettings:
+    """Frozen provider/model/effort assignment for one RepoProver role."""
+
+    task: TaskKind
+    ai_driver: str
+    model: str
+    effort: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.task, TaskKind):
+            raise TypeError("verification role task must be a TaskKind")
+        DriverId(self.ai_driver)
+        validate_model_identifier(self.model, field_name=f"{self.task.value} model")
+        Difficulty(self.effort)
+
+
+@dataclass(frozen=True)
 class VerificationSettings:
     ai_driver: str = "codex_cli"
     model: str = "gpt-5.6-sol"
@@ -183,18 +206,91 @@ class VerificationSettings:
     setup_timeout: float = 1800.0
     request_timeout: float = 120.0
     gc_timeout: float = 900.0
+    role_settings: tuple[VerificationRoleSettings, ...] = ()
+
+    def __post_init__(self) -> None:
+        DriverId(self.ai_driver)
+        validate_model_identifier(self.model, field_name="verification model")
+        Difficulty(self.effort)
+        if any(
+            not isinstance(item, VerificationRoleSettings)
+            for item in self.role_settings
+        ):
+            raise TypeError("role_settings must contain VerificationRoleSettings")
+        tasks = tuple(item.task for item in self.role_settings)
+        if len(tasks) != len(set(tasks)):
+            raise ValueError("verification role settings must be unique")
+        if self.role_settings and set(tasks) != set(TaskKind):
+            missing = sorted(task.value for task in set(TaskKind) - set(tasks))
+            raise ValueError(
+                "frozen verification settings require every role; missing: "
+                + ", ".join(missing)
+            )
+        if self.role_settings:
+            proof = next(
+                item for item in self.role_settings if item.task is TaskKind.PROOF
+            )
+            if (self.ai_driver, self.model, self.effort) != (
+                proof.ai_driver,
+                proof.model,
+                proof.effort,
+            ):
+                raise ValueError(
+                    "verification scalar compatibility fields must match the proof role"
+                )
+
+    def for_task(self, task: TaskKind) -> VerificationRoleSettings:
+        """Return the frozen role assignment, with legacy proof fallback."""
+
+        for setting in self.role_settings:
+            if setting.task is task:
+                return setting
+        return VerificationRoleSettings(
+            task=task,
+            ai_driver=self.ai_driver,
+            model=self.model,
+            effort=self.effort,
+        )
 
 
 @dataclass(frozen=True)
-class ProjectAIOverride:
-    """Public, secret-free provider choice persisted for one managed project."""
+class ProjectAIRoleOverride:
+    """Secret-free model and effort choice for one project role."""
 
-    ai_driver: DriverId
+    task: TaskKind
     model: str
     difficulty: Difficulty
 
     def __post_init__(self) -> None:
-        validate_model_identifier(self.model, field_name="project AI model")
+        if not isinstance(self.task, TaskKind):
+            raise TypeError("project AI role task must be a TaskKind")
+        validate_model_identifier(
+            self.model, field_name=f"project {self.task.value} model"
+        )
+
+
+@dataclass(frozen=True)
+class ProjectAIOverride:
+    """One provider plus explicit role-aware choices for a managed project."""
+
+    ai_driver: DriverId
+    roles: tuple[ProjectAIRoleOverride, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.ai_driver, DriverId):
+            raise TypeError("project AI driver must be a DriverId")
+        if any(not isinstance(item, ProjectAIRoleOverride) for item in self.roles):
+            raise TypeError("project AI roles must contain ProjectAIRoleOverride")
+        tasks = tuple(item.task for item in self.roles)
+        if len(tasks) != len(set(tasks)):
+            raise ValueError("project AI role overrides must be unique")
+
+    def role_for(self, task: TaskKind) -> ProjectAIRoleOverride | None:
+        return next((item for item in self.roles if item.task is task), None)
+
+    @property
+    def complete(self) -> bool:
+        return {item.task for item in self.roles} == set(TaskKind)
 
 
 @dataclass(frozen=True)
@@ -857,7 +953,9 @@ class WorkflowServiceContract(Protocol):
         self, config: ProviderConfig, *, expected_revision: int
     ) -> ProviderSetupSnapshot: ...
 
-    def ai_task_policies(self) -> tuple[TaskModelPolicy, ...]: ...
+    def ai_task_policies(
+        self, driver: DriverId | None = None
+    ) -> tuple[TaskModelPolicy, ...]: ...
 
     def preview_ai_driver_install(self, driver: DriverId) -> InstallPlan: ...
 

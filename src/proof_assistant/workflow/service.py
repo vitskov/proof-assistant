@@ -24,13 +24,11 @@ from ..ai import (
     MachineProviderConfigStore,
     ModelCatalog,
     ProviderConfig,
-    ProviderError,
     ProviderService,
     ProviderSetupSnapshot,
     SecretSubmission,
     TaskKind,
     TaskModelPolicy,
-    driver_definition,
 )
 from ..ai.execution import AIBackendConfig
 from ..backend import CodexBackend, CodexConfig
@@ -117,7 +115,6 @@ from ..presentation.clarifications import (
     ClarificationNarrator,
     ClarificationPresenter,
     IsolatedAIClarificationNarrator,
-    IsolatedCodexClarificationNarrator,
 )
 from ..workspace.catalog import ProjectCatalog
 from ..workspace.management import (
@@ -181,6 +178,7 @@ from .contracts import (
     VerificationJob,
     VerificationJobObservation,
     VerificationJobState,
+    VerificationRoleSettings,
     VerificationSettings,
     WorkflowSnapshot,
     WorkflowState,
@@ -408,36 +406,31 @@ class ProofAssistantWorkflow:
     def _machine_verification_settings(self) -> VerificationSettings:
         """Return run defaults resolved only from machine-scoped policy."""
 
-        resolved = self._resolved_concurrency()
-        legacy = resolved.config.legacy
-        try:
-            policy = self._configured_task_policy(TaskKind.PROOF)
-        except ProviderError:
-            raise
-        except Exception:
-            configured = self._provider_service.config_store.load().config
-            driver_id = configured.primary_driver
-            preference = configured.preference_for(driver_id)
-            definition = driver_definition(driver_id)
-            model = preference.model or (
-                definition.curated_models[0].model_id
-                if definition.curated_models
-                else ""
+        base = self._base_verification_settings()
+        policies = self.ai_task_policies()
+        role_settings = tuple(
+            VerificationRoleSettings(
+                task=policy.task,
+                ai_driver=policy.driver.value,
+                model=policy.model or self.codex_model,
+                effort=policy.difficulty.value,
             )
-            difficulty = preference.difficulty.value
-            if preference.difficulty.value == "auto":
-                difficulty = (
-                    "high" if Difficulty.HIGH in definition.difficulties else "auto"
-                )
-            driver = driver_id.value
-        else:
-            driver = policy.driver.value
-            model = policy.model or self.codex_model
-            difficulty = policy.difficulty.value
+            for policy in policies
+        )
+        proof = next(item for item in role_settings if item.task is TaskKind.PROOF)
+        return replace(
+            base,
+            ai_driver=proof.ai_driver,
+            model=proof.model,
+            effort=proof.effort,
+            role_settings=role_settings,
+        )
+
+    def _base_verification_settings(self) -> VerificationSettings:
+        """Resolve non-AI run defaults without requiring the primary provider."""
+
+        legacy = self._resolved_concurrency().config.legacy
         return VerificationSettings(
-            ai_driver=driver,
-            model=model,
-            effort=difficulty,
             jobs=legacy.jobs,
             batch_size=legacy.batch_size,
             lean_pool_size=legacy.lean_pool_size,
@@ -449,7 +442,18 @@ class ProofAssistantWorkflow:
         IncrementalSession(managed)._load_config()
         return ProjectAISettingsStore(managed)
 
-    def _validate_project_ai_override(self, override: ProjectAIOverride) -> None:
+    def _validate_project_ai_override(
+        self, override: ProjectAIOverride, *, require_complete: bool = False
+    ) -> None:
+        if require_complete and not override.complete:
+            missing = sorted(
+                task.value
+                for task in set(TaskKind) - {item.task for item in override.roles}
+            )
+            raise ValueError(
+                "Project AI settings require a model and difficulty for every role; "
+                "missing: " + ", ".join(missing)
+            )
         settings = self._provider_service.config_store.load()
         preference = settings.config.preference_for(override.ai_driver)
         if not preference.enabled:
@@ -473,12 +477,43 @@ class ProofAssistantWorkflow:
             raise ValueError(
                 f"AI driver {override.ai_driver.value} has no validated model catalog"
             )
-        self._provider_service.validate_difficulty(
-            override.ai_driver,
-            override.model,
-            override.difficulty,
-            catalog=catalog,
-        )
+        for role in override.roles:
+            self._provider_service.validate_difficulty(
+                override.ai_driver,
+                role.model,
+                role.difficulty,
+                catalog=catalog,
+            )
+
+    def _validate_frozen_role_settings(self, settings: VerificationSettings) -> None:
+        """Revalidate a complete submitted role map before creating a job."""
+
+        if not settings.role_settings:
+            return
+        machine = self._provider_service.config_store.load().config
+        catalogs: dict[DriverId, ModelCatalog] = {}
+        for role in settings.role_settings:
+            driver = DriverId(role.ai_driver)
+            preference = machine.preference_for(driver)
+            if not preference.enabled:
+                raise ValueError(f"AI driver {driver.value} is disabled")
+            catalog = catalogs.get(driver)
+            if catalog is None:
+                status = self._provider_service.inspect_driver(
+                    driver, preference=preference
+                )
+                if not status.ready or status.catalog is None:
+                    raise ValueError(
+                        f"AI driver {driver.value} is not ready for a new job"
+                    )
+                catalog = status.catalog
+                catalogs[driver] = catalog
+            self._provider_service.validate_difficulty(
+                driver,
+                role.model,
+                Difficulty(role.effort),
+                catalog=catalog,
+            )
 
     def _project_settings_snapshot(
         self,
@@ -489,15 +524,56 @@ class ProofAssistantWorkflow:
         validate: bool,
         machine_settings: VerificationSettings | None = None,
     ) -> ProjectVerificationSettingsSnapshot:
-        effective = machine_settings or self._machine_verification_settings()
+        effective = machine_settings or (
+            self._machine_verification_settings()
+            if override is None
+            else self._base_verification_settings()
+        )
         validation_error = None
         if override is not None:
-            effective = replace(
-                effective,
-                ai_driver=override.ai_driver.value,
-                model=override.model,
-                effort=override.difficulty.value,
-            )
+            try:
+                recommended = (
+                    ()
+                    if override.complete
+                    else self.ai_task_policies(driver=override.ai_driver)
+                )
+                recommended_by_task = {policy.task: policy for policy in recommended}
+                resolved_roles: list[VerificationRoleSettings] = []
+                for task in TaskKind:
+                    explicit = override.role_for(task)
+                    policy = recommended_by_task.get(task)
+                    if explicit is None and policy is None:
+                        raise ValueError(
+                            f"No effective project AI assignment exists for {task.value}"
+                        )
+                    if explicit is not None:
+                        model = explicit.model
+                        effort = explicit.difficulty.value
+                    else:
+                        assert policy is not None
+                        model = policy.model or self.codex_model
+                        effort = policy.difficulty.value
+                    resolved_roles.append(
+                        VerificationRoleSettings(
+                            task=task,
+                            ai_driver=override.ai_driver.value,
+                            model=model,
+                            effort=effort,
+                        )
+                    )
+                role_settings = tuple(resolved_roles)
+                proof = next(
+                    item for item in role_settings if item.task is TaskKind.PROOF
+                )
+                effective = replace(
+                    effective,
+                    ai_driver=proof.ai_driver,
+                    model=proof.model,
+                    effort=proof.effort,
+                    role_settings=role_settings,
+                )
+            except Exception as exc:
+                validation_error = str(exc)
             if validate:
                 try:
                     self._validate_project_ai_override(override)
@@ -529,8 +605,8 @@ class ProofAssistantWorkflow:
     ) -> ProjectVerificationSettingsSnapshot:
         """Persist a validated, secret-free project AI override."""
 
-        machine_settings = self._machine_verification_settings()
-        self._validate_project_ai_override(override)
+        machine_settings = self._base_verification_settings()
+        self._validate_project_ai_override(override, require_complete=True)
         store = self._project_ai_store(project)
         revision, saved = store.save(override, expected_revision=expected_revision)
         return self._project_settings_snapshot(
@@ -589,8 +665,16 @@ class ProofAssistantWorkflow:
         )
         return self._provider_service.get_setup_snapshot()
 
-    def ai_task_policies(self) -> tuple[TaskModelPolicy, ...]:
+    def ai_task_policies(
+        self, driver: DriverId | None = None
+    ) -> tuple[TaskModelPolicy, ...]:
+        """Resolve configured policies or clean recommendations for one provider."""
+
         settings = self._provider_service.config_store.load()
+        if driver is not None:
+            return self._provider_service.recommend_driver_task_policies(
+                driver, settings=settings
+            )
         catalogs: dict[DriverId, ModelCatalog] = {}
         policies: list[TaskModelPolicy] = []
         for task in TaskKind:
@@ -602,7 +686,7 @@ class ProofAssistantWorkflow:
             )
             catalog = catalogs.get(driver)
             if catalog is None:
-                catalog = self._provider_service.discover_models(
+                catalog = self._provider_service.discover_usable_models(
                     driver,
                     preference=settings.config.preference_for(driver),
                 )
@@ -2007,13 +2091,14 @@ class ProofAssistantWorkflow:
                 mapped = ProgressPhase.PROOF_BATCH
             self._emit(progress, mapped, message, details=details)
 
+        proof_settings = settings.for_task(TaskKind.PROOF)
         try:
             result = verify_project(
                 IncrementalSession(project),
                 options=VerifyOptions(
-                    ai_driver=settings.ai_driver,
-                    model=settings.model,
-                    effort=settings.effort,
+                    ai_driver=proof_settings.ai_driver,
+                    model=proof_settings.model,
+                    effort=proof_settings.effort,
                     codex=self.codex,
                     provider_config_path=str(self._provider_service.config_store.path),
                     cache_home=self.cache_home,
@@ -2047,9 +2132,7 @@ class ProofAssistantWorkflow:
                 WorkflowState.FAILED, self._summary(project), error=str(exc)
             )
 
-        return self._snapshot_for_result(
-            project, result, clarification_model=settings.model
-        )
+        return self._snapshot_for_result(project, result, settings=settings)
 
     def _job_store(self, project: Path) -> VerificationJobStore:
         project = validate_managed_project_path(project)
@@ -2211,9 +2294,11 @@ class ProofAssistantWorkflow:
                     "A manuscript or task change requires explicit review and "
                     "confirmation"
                 )
+            self._validate_frozen_role_settings(settings)
+            proof_settings = settings.for_task(TaskKind.PROOF)
             VerifyOptions(
-                ai_driver=settings.ai_driver,
-                model=settings.model,
+                ai_driver=proof_settings.ai_driver,
+                model=proof_settings.model,
                 jobs=settings.jobs,
                 batch_size=settings.batch_size,
                 lean_pool_size=settings.lean_pool_size,
@@ -2395,7 +2480,7 @@ class ProofAssistantWorkflow:
         project: Path,
         result: VerificationResult,
         *,
-        clarification_model: str | None = None,
+        settings: VerificationSettings,
     ) -> WorkflowSnapshot:
         summary = self._summary(project)
         findings = FindingSummary(
@@ -2412,7 +2497,7 @@ class ProofAssistantWorkflow:
         if result.outcome == "clarification_required":
             state = WorkflowState.AWAITING_CLARIFICATION
             clarifications = self._presenter(
-                project, model=clarification_model
+                project, role=settings.for_task(TaskKind.CLARIFICATION)
             ).present_all(project, summary.source_path)
             self._record_workflow_state(project, state)
             return WorkflowSnapshot(
@@ -2430,33 +2515,47 @@ class ProofAssistantWorkflow:
         return WorkflowSnapshot(state, self._summary(project), findings=findings)
 
     def _presenter(
-        self, project: Path, *, model: str | None = None
+        self,
+        project: Path,
+        *,
+        role: VerificationRoleSettings | None = None,
     ) -> ClarificationPresenter:
         narrator = self._provided_narrator
         if narrator is None and self.use_codex_clarification:
+            if role is None:
+                try:
+                    role = self.default_verification_settings(project).for_task(
+                        TaskKind.CLARIFICATION
+                    )
+                except Exception:
+                    role = None
             try:
-                policy = self._configured_task_policy(TaskKind.CLARIFICATION)
-            except Exception:
-                narrator = IsolatedCodexClarificationNarrator(
-                    CodexConfig(
-                        executable=self.codex,
-                        model=model or self.codex_model,
-                        effort="low",
-                        sandbox="read-only",
-                        isolate_external_tools=True,
-                        concurrency=self._concurrency_spec(project=project),
-                        ai_task_class=AITaskClass.CLARIFICATION,
-                    ),
-                    cwd=project,
+                policy = (
+                    None
+                    if role is not None
+                    else self._configured_task_policy(TaskKind.CLARIFICATION)
                 )
+            except Exception:
+                # Never cross providers silently. The presenter has a deterministic
+                # non-AI rendering path when no validated narrator can be resolved.
+                narrator = None
             else:
+                if role is not None:
+                    driver = DriverId(role.ai_driver)
+                    model = role.model
+                    difficulty = Difficulty(role.effort)
+                else:
+                    assert policy is not None
+                    driver = policy.driver
+                    model = policy.model or self.codex_model
+                    difficulty = policy.difficulty
                 narrator = IsolatedAIClarificationNarrator(
                     AIBackendConfig(
-                        driver=policy.driver,
-                        model=policy.model or model or self.codex_model,
-                        difficulty=policy.difficulty,
+                        driver=driver,
+                        model=model,
+                        difficulty=difficulty,
                         executable=(
-                            self.codex if policy.driver is DriverId.CODEX_CLI else None
+                            self.codex if driver is DriverId.CODEX_CLI else None
                         ),
                         concurrency=self._concurrency_spec(project=project),
                         task_kind=TaskKind.CLARIFICATION,

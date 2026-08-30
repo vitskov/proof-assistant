@@ -362,11 +362,13 @@ startup and refresh never send that request.
 
 Provider connections and credentials remain machine-owned. When Settings is
 opened from an existing project, **This project's verification AI** can select
-any ready provider plus one of its available models and difficulties for that
-project. **Use machine defaults** removes the override. The choice affects
-future verification submissions only; each running job keeps the settings it
-started with. A selected driver still shares the same global AI admission
-controller with all other AI task classes. See
+any ready provider, then assign a separate model and reasoning difficulty to
+each role: clarification, diagnostics, primary proof, sketch, maintenance/fix,
+review, independent proof, and reporting. **Use recommended defaults for this
+provider** fills all eight assignments; **Use machine defaults** removes the
+project override. The complete role map affects future submissions only and is
+frozen into each job, including the clarification role. A selected driver still
+shares the same global AI admission controller with all other AI task classes. See
 [AI providers and first-time setup](AI_PROVIDERS.md) for commands, credential
 handling, model policy, and execution isolation.
 

@@ -10,11 +10,19 @@ import tempfile
 from collections.abc import Mapping
 from pathlib import Path
 
-from .contracts import Difficulty, DriverId, ProjectAIOverride
+from .contracts import (
+    Difficulty,
+    DriverId,
+    ProjectAIOverride,
+    ProjectAIRoleOverride,
+    TaskKind,
+)
 
-PROJECT_AI_SETTINGS_SCHEMA_VERSION = 1
+PROJECT_AI_SETTINGS_SCHEMA_VERSION = 2
 _DOCUMENT_FIELDS = {"schema_version", "scope", "revision", "override"}
-_OVERRIDE_FIELDS = {"ai_driver", "model", "difficulty"}
+_V1_OVERRIDE_FIELDS = {"ai_driver", "model", "difficulty"}
+_OVERRIDE_FIELDS = {"ai_driver", "roles"}
+_ROLE_FIELDS = {"role", "model", "difficulty"}
 _FORBIDDEN_KEYS = {
     "api_key",
     "apikey",
@@ -125,6 +133,15 @@ class ProjectAISettingsStore:
     ) -> tuple[int, ProjectAIOverride | None]:
         if override is not None and not isinstance(override, ProjectAIOverride):
             raise ProjectAISettingsError("override must be a ProjectAIOverride or None")
+        if override is not None and not override.complete:
+            missing = sorted(
+                task.value
+                for task in set(TaskKind) - {item.task for item in override.roles}
+            )
+            raise ProjectAISettingsError(
+                "New project AI settings require every role; missing: "
+                + ", ".join(missing)
+            )
         self.lock_path.parent.mkdir(parents=True, exist_ok=True)
         with self.lock_path.open("a+b") as stream:
             os.chmod(self.lock_path, 0o600)
@@ -165,7 +182,12 @@ class ProjectAISettingsStore:
             raise ProjectAISettingsError(
                 "Missing project AI settings field(s): " + ", ".join(missing)
             )
-        if document["schema_version"] != PROJECT_AI_SETTINGS_SCHEMA_VERSION:
+        schema_version = document["schema_version"]
+        if (
+            isinstance(schema_version, bool)
+            or not isinstance(schema_version, int)
+            or schema_version not in {1, PROJECT_AI_SETTINGS_SCHEMA_VERSION}
+        ):
             raise ProjectAISettingsError(
                 "Unsupported project AI settings schema version"
             )
@@ -178,15 +200,20 @@ class ProjectAISettingsStore:
             raise ProjectAISettingsError(
                 "Project AI settings revision must be non-negative"
             )
-        return revision, self._override_from_value(document["override"])
+        return revision, self._override_from_value(
+            document["override"], schema_version=schema_version
+        )
 
     @staticmethod
-    def _override_from_value(value: object) -> ProjectAIOverride | None:
+    def _override_from_value(
+        value: object, *, schema_version: int
+    ) -> ProjectAIOverride | None:
         if value is None:
             return None
         item = _mapping(value, "settings.override")
-        unknown = sorted(set(item) - _OVERRIDE_FIELDS)
-        missing = sorted(_OVERRIDE_FIELDS - set(item))
+        fields = _V1_OVERRIDE_FIELDS if schema_version == 1 else _OVERRIDE_FIELDS
+        unknown = sorted(set(item) - fields)
+        missing = sorted(fields - set(item))
         if unknown:
             raise ProjectAISettingsError(
                 "Unknown project AI override field(s): " + ", ".join(unknown)
@@ -196,22 +223,70 @@ class ProjectAISettingsStore:
                 "Missing project AI override field(s): " + ", ".join(missing)
             )
         driver_value = item["ai_driver"]
-        model_value = item["model"]
-        difficulty_value = item["difficulty"]
-        if not (
-            isinstance(driver_value, str)
-            and isinstance(model_value, str)
-            and isinstance(difficulty_value, str)
-        ):
-            raise ProjectAISettingsError("Project AI override fields must be strings")
+        if not isinstance(driver_value, str):
+            raise ProjectAISettingsError("Project AI driver must be a string")
         try:
+            driver = DriverId(driver_value)
+            roles: tuple[ProjectAIRoleOverride, ...]
+            if schema_version == 1:
+                model_value = item["model"]
+                difficulty_value = item["difficulty"]
+                if not (
+                    isinstance(model_value, str) and isinstance(difficulty_value, str)
+                ):
+                    raise ValueError("legacy project AI fields must be strings")
+                roles = (
+                    ProjectAIRoleOverride(
+                        task=TaskKind.PROOF,
+                        model=model_value,
+                        difficulty=Difficulty(difficulty_value),
+                    ),
+                )
+            else:
+                role_values = item["roles"]
+                if not isinstance(role_values, list):
+                    raise ValueError("project AI roles must be a list")
+                roles = tuple(
+                    ProjectAISettingsStore._role_from_value(role, index=index)
+                    for index, role in enumerate(role_values)
+                )
             return ProjectAIOverride(
-                ai_driver=DriverId(driver_value),
-                model=model_value,
-                difficulty=Difficulty(difficulty_value),
+                ai_driver=driver,
+                roles=roles,
             )
         except (TypeError, ValueError) as exc:
             raise ProjectAISettingsError("Invalid project AI override") from exc
+
+    @staticmethod
+    def _role_from_value(value: object, *, index: int) -> ProjectAIRoleOverride:
+        path = f"settings.override.roles[{index}]"
+        item = _mapping(value, path)
+        unknown = sorted(set(item) - _ROLE_FIELDS)
+        missing = sorted(_ROLE_FIELDS - set(item))
+        if unknown:
+            raise ProjectAISettingsError(
+                f"Unknown project AI role field(s) at {path}: " + ", ".join(unknown)
+            )
+        if missing:
+            raise ProjectAISettingsError(
+                f"Missing project AI role field(s) at {path}: " + ", ".join(missing)
+            )
+        role = item["role"]
+        model = item["model"]
+        difficulty = item["difficulty"]
+        if not isinstance(role, str):
+            raise ProjectAISettingsError(f"Project AI role at {path} must be a string")
+        if not isinstance(model, str):
+            raise ProjectAISettingsError(f"Project AI model at {path} must be a string")
+        if not isinstance(difficulty, str):
+            raise ProjectAISettingsError(
+                f"Project AI difficulty at {path} must be a string"
+            )
+        return ProjectAIRoleOverride(
+            task=TaskKind(role),
+            model=model,
+            difficulty=Difficulty(difficulty),
+        )
 
     def _write_unlocked(
         self, revision: int, override: ProjectAIOverride | None
@@ -225,8 +300,14 @@ class ProjectAISettingsStore:
                 if override is None
                 else {
                     "ai_driver": override.ai_driver.value,
-                    "model": override.model,
-                    "difficulty": override.difficulty.value,
+                    "roles": [
+                        {
+                            "role": role.task.value,
+                            "model": role.model,
+                            "difficulty": role.difficulty.value,
+                        }
+                        for role in override.roles
+                    ],
                 }
             ),
         }

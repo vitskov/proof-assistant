@@ -222,7 +222,7 @@ dependencies and axioms, and only then changes a claim to `CERTIFIED`.
 machine provider policy + credential reference
     |
     v
-optional project provider/model/difficulty override
+optional project provider + per-role model/difficulty matrix
     |
     v
 Proof Assistant AI adapter -> isolated CLI or provider-native API tool loop
@@ -241,14 +241,17 @@ Provider selection, credential indirection, catalog provenance, task policy,
 execution isolation, and admission have one source of truth in
 `proof_assistant.ai`.
 
-Machine policy owns provider installation, authentication, credentials, task
-defaults, and resource admission. A managed project may persist only a public
-provider/model/difficulty override in
+Machine policy owns provider installation, authentication, credentials, role
+defaults, and resource admission. A managed project may persist only one public
+provider plus a model/difficulty assignment for every `TaskKind` in
 `.repoprover/verification-settings.json`. The workflow service validates that
 override against the current machine provider setup and approved catalog, then
 merges it with machine defaults when a verification is submitted. The resolved
-settings are copied into the durable job row; later edits affect only future
-jobs. The project file is revisioned, locked, atomically replaced, and rejects
+role matrix is copied into the durable job row and request fingerprint;
+clarification and proof execution read from that frozen matrix. Later edits
+affect only future jobs. Version-1 project files migrate their former scalar
+choice as the proof role and receive provider-aware defaults for the remaining
+roles. The project file is revisioned, locked, atomically replaced, and rejects
 unknown or secret-shaped fields.
 
 RepoProver tools remain the control plane below that boundary for Lean, Git,

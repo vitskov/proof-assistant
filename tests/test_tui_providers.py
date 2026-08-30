@@ -40,7 +40,9 @@ from proof_assistant.tui.settings import (
 )
 from proof_assistant.workflow import (
     ProjectAIOverride,
+    ProjectAIRoleOverride,
     ProjectVerificationSettingsSnapshot,
+    VerificationRoleSettings,
     VerificationSettings,
 )
 
@@ -247,22 +249,22 @@ class ProviderWorkflowFake:
         )
 
     def _machine_effective_settings(self) -> VerificationSettings:
-        driver = self.snapshot.primary_driver
-        preference = self.snapshot.settings.config.preference_for(driver)
-        status = _status_by_driver(self.snapshot, driver)
-        catalog_models = status.catalog.models if status.catalog is not None else ()
-        model = preference.model or (
-            catalog_models[0].model_id if catalog_models else "auto"
+        policies = self.ai_task_policies()
+        role_settings = tuple(
+            VerificationRoleSettings(
+                task=policy.task,
+                ai_driver=policy.driver.value,
+                model=policy.model or "auto",
+                effort=policy.difficulty.value,
+            )
+            for policy in policies
         )
-        difficulty = (
-            Difficulty.HIGH
-            if preference.difficulty is Difficulty.AUTO
-            else preference.difficulty
-        )
+        proof = next(item for item in role_settings if item.task is TaskKind.PROOF)
         return VerificationSettings(
-            ai_driver=driver.value,
-            model=model,
-            effort=difficulty.value,
+            ai_driver=proof.ai_driver,
+            model=proof.model,
+            effort=proof.effort,
+            role_settings=role_settings,
         )
 
     def list_projects(self) -> tuple[()]:
@@ -271,17 +273,49 @@ class ProviderWorkflowFake:
     def get_ai_setup(self) -> ProviderSetupSnapshot:
         return self.snapshot
 
-    def ai_task_policies(self) -> tuple[TaskModelPolicy, ...]:
-        return (
-            TaskModelPolicy(
-                TaskKind.PROOF,
-                self.snapshot.primary_driver,
-                "gpt-5.6-sol",
-                Difficulty.HIGH,
-                DiscoverySource.LIVE_ACCOUNT,
-                "Uses the current proof-task recommendation.",
-            ),
-        )
+    def ai_task_policies(
+        self, driver: DriverId | None = None
+    ) -> tuple[TaskModelPolicy, ...]:
+        selected_driver = driver or self.snapshot.primary_driver
+        claude_defaults = {
+            TaskKind.CLARIFICATION: ("opus", Difficulty.HIGH),
+            TaskKind.DIAGNOSTIC: ("opus", Difficulty.HIGH),
+            TaskKind.PROOF: ("best", Difficulty.HIGH),
+            TaskKind.SKETCH: ("sonnet", Difficulty.MEDIUM),
+            TaskKind.MAINTENANCE: ("sonnet", Difficulty.MEDIUM),
+            TaskKind.REVIEW: ("opus", Difficulty.HIGH),
+            TaskKind.DUPLICATE_PROOF: ("fable", Difficulty.XHIGH),
+            TaskKind.REPORTING: ("haiku", Difficulty.LOW),
+        }
+        policies: list[TaskModelPolicy] = []
+        for task in TaskKind:
+            configured = self.snapshot.settings.config.task_preference_for(task)
+            effective_driver = (
+                configured.driver
+                if driver is None
+                and configured is not None
+                and configured.driver is not None
+                else selected_driver
+            )
+            if effective_driver is DriverId.CLAUDE_CLI:
+                model, difficulty = claude_defaults[task]
+            else:
+                model, difficulty = "gpt-5.6-sol", Difficulty.HIGH
+            if driver is None and configured is not None:
+                model = configured.model or model
+                if configured.difficulty is not Difficulty.AUTO:
+                    difficulty = configured.difficulty
+            policies.append(
+                TaskModelPolicy(
+                    task,
+                    effective_driver,
+                    model,
+                    difficulty,
+                    DiscoverySource.LIVE_ACCOUNT,
+                    "Uses the current role recommendation.",
+                )
+            )
+        return tuple(policies)
 
     def update_ai_settings(
         self, config: ProviderConfig, *, expected_revision: int
@@ -322,15 +356,32 @@ class ProviderWorkflowFake:
             project_path=project,
             revision=expected_revision + 1,
             override=override,
-            effective=replace(
-                current.effective,
-                ai_driver=override.ai_driver.value,
-                model=override.model,
-                effort=override.difficulty.value,
-            ),
+            effective=self._effective_project_override(current.effective, override),
         )
         self.project_snapshots[project] = updated
         return updated
+
+    @staticmethod
+    def _effective_project_override(
+        current: VerificationSettings, override: ProjectAIOverride
+    ) -> VerificationSettings:
+        roles = tuple(
+            VerificationRoleSettings(
+                task=role.task,
+                ai_driver=override.ai_driver.value,
+                model=role.model,
+                effort=role.difficulty.value,
+            )
+            for role in override.roles
+        )
+        proof = next(item for item in roles if item.task is TaskKind.PROOF)
+        return replace(
+            current,
+            ai_driver=proof.ai_driver,
+            model=proof.model,
+            effort=proof.effort,
+            role_settings=roles,
+        )
 
     def reset_project_verification_settings(
         self, project: Path, *, expected_revision: int
@@ -510,11 +561,18 @@ async def test_landing_and_revisioned_model_difficulty_update() -> None:
         assert preference.model == "gpt-5.6-sol"
         assert preference.difficulty is Difficulty.XHIGH
         task_text = screen.query_one("#ai-task-policies", TextArea).text
-        assert "proof:" in task_text and "resolved by the backend" in task_text
+        assert "resolved by the backend" in task_text
+        assert all(f"[{task.value}]" in task_text for task in TaskKind)
+        assert {
+            str(value)
+            for _, value in screen.query_one("#ai-role-task", Select)._options
+        } == {task.value for task in TaskKind}
 
 
 @async_test
-async def test_changing_machine_primary_configures_and_saves_claude_fable() -> None:
+async def test_claude_role_defaults_are_visible_and_one_role_can_be_overridden() -> (
+    None
+):
     service = ProviderWorkflowFake(_snapshot())
     app = ProofAssistantApp(service)  # type: ignore[arg-type]
 
@@ -535,36 +593,89 @@ async def test_changing_machine_primary_configures_and_saves_claude_fable() -> N
             lambda: (
                 screen.query_one("#ai-configure-driver", Select).value
                 == DriverId.CLAUDE_CLI.value
+                and set(screen._machine_role_drafts) == set(TaskKind)
+                and screen._machine_role_drafts[TaskKind.PROOF][0] == "best"
             ),
         )
-        model = screen.query_one("#ai-provider-model", Select)
-        model_values = {str(value) for _, value in model._options}
-        assert {"best", "fable", "opus", "sonnet", "haiku"} <= model_values
-        assert "gpt-5.6-sol" not in model_values
+        expected = {
+            TaskKind.CLARIFICATION: ("opus", Difficulty.HIGH),
+            TaskKind.DIAGNOSTIC: ("opus", Difficulty.HIGH),
+            TaskKind.PROOF: ("best", Difficulty.HIGH),
+            TaskKind.SKETCH: ("sonnet", Difficulty.MEDIUM),
+            TaskKind.MAINTENANCE: ("sonnet", Difficulty.MEDIUM),
+            TaskKind.REVIEW: ("opus", Difficulty.HIGH),
+            TaskKind.DUPLICATE_PROOF: ("fable", Difficulty.XHIGH),
+            TaskKind.REPORTING: ("haiku", Difficulty.LOW),
+        }
+        assert screen._machine_role_drafts == expected
 
-        model.value = "fable"
+        role = screen.query_one("#ai-role-task", Select)
+        role_model = screen.query_one("#ai-role-model", Select)
+        role_difficulty = screen.query_one("#ai-role-difficulty", Select)
+        for task, (model, difficulty) in expected.items():
+            role.value = task.value
+            await wait_for(
+                pilot,
+                lambda model=model, difficulty=difficulty: (
+                    role_model.value == model
+                    and role_difficulty.value == difficulty.value
+                ),
+            )
+
+        role.value = TaskKind.REPORTING.value
+        await wait_for(pilot, lambda: role_model.value == "haiku")
+        role_model.value = "sonnet"
         await wait_for(
             pilot,
             lambda: (
-                "high"
-                in {
-                    str(value)
-                    for _, value in screen.query_one(
-                        "#ai-provider-difficulty", Select
-                    )._options
-                }
+                screen._machine_role_drafts[TaskKind.REPORTING][0] == "sonnet"
+                and "high" in {str(value) for _, value in role_difficulty._options}
             ),
         )
-        screen.query_one("#ai-provider-difficulty", Select).value = "high"
+        role_difficulty.value = Difficulty.HIGH.value
+        await wait_for(
+            pilot,
+            lambda: (
+                screen._machine_role_drafts[TaskKind.REPORTING]
+                == ("sonnet", Difficulty.HIGH)
+            ),
+        )
+        screen.query_one("#ai-use-recommended", Button).press()
+        await wait_for(
+            pilot,
+            lambda: (
+                screen._machine_role_drafts[TaskKind.REPORTING]
+                == ("haiku", Difficulty.LOW)
+            ),
+        )
+        role_model.value = "sonnet"
+        await wait_for(
+            pilot,
+            lambda: screen._machine_role_drafts[TaskKind.REPORTING][0] == "sonnet",
+        )
+        role_difficulty.value = Difficulty.HIGH.value
+        await wait_for(
+            pilot,
+            lambda: (
+                screen._machine_role_drafts[TaskKind.REPORTING]
+                == ("sonnet", Difficulty.HIGH)
+            ),
+        )
         screen._save_settings()
         await wait_for(pilot, lambda: bool(service.updates))
 
         config, revision = service.updates[-1]
         assert revision == 1
         assert config.primary_driver is DriverId.CLAUDE_CLI
-        claude = config.preference_for(DriverId.CLAUDE_CLI)
-        assert claude.model == "fable"
-        assert claude.difficulty is Difficulty.HIGH
+        saved_roles = {
+            item.task: (item.model, item.difficulty) for item in config.tasks
+        }
+        assert saved_roles == {
+            **expected,
+            TaskKind.REPORTING: ("sonnet", Difficulty.HIGH),
+        }
+        assert all(item.driver is DriverId.CLAUDE_CLI for item in config.tasks)
+        assert config.preference_for(DriverId.CLAUDE_CLI).model is None
         assert config.preference_for(DriverId.CODEX_CLI).model is None
 
 
@@ -594,49 +705,78 @@ async def test_project_provider_override_is_isolated_and_can_reset_to_inheritanc
         assert loaded is not None and loaded.inherited
         assert loaded.effective.ai_driver == DriverId.CODEX_CLI.value
         assert screen.query_one("#project-ai-driver", Select).value == "codex_cli"
-        assert screen.query_one("#project-ai-model", Select).value == "gpt-5.6-sol"
+        assert {
+            str(value)
+            for _, value in screen.query_one("#project-ai-role", Select)._options
+        } == {task.value for task in TaskKind}
+        assert all(
+            f"{task.value.replace('_', ' ')}"
+            in screen.query_one("#project-ai-summary", TextArea).text.casefold()
+            or f"[{task.value}]" in screen.query_one("#ai-task-policies", TextArea).text
+            for task in TaskKind
+        )
 
         screen.query_one("#project-ai-driver", Select).value = DriverId.CLAUDE_CLI.value
         await wait_for(
             pilot,
             lambda: (
-                "fable"
-                in {
-                    str(value)
-                    for _, value in screen.query_one(
-                        "#project-ai-model", Select
-                    )._options
-                }
+                set(screen._project_role_drafts) == set(TaskKind)
+                and screen._project_role_drafts[TaskKind.PROOF]
+                == ("best", Difficulty.HIGH)
+                and screen._project_role_drafts[TaskKind.REPORTING]
+                == ("haiku", Difficulty.LOW)
             ),
         )
-        screen.query_one("#project-ai-model", Select).value = "fable"
+        screen.query_one("#project-ai-role", Select).value = TaskKind.REPORTING.value
+        await wait_for(
+            pilot,
+            lambda: screen.query_one("#project-ai-role-model", Select).value == "haiku",
+        )
+        screen.query_one("#project-ai-role-model", Select).value = "fable"
         await wait_for(
             pilot,
             lambda: (
-                "high"
+                screen._project_role_drafts[TaskKind.REPORTING][0] == "fable"
+                and "high"
                 in {
                     str(value)
                     for _, value in screen.query_one(
-                        "#project-ai-difficulty", Select
+                        "#project-ai-role-difficulty", Select
                     )._options
                 }
             ),
         )
-        screen.query_one("#project-ai-difficulty", Select).value = "high"
+        screen.query_one("#project-ai-role-difficulty", Select).value = "high"
+        await wait_for(
+            pilot,
+            lambda: (
+                screen._project_role_drafts[TaskKind.REPORTING]
+                == ("fable", Difficulty.HIGH)
+            ),
+        )
         screen._save_project_settings()
         await wait_for(pilot, lambda: bool(service.project_updates))
 
         saved_project, override, revision = service.project_updates[-1]
         assert (saved_project, revision) == (project, 0)
-        assert override == ProjectAIOverride(
-            DriverId.CLAUDE_CLI,
-            "fable",
-            Difficulty.HIGH,
+        assert override.ai_driver is DriverId.CLAUDE_CLI
+        assert override.complete
+        assert override.role_for(TaskKind.PROOF) == ProjectAIRoleOverride(
+            TaskKind.PROOF, "best", Difficulty.HIGH
+        )
+        assert override.role_for(TaskKind.REPORTING) == ProjectAIRoleOverride(
+            TaskKind.REPORTING, "fable", Difficulty.HIGH
         )
         assert service.updates == []
         assert service.snapshot.primary_driver is DriverId.CODEX_CLI
         assert service.project_snapshots[project].effective.ai_driver == "claude_cli"
-        assert service.project_snapshots[project].effective.model == "fable"
+        assert service.project_snapshots[project].effective.model == "best"
+        assert (
+            service.project_snapshots[project]
+            .effective.for_task(TaskKind.REPORTING)
+            .model
+            == "fable"
+        )
 
         await wait_for(
             pilot,
@@ -668,7 +808,8 @@ async def test_switching_project_provider_removes_stale_codex_model_ids() -> Non
             pilot,
             lambda: (
                 screen.project_settings is not None
-                and screen.query_one("#project-ai-model", Select).value == "gpt-5.6-sol"
+                and screen.query_one("#project-ai-role-model", Select).value
+                == "gpt-5.6-sol"
             ),
         )
 
@@ -680,14 +821,14 @@ async def test_switching_project_provider_removes_stale_codex_model_ids() -> Non
                 in {
                     str(value)
                     for _, value in screen.query_one(
-                        "#project-ai-model", Select
+                        "#project-ai-role-model", Select
                     )._options
                 }
             ),
         )
         model_values = {
             str(value)
-            for _, value in screen.query_one("#project-ai-model", Select)._options
+            for _, value in screen.query_one("#project-ai-role-model", Select)._options
         }
         assert model_values == {"best", "fable", "opus", "sonnet", "haiku"}
         assert not {"gpt-5.6-sol", "gpt-5.6-terra"} & model_values

@@ -1,9 +1,16 @@
+from __future__ import annotations
+
 import json
 import stat
+from dataclasses import FrozenInstanceError
 
 import pytest
 
-from proof_assistant.workflow.contracts import Difficulty, DriverId, ProjectAIOverride
+from proof_assistant.ai import Difficulty, DriverId, TaskKind
+from proof_assistant.workflow.contracts import (
+    ProjectAIOverride,
+    ProjectAIRoleOverride,
+)
 from proof_assistant.workflow.project_ai import (
     ProjectAISettingsError,
     ProjectAISettingsRevisionError,
@@ -11,11 +18,18 @@ from proof_assistant.workflow.project_ai import (
 )
 
 
+def _role(task: TaskKind) -> ProjectAIRoleOverride:
+    return ProjectAIRoleOverride(
+        task=task,
+        model=f"{task.value}-model",
+        difficulty=Difficulty.MAX if task is TaskKind.PROOF else Difficulty.MEDIUM,
+    )
+
+
 def _override() -> ProjectAIOverride:
     return ProjectAIOverride(
         ai_driver=DriverId.CLAUDE_CLI,
-        model="claude-opus-4-1",
-        difficulty=Difficulty.HIGH,
+        roles=tuple(_role(task) for task in TaskKind),
     )
 
 
@@ -26,7 +40,7 @@ def test_missing_settings_inherit_machine_defaults(tmp_path):
     assert not store.path.exists()
 
 
-def test_round_trip_is_visible_across_store_clients(tmp_path):
+def test_schema_v2_round_trip_is_visible_across_store_clients(tmp_path):
     first = ProjectAISettingsStore(tmp_path)
     second = ProjectAISettingsStore(tmp_path)
 
@@ -35,15 +49,69 @@ def test_round_trip_is_visible_across_store_clients(tmp_path):
     assert saved == (1, _override())
     assert second.load() == saved
     assert json.loads(first.path.read_text(encoding="utf-8")) == {
-        "schema_version": 1,
+        "schema_version": 2,
         "scope": "PROJECT",
         "revision": 1,
         "override": {
             "ai_driver": "claude_cli",
-            "model": "claude-opus-4-1",
-            "difficulty": "high",
+            "roles": [
+                {
+                    "role": task.value,
+                    "model": f"{task.value}-model",
+                    "difficulty": "max" if task is TaskKind.PROOF else "medium",
+                }
+                for task in TaskKind
+            ],
         },
     }
+
+
+def test_schema_v1_single_model_migrates_to_proof_role_on_load(tmp_path):
+    store = ProjectAISettingsStore(tmp_path)
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+    store.path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "scope": "PROJECT",
+                "revision": 7,
+                "override": {
+                    "ai_driver": "claude_cli",
+                    "model": "fable",
+                    "difficulty": "high",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert store.load() == (
+        7,
+        ProjectAIOverride(
+            ai_driver=DriverId.CLAUDE_CLI,
+            roles=(
+                ProjectAIRoleOverride(
+                    task=TaskKind.PROOF,
+                    model="fable",
+                    difficulty=Difficulty.HIGH,
+                ),
+            ),
+        ),
+    )
+
+
+def test_new_save_requires_every_registered_task_role(tmp_path):
+    store = ProjectAISettingsStore(tmp_path)
+    incomplete = ProjectAIOverride(
+        ai_driver=DriverId.CLAUDE_CLI,
+        roles=(_role(TaskKind.PROOF),),
+    )
+
+    with pytest.raises(ProjectAISettingsError, match="every|complete|missing"):
+        store.save(incomplete, expected_revision=0)
+
+    assert store.load() == (0, None)
+    assert not store.path.exists()
 
 
 def test_reset_persists_null_override_and_advances_revision(tmp_path):
@@ -83,7 +151,7 @@ def test_settings_and_lock_permissions_are_private(tmp_path):
         "{broken",
         json.dumps(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "scope": "PROJECT",
                 "revision": 0,
                 "override": None,
@@ -92,32 +160,66 @@ def test_settings_and_lock_permissions_are_private(tmp_path):
         ),
         json.dumps(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "scope": "PROJECT",
                 "revision": 0,
                 "override": {
                     "ai_driver": "claude_cli",
-                    "model": "claude-opus-4-1",
-                    "difficulty": "high",
-                    "api_key": "must-not-be-loaded",
+                    "roles": [
+                        {
+                            "role": "proof",
+                            "model": "fable",
+                            "difficulty": "high",
+                            "api_key": "must-not-be-loaded",
+                        }
+                    ],
                 },
             }
         ),
         json.dumps(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "scope": "PROJECT",
                 "revision": 0,
                 "override": {
                     "ai_driver": "claude_cli",
-                    "model": "model with unsafe spaces",
-                    "difficulty": "high",
+                    "roles": [
+                        {
+                            "role": "proof",
+                            "model": "model with unsafe spaces",
+                            "difficulty": "high",
+                        }
+                    ],
+                },
+            }
+        ),
+        json.dumps(
+            {
+                "schema_version": 2,
+                "scope": "PROJECT",
+                "revision": 0,
+                "override": {
+                    "ai_driver": "claude_cli",
+                    "roles": [
+                        {
+                            "role": "proof",
+                            "model": "fable",
+                            "difficulty": "high",
+                        },
+                        {
+                            "role": "proof",
+                            "model": "opus",
+                            "difficulty": "medium",
+                        },
+                    ],
                 },
             }
         ),
     ),
 )
-def test_malformed_secret_extra_and_unsafe_documents_are_rejected(tmp_path, document):
+def test_malformed_secret_extra_unsafe_and_duplicate_documents_are_rejected(
+    tmp_path, document
+):
     store = ProjectAISettingsStore(tmp_path)
     store.path.parent.mkdir(parents=True, exist_ok=True)
     store.path.write_text(document, encoding="utf-8")
@@ -136,6 +238,22 @@ def test_atomic_writes_leave_no_temporary_files(tmp_path):
     store.save(None, expected_revision=1)
 
     assert not list(store.path.parent.glob(f".{store.path.name}.*.tmp"))
+
+
+def test_override_and_roles_are_frozen(tmp_path):
+    override = _override()
+
+    with pytest.raises(FrozenInstanceError):
+        override.ai_driver = DriverId.CODEX_CLI  # type: ignore[misc]
+    with pytest.raises(FrozenInstanceError):
+        override.roles[0].model = "mutated"  # type: ignore[misc]
+
+    store = ProjectAISettingsStore(tmp_path)
+    store.save(override, expected_revision=0)
+    loaded = store.load()[1]
+    assert loaded is not None
+    with pytest.raises(FrozenInstanceError):
+        loaded.roles[0].difficulty = Difficulty.LOW  # type: ignore[misc]
 
 
 def test_store_requires_an_existing_project_directory(tmp_path):

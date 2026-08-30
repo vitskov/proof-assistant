@@ -97,8 +97,7 @@ class ShellPathManager:
             return (login, self._home / ".bashrc")
         if shell == "fish":
             root = Path(
-                self._environment.get("XDG_CONFIG_HOME")
-                or str(self._home / ".config")
+                self._environment.get("XDG_CONFIG_HOME") or str(self._home / ".config")
             ).expanduser()
             return (root / "fish" / "config.fish",)
         return (self._home / ".profile",)
@@ -124,8 +123,7 @@ class ShellPathManager:
         if Path(self._environment.get("SHELL", "")).name == "fish":
             return f"fish_add_path --path {quoted}"
         return (
-            f'case ":$PATH:" in *:{quoted}:*) ;; *) '
-            f'export PATH={quoted}:"$PATH";; esac'
+            f'case ":$PATH:" in *:{quoted}:*) ;; *) export PATH={quoted}:"$PATH";; esac'
         )
 
     @staticmethod
@@ -140,9 +138,7 @@ class ShellPathManager:
         self, profile: Path, existing: bytes, normalized: str, path_line: str
     ) -> bytes:
         quoted = shlex.quote(normalized)
-        legacy_block = (
-            f'{self.MARKER}\nexport PATH={quoted}:"$PATH"\n'.encode()
-        )
+        legacy_block = f'{self.MARKER}\nexport PATH={quoted}:"$PATH"\n'.encode()
         if legacy_block not in existing:
             return existing
         updated = existing.replace(
@@ -179,7 +175,7 @@ class ShellPathManager:
         return (
             b'case ":$PATH:" in *:'
             + token
-            + b':*) ;; *) export PATH='
+            + b":*) ;; *) export PATH="
             + token
             + export_suffix
             + b";; esac"
@@ -242,9 +238,7 @@ class ShellPathManager:
         suffix = 0
         while backup.exists() or backup.is_symlink():
             suffix += 1
-            backup = profile.with_name(
-                f".bash_profile.proof-assistant-backup-{suffix}"
-            )
+            backup = profile.with_name(f".bash_profile.proof-assistant-backup-{suffix}")
         profile.replace(backup)
 
     @staticmethod
@@ -1416,10 +1410,12 @@ class ProviderService:
             descriptor = next(
                 (item for item in available.models if item.model_id == model), None
             )
-            difficulty = (
-                recommended
-                if descriptor is None or recommended in descriptor.difficulties
-                else Difficulty.AUTO
+            difficulty = self._supported_recommended_difficulty(
+                task,
+                recommended,
+                descriptor.difficulties
+                if descriptor is not None
+                else (Difficulty.AUTO,),
             )
         self.validate_difficulty(driver, model, difficulty, catalog=available)
         return TaskModelPolicy(
@@ -1436,6 +1432,42 @@ class ProviderService:
             ),
         )
 
+    def recommend_driver_task_policies(
+        self,
+        driver: DriverId,
+        *,
+        settings: MachineProviderSettings | None = None,
+    ) -> tuple[TaskModelPolicy, ...]:
+        """Return a complete clean default matrix for one selected provider."""
+
+        loaded = settings or self.config_store.load()
+        clean_drivers = tuple(
+            replace(item, model=None, difficulty=Difficulty.AUTO)
+            if item.driver is driver
+            else item
+            for item in loaded.config.drivers
+        )
+        clean_settings = replace(
+            loaded,
+            config=replace(
+                loaded.config,
+                primary_driver=driver,
+                drivers=clean_drivers,
+                tasks=(),
+            ),
+        )
+        catalog = self.discover_usable_models(
+            driver, preference=clean_settings.config.preference_for(driver)
+        )
+        return tuple(
+            self.recommend_task_policy(
+                task,
+                settings=clean_settings,
+                catalog=catalog,
+            )
+            for task in TaskKind
+        )
+
     @staticmethod
     def _recommended_model(
         task: TaskKind,
@@ -1446,7 +1478,9 @@ class ProviderService:
             return None
         if driver is DriverId.CLAUDE_CLI:
             available = {item.model_id for item in models}
-            if task in {TaskKind.PROOF, TaskKind.DUPLICATE_PROOF}:
+            if task is TaskKind.DUPLICATE_PROOF:
+                preferences = ("fable", "best", "opus", "sonnet", "haiku")
+            elif task is TaskKind.PROOF:
                 preferences = ("best", "fable", "opus", "sonnet", "haiku")
             elif task in {
                 TaskKind.CLARIFICATION,
@@ -1494,7 +1528,11 @@ class ProviderService:
         else:
             selected = min(
                 enumerate(models),
-                key=lambda pair: (abs(strength(pair[1]) - 1), pair[0]),
+                key=lambda pair: (
+                    abs(strength(pair[1]) - 1),
+                    strength(pair[1]),
+                    pair[0],
+                ),
             )[1]
         return selected.model_id
 
@@ -1504,9 +1542,78 @@ class ProviderService:
             return Difficulty.LOW
         if task in {TaskKind.SKETCH, TaskKind.MAINTENANCE}:
             return Difficulty.MEDIUM
-        if driver is DriverId.GEMINI_API:
-            return Difficulty.HIGH
+        if task is TaskKind.DUPLICATE_PROOF:
+            return Difficulty.XHIGH
         return Difficulty.HIGH
+
+    @staticmethod
+    def _supported_recommended_difficulty(
+        task: TaskKind,
+        recommended: Difficulty,
+        allowed: tuple[Difficulty, ...],
+    ) -> Difficulty:
+        """Choose the closest role-appropriate effort the selected model supports."""
+
+        if recommended in allowed:
+            return recommended
+        preferences = {
+            TaskKind.PROOF: (
+                Difficulty.HIGH,
+                Difficulty.XHIGH,
+                Difficulty.MAX,
+                Difficulty.MEDIUM,
+                Difficulty.LOW,
+                Difficulty.AUTO,
+            ),
+            TaskKind.DUPLICATE_PROOF: (
+                Difficulty.XHIGH,
+                Difficulty.HIGH,
+                Difficulty.MAX,
+                Difficulty.MEDIUM,
+                Difficulty.LOW,
+                Difficulty.AUTO,
+            ),
+            TaskKind.SKETCH: (
+                Difficulty.MEDIUM,
+                Difficulty.LOW,
+                Difficulty.HIGH,
+                Difficulty.AUTO,
+                Difficulty.XHIGH,
+                Difficulty.MAX,
+            ),
+            TaskKind.MAINTENANCE: (
+                Difficulty.MEDIUM,
+                Difficulty.LOW,
+                Difficulty.HIGH,
+                Difficulty.AUTO,
+                Difficulty.XHIGH,
+                Difficulty.MAX,
+            ),
+            TaskKind.REPORTING: (
+                Difficulty.LOW,
+                Difficulty.MEDIUM,
+                Difficulty.AUTO,
+                Difficulty.HIGH,
+                Difficulty.XHIGH,
+                Difficulty.MAX,
+            ),
+        }.get(
+            task,
+            (
+                Difficulty.HIGH,
+                Difficulty.MEDIUM,
+                Difficulty.XHIGH,
+                Difficulty.LOW,
+                Difficulty.AUTO,
+                Difficulty.MAX,
+            ),
+        )
+        selected = next((item for item in preferences if item in allowed), None)
+        if selected is None:
+            raise ProviderConfigError(
+                f"No role-appropriate reasoning difficulty is available for {task.value}"
+            )
+        return selected
 
     def get_setup_snapshot(self) -> ProviderSetupSnapshot:
         settings = self.config_store.load()

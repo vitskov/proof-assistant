@@ -22,9 +22,11 @@ from ..incremental.io import atomic_write_text
 from .contracts import (
     ProgressEvent,
     ProgressPhase,
+    TaskKind,
     VerificationJob,
     VerificationJobObservation,
     VerificationJobState,
+    VerificationRoleSettings,
     VerificationSettings,
 )
 
@@ -139,6 +141,16 @@ class VerificationJobStore:
     @staticmethod
     def _row_to_job(row: sqlite3.Row) -> VerificationJob:
         settings_payload = json.loads(str(row["settings_json"]))
+        raw_roles = settings_payload.pop("role_settings", ())
+        settings_payload["role_settings"] = tuple(
+            VerificationRoleSettings(
+                task=TaskKind(item["task"]),
+                ai_driver=item["ai_driver"],
+                model=item["model"],
+                effort=item["effort"],
+            )
+            for item in raw_roles
+        )
         settings = VerificationSettings(**settings_payload)
         state = VerificationJobState(str(row["state"]))
         return VerificationJob(
@@ -451,4 +463,14 @@ def request_fingerprint(
         assert isinstance(proof_request, dict)
         proof_request["ai_driver"] = settings.ai_driver
         payload.pop("codex", None)
+    if settings.role_settings:
+        payload["role_policies"] = [
+            {
+                "role": role.task.value,
+                "ai_driver": role.ai_driver,
+                "model": role.model,
+                "effort": role.effort,
+            }
+            for role in sorted(settings.role_settings, key=lambda item: item.task.value)
+        ]
     return canonical_hash(payload)

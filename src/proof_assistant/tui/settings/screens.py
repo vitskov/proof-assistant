@@ -46,12 +46,15 @@ from proof_assistant.workflow.contracts import (
     MachineSettingsSnapshot,
     MachineSettingsUpdateRequest,
     ProjectAIOverride,
+    ProjectAIRoleOverride,
     ProjectVerificationSettingsSnapshot,
     ProviderConfig,
     ProviderSetupSnapshot,
     SecretSubmission,
     SettingsChangePreview,
+    TaskKind,
     TaskModelPolicy,
+    TaskPreference,
 )
 
 if TYPE_CHECKING:
@@ -72,6 +75,16 @@ _API_DRIVERS = {
     DriverId.GEMINI_API,
 }
 _AUTO_MODEL = "__proof_assistant_auto_model__"
+_ROLE_LABELS: dict[TaskKind, str] = {
+    TaskKind.CLARIFICATION: "Author clarification",
+    TaskKind.DIAGNOSTIC: "Scan / triage diagnostics",
+    TaskKind.PROOF: "Primary prove agent",
+    TaskKind.SKETCH: "Sketch agent",
+    TaskKind.MAINTENANCE: "Maintain / fix agent",
+    TaskKind.REVIEW: "Math and engineering reviewers",
+    TaskKind.DUPLICATE_PROOF: "Independent prove agent",
+    TaskKind.REPORTING: "Progress / reporting agent",
+}
 
 
 def _driver_label(driver: DriverId) -> str:
@@ -128,10 +141,15 @@ def _provider_summary(snapshot: ProviderSetupSnapshot) -> str:
 def _task_policy_summary(policies: tuple[TaskModelPolicy, ...]) -> str:
     if not policies:
         return "Task-specific defaults are loading…"
-    lines = ["Task-specific model policy (resolved by the backend)"]
+    lines = [
+        "Role-specific model policy (resolved by the backend)",
+        "Primary proof and author clarification are active today; the other roles "
+        "are frozen now for RepoProver dispatch as those lanes are enabled.",
+    ]
     for policy in policies:
         lines.append(
-            f"{policy.task.value}: {_driver_label(policy.driver)} / "
+            f"{_ROLE_LABELS[policy.task]} [{policy.task.value}]: "
+            f"{_driver_label(policy.driver)} / "
             f"{policy.model or 'provider default'} / {policy.difficulty.value} "
             f"[{policy.model_source.value}]\n  {policy.explanation}"
         )
@@ -450,6 +468,9 @@ class AIProviderSettingsScreen(NoticeScreen):
         self.project = project
         self.first_run = first_run
         self._policies: tuple[TaskModelPolicy, ...] = ()
+        self._machine_role_drafts: dict[TaskKind, tuple[str, Difficulty]] = {}
+        self._project_role_drafts: dict[TaskKind, tuple[str, Difficulty]] = {}
+        self._rendering_role_controls = False
         self.project_settings: ProjectVerificationSettingsSnapshot | None = None
 
     def compose(self) -> ComposeResult:
@@ -501,7 +522,7 @@ class AIProviderSettingsScreen(NoticeScreen):
                 id="ai-configure-driver",
                 disabled=snapshot is None,
             )
-            yield Label("Model for this provider")
+            yield Label("Fallback model for this provider")
             yield Select(
                 (("Automatic task-specific choice", _AUTO_MODEL),),
                 value=_AUTO_MODEL,
@@ -509,7 +530,7 @@ class AIProviderSettingsScreen(NoticeScreen):
                 id="ai-provider-model",
                 disabled=snapshot is None,
             )
-            yield Label("Reasoning / difficulty for this provider")
+            yield Label("Fallback reasoning / difficulty for this provider")
             yield Select(
                 (("Auto", "auto"),),
                 value="auto",
@@ -591,6 +612,33 @@ class AIProviderSettingsScreen(NoticeScreen):
                 soft_wrap=False,
                 id="ai-task-policies",
             )
+            yield Label("Role to configure")
+            yield Select(
+                tuple((label, task.value) for task, label in _ROLE_LABELS.items()),
+                value=TaskKind.PROOF.value,
+                allow_blank=False,
+                id="ai-role-task",
+                disabled=snapshot is None,
+            )
+            yield Label("Model for this role")
+            yield Select(
+                (("Loading role models…", "__loading__"),),
+                allow_blank=False,
+                id="ai-role-model",
+                disabled=True,
+            )
+            yield Label("Reasoning / difficulty for this role")
+            yield Select(
+                (("Loading role difficulties…", "__loading__"),),
+                allow_blank=False,
+                id="ai-role-difficulty",
+                disabled=True,
+            )
+            yield Button(
+                "Use recommended defaults for selected provider",
+                id="ai-use-recommended",
+                disabled=snapshot is None,
+            )
             if self.project is not None:
                 yield CopyableText("This project's verification AI", classes="section")
                 yield CopyableText(
@@ -605,21 +653,34 @@ class AIProviderSettingsScreen(NoticeScreen):
                     id="project-ai-driver",
                     disabled=True,
                 )
-                yield Label("Model for future runs of this project")
+                yield Label("Project role to configure")
                 yield Select(
-                    (("Loading models…", "__loading__"),),
+                    tuple((label, task.value) for task, label in _ROLE_LABELS.items()),
+                    value=TaskKind.PROOF.value,
                     allow_blank=False,
-                    id="project-ai-model",
+                    id="project-ai-role",
                     disabled=True,
                 )
-                yield Label("Reasoning / difficulty for future runs")
+                yield Label("Model for this project role")
                 yield Select(
-                    (("Loading difficulties…", "__loading__"),),
+                    (("Loading role models…", "__loading__"),),
                     allow_blank=False,
-                    id="project-ai-difficulty",
+                    id="project-ai-role-model",
+                    disabled=True,
+                )
+                yield Label("Reasoning / difficulty for this project role")
+                yield Select(
+                    (("Loading role difficulties…", "__loading__"),),
+                    allow_blank=False,
+                    id="project-ai-role-difficulty",
                     disabled=True,
                 )
                 with Horizontal(classes="toolbar"):
+                    yield Button(
+                        "Use recommended defaults for this provider",
+                        id="project-ai-use-recommended",
+                        disabled=True,
+                    )
                     yield Button(
                         "Save for this project",
                         id="save-project-ai",
@@ -632,9 +693,9 @@ class AIProviderSettingsScreen(NoticeScreen):
                         disabled=True,
                     )
                 yield CopyableText(
-                    "A project override stores only provider, model, and difficulty. "
-                    "Credentials remain machine-owned, and an already-running job "
-                    "keeps the settings with which it started.",
+                    "A project override stores one provider plus a model and reasoning "
+                    "difficulty for every role. Credentials remain machine-owned, and "
+                    "an already-running job keeps its complete role map.",
                     classes="muted",
                 )
             with Horizontal(classes="toolbar"):
@@ -687,24 +748,61 @@ class AIProviderSettingsScreen(NoticeScreen):
         self._save_settings()
 
     def on_select_changed(self, event: Select.Changed) -> None:
+        if event.select.value in {"__loading__", "__none__"}:
+            return
+        if self._rendering_role_controls and event.select.id in {
+            "ai-role-task",
+            "ai-role-model",
+            "ai-role-difficulty",
+            "project-ai-driver",
+            "project-ai-role",
+            "project-ai-role-model",
+            "project-ai-role-difficulty",
+        }:
+            return
         if event.select.id == "ai-primary-driver" and self.snapshot is not None:
             selected = event.select.value
             if selected is not Select.BLANK:
                 self.query_one("#ai-configure-driver", Select).value = str(selected)
                 self._render_selected_provider()
+                self._load_recommended_role_policies(
+                    DriverId(str(selected)), project=False
+                )
         elif event.select.id == "ai-configure-driver" and self.snapshot is not None:
             self._render_selected_provider()
         elif event.select.id == "ai-provider-model" and self.snapshot is not None:
             self._render_difficulties()
+        elif event.select.id == "ai-role-task" and self.snapshot is not None:
+            self._render_machine_role_choices()
+        elif event.select.id == "ai-role-model" and self.snapshot is not None:
+            self._record_machine_role_model()
+        elif event.select.id == "ai-role-difficulty" and self.snapshot is not None:
+            self._record_machine_role_difficulty()
         elif event.select.id == "project-ai-driver" and self.snapshot is not None:
+            selected = event.select.value
+            if selected is not Select.BLANK:
+                self._load_recommended_role_policies(
+                    DriverId(str(selected)), project=True
+                )
+        elif event.select.id == "project-ai-role" and self.snapshot is not None:
             self._render_project_ai_choices()
-        elif event.select.id == "project-ai-model" and self.snapshot is not None:
-            self._render_project_ai_difficulties()
+        elif event.select.id == "project-ai-role-model" and self.snapshot is not None:
+            self._record_project_role_model()
+        elif (
+            event.select.id == "project-ai-role-difficulty"
+            and self.snapshot is not None
+        ):
+            self._record_project_role_difficulty()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         button_id = event.button.id
         if button_id == "save-ai-settings":
             self._save_settings()
+        elif button_id == "ai-use-recommended":
+            self._load_recommended_role_policies(
+                DriverId(_select_value(self.query_one("#ai-primary-driver", Select))),
+                project=False,
+            )
         elif button_id == "recheck-ai-providers":
             self.refresh_setup()
         elif button_id == "install-ai-driver":
@@ -717,6 +815,11 @@ class AIProviderSettingsScreen(NoticeScreen):
             self._delete_credential()
         elif button_id == "save-project-ai":
             self._save_project_settings()
+        elif button_id == "project-ai-use-recommended":
+            self._load_recommended_role_policies(
+                DriverId(_select_value(self.query_one("#project-ai-driver", Select))),
+                project=True,
+            )
         elif button_id == "reset-project-ai":
             self._reset_project_settings()
         elif button_id == "ai-setup-continue":
@@ -787,6 +890,15 @@ class AIProviderSettingsScreen(NoticeScreen):
         if not self.is_mounted or not self.query("#project-ai-summary").nodes:
             return
         self.project_settings = project_settings
+        self._project_role_drafts = {
+            role.task: (role.model, Difficulty(role.effort))
+            for role in project_settings.effective.role_settings
+        }
+        if not self._project_role_drafts:
+            self._project_role_drafts[TaskKind.PROOF] = (
+                project_settings.effective.model,
+                Difficulty(project_settings.effective.effort),
+            )
         self._render_project_ai_choices(reset_driver=True)
         scope = (
             "inherits the current machine proof defaults"
@@ -799,13 +911,17 @@ class AIProviderSettingsScreen(NoticeScreen):
             if project_settings.valid
             else f"needs attention: {project_settings.validation_error}"
         )
+        role_lines = "\n".join(
+            f"  {_ROLE_LABELS[role.task]}: {role.model} / {role.effort}"
+            for role in project_settings.effective.role_settings
+        )
         self.query_one("#project-ai-summary", TextArea).text = (
             f"Project: {project_settings.project_path}\n"
             f"Revision: {project_settings.revision}\n"
             f"Scope: {scope}\n"
             f"Status: {validity}\n"
-            f"Effective next run: {effective.ai_driver} / {effective.model} / "
-            f"{effective.effort}"
+            f"Provider: {effective.ai_driver}\n"
+            f"Effective role assignments for the next run:\n{role_lines}"
         )
         self.query_one(
             "#reset-project-ai", Button
@@ -822,8 +938,14 @@ class AIProviderSettingsScreen(NoticeScreen):
             return
         driver_select = self.query_one("#project-ai-driver", Select)
         if reset_driver:
-            driver_select.disabled = False
-            driver_select.value = project_settings.effective.ai_driver
+            self._rendering_role_controls = True
+            try:
+                with self.prevent(Select.Changed):
+                    driver_select.disabled = False
+                    driver_select.value = project_settings.effective.ai_driver
+                    self.query_one("#project-ai-role", Select).disabled = False
+            finally:
+                self._rendering_role_controls = False
         driver = DriverId(_select_value(driver_select))
         status = _status_for(snapshot, driver)
         catalog = status.catalog
@@ -833,11 +955,9 @@ class AIProviderSettingsScreen(NoticeScreen):
                 (f"{model.display_name} [{model.model_id}]", model.model_id)
                 for model in catalog.models
             )
-        current_model = (
-            project_settings.effective.model
-            if driver.value == project_settings.effective.ai_driver
-            else None
-        )
+        task = TaskKind(_select_value(self.query_one("#project-ai-role", Select)))
+        current = self._project_role_drafts.get(task)
+        current_model = current[0] if current is not None else None
         if current_model is not None and current_model not in {
             value for _, value in options
         }:
@@ -847,25 +967,40 @@ class AIProviderSettingsScreen(NoticeScreen):
                     current_model,
                 )
             )
-        model_select = self.query_one("#project-ai-model", Select)
-        model_select.set_options(options)
-        model_select.disabled = not options
-        if current_model in {value for _, value in options}:
-            model_select.value = current_model
-        elif options:
-            model_select.value = options[0][1]
-        self._render_project_ai_difficulties()
+        model_select = self.query_one("#project-ai-role-model", Select)
+        self._rendering_role_controls = True
+        try:
+            with self.prevent(Select.Changed):
+                model_select.set_options(options)
+                model_select.disabled = not options
+                if current_model in {value for _, value in options}:
+                    model_select.value = current_model
+                elif options:
+                    model_select.value = options[0][1]
+                    self._project_role_drafts[task] = (
+                        options[0][1],
+                        current[1] if current is not None else Difficulty.AUTO,
+                    )
+        finally:
+            self._rendering_role_controls = False
+        self._render_project_role_difficulties()
         self.query_one("#save-project-ai", Button).disabled = not (
+            status.ready
+            and bool(options)
+            and set(self._project_role_drafts) == set(TaskKind)
+        )
+        self.query_one("#project-ai-use-recommended", Button).disabled = not (
             status.ready and bool(options)
         )
 
-    def _render_project_ai_difficulties(self) -> None:
+    def _render_project_role_difficulties(self) -> None:
         snapshot = self.snapshot
-        if snapshot is None or not self.query("#project-ai-model").nodes:
+        if snapshot is None or not self.query("#project-ai-role-model").nodes:
             return
         driver = DriverId(_select_value(self.query_one("#project-ai-driver", Select)))
         status = _status_for(snapshot, driver)
-        selected = self.query_one("#project-ai-model", Select).value
+        selected = self.query_one("#project-ai-role-model", Select).value
+        task = TaskKind(_select_value(self.query_one("#project-ai-role", Select)))
         descriptor = None
         if status.catalog is not None and selected is not Select.BLANK:
             descriptor = next(
@@ -877,7 +1012,7 @@ class AIProviderSettingsScreen(NoticeScreen):
                 None,
             )
         difficulties = descriptor.difficulties if descriptor is not None else ()
-        difficulty_select = self.query_one("#project-ai-difficulty", Select)
+        difficulty_select = self.query_one("#project-ai-role-difficulty", Select)
         difficulty_options = tuple(
             (
                 difficulty.value.replace("xhigh", "Extra high").title(),
@@ -885,22 +1020,28 @@ class AIProviderSettingsScreen(NoticeScreen):
             )
             for difficulty in difficulties
         )
-        difficulty_select.set_options(
-            difficulty_options
-            or (("Choose a provider and model first", "__loading__"),)
-        )
-        difficulty_select.disabled = not difficulties
-        preferred = (
-            self.project_settings.effective.effort
-            if self.project_settings is not None
-            and driver.value == self.project_settings.effective.ai_driver
-            else Difficulty.HIGH.value
-        )
-        allowed = tuple(difficulty.value for difficulty in difficulties)
-        if allowed:
-            difficulty_select.value = (
-                preferred if preferred in allowed else next(iter(allowed))
-            )
+        self._rendering_role_controls = True
+        try:
+            with self.prevent(Select.Changed):
+                difficulty_select.set_options(
+                    difficulty_options
+                    or (("Choose a provider and model first", "__loading__"),)
+                )
+                difficulty_select.disabled = not difficulties
+                preferred = self._project_role_drafts.get(task, ("", Difficulty.AUTO))[
+                    1
+                ].value
+                allowed = tuple(difficulty.value for difficulty in difficulties)
+                if allowed:
+                    chosen = preferred if preferred in allowed else next(iter(allowed))
+                    difficulty_select.value = chosen
+                    if selected is not Select.BLANK:
+                        self._project_role_drafts[task] = (
+                            str(selected),
+                            Difficulty(chosen),
+                        )
+        finally:
+            self._rendering_role_controls = False
 
     def _save_project_settings(self) -> None:
         project = self.project
@@ -912,9 +1053,13 @@ class AIProviderSettingsScreen(NoticeScreen):
                 ai_driver=DriverId(
                     _select_value(self.query_one("#project-ai-driver", Select))
                 ),
-                model=_select_value(self.query_one("#project-ai-model", Select)),
-                difficulty=Difficulty(
-                    _select_value(self.query_one("#project-ai-difficulty", Select))
+                roles=tuple(
+                    ProjectAIRoleOverride(
+                        task=task,
+                        model=self._project_role_drafts[task][0],
+                        difficulty=self._project_role_drafts[task][1],
+                    )
+                    for task in TaskKind
                 ),
             )
         except (ValueError, LookupError) as exc:
@@ -974,6 +1119,196 @@ class AIProviderSettingsScreen(NoticeScreen):
 
         self.run_worker(reset, thread=True, exclusive=True, group="project-ai-settings")
 
+    def _load_recommended_role_policies(
+        self, driver: DriverId, *, project: bool
+    ) -> None:
+        """Load a complete capability-checked default matrix for one provider."""
+
+        target = "project" if project else "machine"
+        self.show_notice(
+            f"Loading recommended {_driver_label(driver)} defaults for every role…"
+        )
+
+        def load() -> None:
+            try:
+                policies = self.proof_app.service.ai_task_policies(driver=driver)
+            except Exception as exc:
+                self.proof_app.call_from_thread(
+                    self.show_notice,
+                    f"Recommended role defaults could not be loaded: {exc}",
+                    error=True,
+                )
+                return
+            self.proof_app.call_from_thread(
+                self._apply_recommended_role_policies, policies, project
+            )
+
+        self.run_worker(
+            load,
+            thread=True,
+            exclusive=True,
+            group=f"{target}-ai-role-defaults",
+        )
+
+    def _apply_recommended_role_policies(
+        self, policies: tuple[TaskModelPolicy, ...], project: bool
+    ) -> None:
+        drafts = {
+            policy.task: (policy.model or "", policy.difficulty) for policy in policies
+        }
+        if set(drafts) != set(TaskKind) or any(
+            not model for model, _ in drafts.values()
+        ):
+            self.show_notice(
+                "The provider did not return a complete role default matrix.",
+                error=True,
+            )
+            return
+        if project:
+            self._project_role_drafts = drafts
+            self._render_project_ai_choices()
+        else:
+            self._machine_role_drafts = drafts
+            self._policies = policies
+            self.query_one("#ai-task-policies", TextArea).text = _task_policy_summary(
+                policies
+            )
+            self._render_machine_role_choices()
+        self.show_notice("Recommended defaults loaded for all eight roles.")
+
+    def _render_machine_role_choices(self) -> None:
+        snapshot = self.snapshot
+        if snapshot is None or not self.query("#ai-role-model").nodes:
+            return
+        driver = DriverId(_select_value(self.query_one("#ai-primary-driver", Select)))
+        task = TaskKind(_select_value(self.query_one("#ai-role-task", Select)))
+        status = _status_for(snapshot, driver)
+        options = (
+            [
+                (f"{item.display_name} [{item.model_id}]", item.model_id)
+                for item in status.catalog.models
+            ]
+            if status.catalog is not None
+            else []
+        )
+        current = self._machine_role_drafts.get(task)
+        if current is not None and current[0] not in {value for _, value in options}:
+            options.append(
+                (f"{current[0]} [configured; not in current catalog]", current[0])
+            )
+        model_select = self.query_one("#ai-role-model", Select)
+        self._rendering_role_controls = True
+        try:
+            with self.prevent(Select.Changed):
+                model_select.set_options(options)
+                model_select.disabled = not options
+                if current is not None and current[0] in {
+                    value for _, value in options
+                }:
+                    model_select.value = current[0]
+                elif options:
+                    model_select.value = options[0][1]
+                    self._machine_role_drafts[task] = (
+                        options[0][1],
+                        current[1] if current is not None else Difficulty.AUTO,
+                    )
+        finally:
+            self._rendering_role_controls = False
+        self._render_machine_role_difficulties()
+
+    def _render_machine_role_difficulties(self) -> None:
+        snapshot = self.snapshot
+        if snapshot is None or not self.query("#ai-role-model").nodes:
+            return
+        driver = DriverId(_select_value(self.query_one("#ai-primary-driver", Select)))
+        task = TaskKind(_select_value(self.query_one("#ai-role-task", Select)))
+        selected = self.query_one("#ai-role-model", Select).value
+        descriptor = None
+        status = _status_for(snapshot, driver)
+        if status.catalog is not None and selected is not Select.BLANK:
+            descriptor = next(
+                (
+                    item
+                    for item in status.catalog.models
+                    if item.model_id == str(selected)
+                ),
+                None,
+            )
+        current = self._machine_role_drafts.get(task)
+        difficulties = (
+            descriptor.difficulties
+            if descriptor is not None
+            else ((current[1],) if current is not None else ())
+        )
+        options = tuple(
+            (item.value.replace("xhigh", "Extra high").title(), item.value)
+            for item in difficulties
+        )
+        select = self.query_one("#ai-role-difficulty", Select)
+        self._rendering_role_controls = True
+        try:
+            with self.prevent(Select.Changed):
+                select.set_options(
+                    options or (("No supported difficulty", "__none__"),)
+                )
+                select.disabled = not options
+                if options:
+                    preferred = current[1].value if current is not None else "auto"
+                    allowed = {value for _, value in options}
+                    chosen = preferred if preferred in allowed else options[0][1]
+                    select.value = chosen
+                    if selected is not Select.BLANK:
+                        self._machine_role_drafts[task] = (
+                            str(selected),
+                            Difficulty(chosen),
+                        )
+        finally:
+            self._rendering_role_controls = False
+
+    def _record_machine_role_model(self) -> None:
+        if self._rendering_role_controls:
+            return
+        task = TaskKind(_select_value(self.query_one("#ai-role-task", Select)))
+        model = _select_value(self.query_one("#ai-role-model", Select))
+        current = self._machine_role_drafts.get(task)
+        self._machine_role_drafts[task] = (
+            model,
+            current[1] if current is not None else Difficulty.AUTO,
+        )
+        self._render_machine_role_difficulties()
+
+    def _record_machine_role_difficulty(self) -> None:
+        if self._rendering_role_controls:
+            return
+        task = TaskKind(_select_value(self.query_one("#ai-role-task", Select)))
+        model = _select_value(self.query_one("#ai-role-model", Select))
+        difficulty = Difficulty(
+            _select_value(self.query_one("#ai-role-difficulty", Select))
+        )
+        self._machine_role_drafts[task] = (model, difficulty)
+
+    def _record_project_role_model(self) -> None:
+        if self._rendering_role_controls:
+            return
+        task = TaskKind(_select_value(self.query_one("#project-ai-role", Select)))
+        model = _select_value(self.query_one("#project-ai-role-model", Select))
+        current = self._project_role_drafts.get(task)
+        self._project_role_drafts[task] = (
+            model,
+            current[1] if current is not None else Difficulty.AUTO,
+        )
+        self._render_project_role_difficulties()
+
+    def _record_project_role_difficulty(self) -> None:
+        if self._rendering_role_controls:
+            return
+        task = TaskKind(_select_value(self.query_one("#project-ai-role", Select)))
+        model = _select_value(self.query_one("#project-ai-role-model", Select))
+        difficulty = Difficulty(
+            _select_value(self.query_one("#project-ai-role-difficulty", Select))
+        )
+        self._project_role_drafts[task] = (model, difficulty)
+
     def _load_task_policies(self) -> None:
         """Load policy DTOs without redundantly probing every provider again."""
 
@@ -998,9 +1333,13 @@ class AIProviderSettingsScreen(NoticeScreen):
             self.set_timer(0.01, lambda: self._record_task_policies(policies))
             return
         self._policies = policies
+        self._machine_role_drafts = {
+            policy.task: (policy.model or "", policy.difficulty) for policy in policies
+        }
         self.query_one("#ai-task-policies", TextArea).text = _task_policy_summary(
             policies
         )
+        self._render_machine_role_choices()
 
     def _record_setup(
         self,
@@ -1038,6 +1377,8 @@ class AIProviderSettingsScreen(NoticeScreen):
             else snapshot.primary_driver.value
         )
         self.query_one("#save-ai-settings", Button).disabled = False
+        self.query_one("#ai-role-task", Select).disabled = False
+        self.query_one("#ai-use-recommended", Button).disabled = False
         continue_button = self.query_one("#ai-setup-continue", Button)
         continue_button.disabled = self.first_run and not snapshot.primary_ready
         self.query_one("#ai-provider-back", Button).disabled = (
@@ -1196,10 +1537,25 @@ class AIProviderSettingsScreen(NoticeScreen):
             )
             if not any(item.driver is driver for item in drivers):
                 drivers = (*drivers, updated_preference)
+            missing_roles = set(TaskKind) - set(self._machine_role_drafts)
+            if missing_roles:
+                raise ValueError(
+                    "Load defaults before saving; missing roles: "
+                    + ", ".join(sorted(item.value for item in missing_roles))
+                )
             config: ProviderConfig = replace(
                 snapshot.settings.config,
                 primary_driver=primary,
                 drivers=drivers,
+                tasks=tuple(
+                    TaskPreference(
+                        task=task,
+                        driver=primary,
+                        model=self._machine_role_drafts[task][0],
+                        difficulty=self._machine_role_drafts[task][1],
+                    )
+                    for task in TaskKind
+                ),
             )
         except (ValueError, LookupError) as exc:
             self.show_notice(f"Invalid provider setting: {exc}", error=True)

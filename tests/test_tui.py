@@ -104,9 +104,11 @@ from proof_assistant.workflow.contracts import (
     SettingsWarning,
     SourceInspection,
     SourceLocation,
+    TaskKind,
     VerificationJob,
     VerificationJobObservation,
     VerificationJobState,
+    VerificationRoleSettings,
     VerificationSettings,
     WorkflowSnapshot,
     WorkflowState,
@@ -2370,6 +2372,67 @@ def test_production_tui_has_no_synchronous_verifier_or_local_token() -> None:
     )
     assert "confirm_and_verify" not in app_source
     assert "ThreadCancellationToken" not in app_source
+
+
+@async_test
+async def test_detached_submission_freezes_all_role_settings() -> None:
+    service = FakeWorkflowService()
+    service.verification_release = threading.Event()
+    role_settings = tuple(
+        VerificationRoleSettings(
+            task=task,
+            ai_driver="claude_cli",
+            model=(
+                "best"
+                if task is TaskKind.PROOF
+                else "fable"
+                if task is TaskKind.DUPLICATE_PROOF
+                else "opus"
+                if task
+                in {TaskKind.CLARIFICATION, TaskKind.DIAGNOSTIC, TaskKind.REVIEW}
+                else "sonnet"
+                if task in {TaskKind.SKETCH, TaskKind.MAINTENANCE}
+                else "haiku"
+            ),
+            effort=(
+                "xhigh"
+                if task is TaskKind.DUPLICATE_PROOF
+                else "low"
+                if task is TaskKind.REPORTING
+                else "medium"
+                if task in {TaskKind.SKETCH, TaskKind.MAINTENANCE}
+                else "high"
+            ),
+        )
+        for task in TaskKind
+    )
+    chosen = VerificationSettings(
+        ai_driver="claude_cli",
+        model="best",
+        effort="high",
+        role_settings=role_settings,
+    )
+    service.default_settings = chosen
+    app = ProofAssistantApp(service)
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        app.start_verification(service.project, None)
+        service.default_settings = VerificationSettings()
+        await wait_for(pilot, lambda: bool(service.started_jobs))
+
+        submitted = service.started_jobs[0][2]
+        assert submitted is chosen
+        assert {item.task for item in submitted.role_settings} == set(TaskKind)
+        assert submitted.for_task(TaskKind.PROOF).model == "best"
+        assert submitted.for_task(TaskKind.DUPLICATE_PROOF).model == "fable"
+        assert submitted.for_task(TaskKind.DUPLICATE_PROOF).effort == "xhigh"
+        assert submitted.for_task(TaskKind.CLARIFICATION).model == "opus"
+        assert submitted.for_task(TaskKind.SKETCH).model == "sonnet"
+        assert submitted.for_task(TaskKind.REPORTING).model == "haiku"
+        assert submitted.for_task(TaskKind.REPORTING).effort == "low"
+        await activate_scrolled_button(pilot, app, "#detach-observer")
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
 
 
 @async_test

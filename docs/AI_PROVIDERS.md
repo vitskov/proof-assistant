@@ -35,8 +35,9 @@ creation. The page lets you:
 3. review and explicitly approve a supported user-local CLI installation;
 4. copy the provider's native login command, or submit an API key once to the
    OS keyring;
-5. select a provider model and difficulty or leave task-specific selection on
-   automatic; and
+5. assign a model and reasoning difficulty to each RepoProver role, or use
+   **Use recommended defaults for selected provider** to populate the complete
+   role matrix; and
 6. recheck the sanitized status before continuing.
 
 The screen cannot read provider credential files and never receives a stored
@@ -62,7 +63,8 @@ proof-assistant ai status --driver claude_cli
 # Live or explicitly labeled fallback catalog
 proof-assistant ai models openai_api
 
-# Select the machine-wide primary and optional provider defaults
+# Select the machine-wide primary, regenerate role defaults, and optionally
+# set the provider-level fallback
 proof-assistant ai select anthropic_api \
   --model claude-sonnet-4-6 \
   --difficulty high
@@ -111,24 +113,25 @@ claude auth login
 Proof Assistant checks `claude auth status --text`. Claude Code does not expose
 a documented noninteractive account model-list operation, so the current
 catalog contains clearly labeled account aliases (`best`, `fable`, `opus`,
-`sonnet`, and `haiku`) rather than claiming a live inventory. `best` asks
-Claude Code for its strongest available model: Fable 5 when the account and
-organization are entitled to it, otherwise the latest Opus. Selecting `fable`
+`sonnet`, and `haiku`) rather than claiming a live inventory. Selecting `fable`
 explicitly requests Fable and can fail when the account is not entitled.
 
 Fable support requires Claude Code 2.1.170 or newer. Anthropic describes Fable
 as the option for the hardest and longest-running work; it can require usage
 credits and is not available to every account or organization. Proof Assistant
-therefore uses `best` rather than `fable` as the automatic proof default, so
-Claude Code can apply the documented Opus fallback. The packaged Claude task
-defaults are:
+therefore reserves `fable` for the hardest independent proof attempt and uses
+`best` for the primary proof lane. The packaged Claude role defaults are:
 
-- `best` for proof construction and independent duplicate proofs;
-- `opus` for clarification, diagnosis, and review;
-- `sonnet` for proof sketches and maintenance;
-- `haiku` for reporting; and
-- explicit `fable` selection when the user knows the account has access and
-  wants to require it.
+- primary proof: `best` / `high`;
+- independent duplicate proof: `fable` / `xhigh`;
+- clarification, diagnosis, and review: `opus` / `high`;
+- proof sketch and maintenance/fix: `sonnet` / `medium`; and
+- progress/reporting: `haiku` / `low`.
+
+These defaults are capability-gated. Claude Code older than 2.1.170 does not
+advertise `best` or `fable`, and any model whose catalog does not support the
+preferred difficulty receives the nearest role-appropriate supported value.
+Proof Assistant never automatically chooses `none`.
 
 See Anthropic's [Claude Code model
 configuration](https://code.claude.com/docs/en/model-config) and [model
@@ -211,8 +214,18 @@ maintenance    review      duplicate_proof  reporting
 Automatic policy prefers a stronger available model for clarification,
 diagnosis, proof, review, and duplicate proof; a lighter model for reporting;
 and a middle-tier model for sketching and maintenance. The normal recommended
-difficulty is `high`, with `medium` for sketch/maintenance and `low` for
-reporting. These are Proof Assistant policies, not provider promises.
+difficulty is `high`, with `xhigh` for the independent duplicate proof,
+`medium` for sketch/maintenance, and `low` for reporting. If a model lacks the
+preferred level, the resolver chooses the nearest role-appropriate advertised
+level and never selects `none` automatically. These are Proof Assistant
+policies, not provider promises.
+
+The UI names the same roles in RepoProver terms: author clarification; scan /
+triage diagnostics; primary prove agent; sketch agent; maintain / fix agent;
+math and engineering reviewers; independent prove agent; and progress /
+reporting agent. Proof Assistant's current incremental execution actively uses
+the primary proof and clarification assignments. It freezes all eight so later
+RepoProver role dispatch cannot silently inherit one global model.
 
 Supported difficulty names are:
 
@@ -229,7 +242,7 @@ Selection precedence is deterministic:
 
 ```text
 explicit settings supplied for one run
-  > project provider/model/difficulty override
+  > project provider + per-role model/difficulty override
   > machine task/provider policy
 
 task-specific driver       > machine primary driver
@@ -237,10 +250,12 @@ task-specific model        > provider model       > task recommendation
 task-specific difficulty   > provider difficulty  > task recommendation
 ```
 
-The TUI edits the machine's primary driver, provider connections, model,
-difficulty, and credential source. From an existing project's dashboard, the
-same panel can also save a project-only provider/model/difficulty override or
-reset that project to the machine policy. The override is stored in
+The TUI edits the machine's primary driver, provider connections, per-role
+model/difficulty matrix, provider fallback, and credential source. The
+provider-aware default button regenerates all role assignments from the current
+capability catalog. From an existing project's dashboard, the same panel can
+save a project-only provider plus complete role matrix or reset that project to
+the machine policy. The override is stored in
 `.repoprover/verification-settings.json`; it never contains credentials. It is
 resolved when a verification is submitted, and the resulting settings are
 frozen in the durable job, so changing the panel does not mutate a running job.

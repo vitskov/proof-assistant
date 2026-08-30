@@ -459,9 +459,7 @@ def cmd_cache_prepare(args: argparse.Namespace) -> int:
             or config.lean_cc != compiler.lean_cc
         ):
             config = layout.record_compiler(compiler)
-        runtime_env = layout.runtime_environment(
-            os.environ, lean_cc=compiler.lean_cc
-        )
+        runtime_env = layout.runtime_environment(os.environ, lean_cc=compiler.lean_cc)
         concurrency = _concurrency_spec(args, project=project).create()
         key = dependency_cache_key(project, env=runtime_env)
         depot = dependency_depot_target(layout, key)
@@ -629,9 +627,7 @@ def cmd_repoprover_prove(args: argparse.Namespace) -> int:
         or cache_config.lean_cc != compiler.lean_cc
     ):
         cache_layout.record_compiler(compiler)
-    runtime_env = cache_layout.runtime_environment(
-        os.environ, lean_cc=compiler.lean_cc
-    )
+    runtime_env = cache_layout.runtime_environment(os.environ, lean_cc=compiler.lean_cc)
     dependency_target = dependency_depot_target(
         cache_layout,
         dependency_cache_key(project, env=runtime_env),
@@ -1646,7 +1642,7 @@ def cmd_ai_models(args: argparse.Namespace) -> int:
 def cmd_ai_select(args: argparse.Namespace) -> int:
     from dataclasses import replace
 
-    from .ai import Difficulty, DriverId
+    from .ai import Difficulty, DriverId, TaskPreference
 
     service = _ai_provider_service()
     driver = DriverId(args.driver)
@@ -1671,6 +1667,22 @@ def cmd_ai_select(args: argparse.Namespace) -> int:
         drivers=preferences,
     )
     try:
+        policies = service.recommend_driver_task_policies(
+            driver,
+            settings=replace(current, config=candidate),
+        )
+        candidate = replace(
+            candidate,
+            tasks=tuple(
+                TaskPreference(
+                    task=policy.task,
+                    driver=driver,
+                    model=policy.model,
+                    difficulty=policy.difficulty,
+                )
+                for policy in policies
+            ),
+        )
         service.validate_config(candidate)
         service.config_store.save(candidate, expected_revision=current.revision)
         snapshot = service.get_setup_snapshot()

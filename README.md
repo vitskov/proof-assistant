@@ -87,8 +87,10 @@ CLI, copy its native login step, choose an API credential source, and select a
 model/difficulty. A CLI install requires review and explicit approval, and the
 Copilot quota-consuming account probe is never sent without separate consent.
 After a project exists, its Settings panel can choose a different ready
-provider, model, and difficulty for future verification runs without moving
-credentials into the project or changing an already-running job.
+provider and a model/difficulty for every RepoProver role. Provider-aware
+recommended defaults fill the complete matrix in one action. Credentials never
+move into the project, and the resolved role map is frozen for an already-running
+job.
 See
 [AI providers and first-time setup](docs/AI_PROVIDERS.md).
 
