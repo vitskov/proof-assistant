@@ -145,30 +145,35 @@ canonicalize_directory_target() {
   fi
 
   resolved="$(cd -P "${probe}" && pwd)"
-  old_ifs="${IFS}"
-  IFS='/'
-  read -r -a path_components <<< "${suffix#/}"
-  IFS="${old_ifs}"
-  for component in "${path_components[@]}"; do
-    case "${component}" in
-      ""|.) ;;
-      ..)
-        if [[ "${resolved}" != "/" ]]; then
-          resolved="${resolved%/*}"
-          if [[ -z "${resolved}" ]]; then
-            resolved="/"
+  # Bash 3.2 on macOS treats expansion of an empty array as an unbound
+  # variable under `set -u`, so only create and iterate components when a
+  # non-existing suffix actually needs normalization.
+  if [[ -n "${suffix}" ]]; then
+    old_ifs="${IFS}"
+    IFS='/'
+    read -r -a path_components <<< "${suffix#/}"
+    IFS="${old_ifs}"
+    for component in "${path_components[@]}"; do
+      case "${component}" in
+        ""|.) ;;
+        ..)
+          if [[ "${resolved}" != "/" ]]; then
+            resolved="${resolved%/*}"
+            if [[ -z "${resolved}" ]]; then
+              resolved="/"
+            fi
           fi
-        fi
-        ;;
-      *)
-        if [[ "${resolved}" == "/" ]]; then
-          resolved="/${component}"
-        else
-          resolved="${resolved}/${component}"
-        fi
-        ;;
-    esac
-  done
+          ;;
+        *)
+          if [[ "${resolved}" == "/" ]]; then
+            resolved="/${component}"
+          else
+            resolved="${resolved}/${component}"
+          fi
+          ;;
+      esac
+    done
+  fi
   printf '%s\n' "${resolved}"
 }
 

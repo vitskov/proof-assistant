@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import platform
 import shutil
 import subprocess
 from pathlib import Path
@@ -569,6 +570,10 @@ def test_system_check_rejects_linux_when_glibc_cannot_be_detected(tmp_path):
     assert "Unable to determine glibc version" in result.stderr
 
 
+@pytest.mark.skipif(
+    platform.system() != "Linux",
+    reason="the /proc/cpuinfo fallback is Linux-specific",
+)
 def test_system_check_uses_proc_cpuinfo_when_lscpu_is_unavailable(tmp_path: Path):
     command_dir = tmp_path / "commands-without-lscpu"
     command_dir.mkdir()
