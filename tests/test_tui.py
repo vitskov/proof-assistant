@@ -1242,9 +1242,17 @@ async def test_settings_preserves_observer_and_main_menu_detaches_only_client() 
 
         await pilot.press("f3")
         await wait_for(pilot, lambda: settings_home_is_ready(app))
+        await wait_for(pilot, lambda: app._active_observation is not observation)
         assert service.cancel_requests == []
         assert app._observer_worker is observer
-        assert app._active_observation == observation
+        current_observation = app._active_observation
+        assert current_observation is not None
+        assert current_observation.job.job_id == observation.job.job_id
+        assert (
+            current_observation.job.request_fingerprint
+            == observation.job.request_fingerprint
+        )
+        assert current_observation.next_sequence >= observation.next_sequence
         assert app._progress_screen is progress
 
         app.screen.query_one("#settings-back", Button).press()
