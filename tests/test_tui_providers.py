@@ -2499,7 +2499,10 @@ async def test_project_discard_restores_inherited_read_only_editor_state() -> No
         screen.query_one("#settings-scope", Select).value = SettingsScopeKind.MACHINE
         await wait_for(
             pilot,
-            lambda: isinstance(app.screen, UnsavedAISettingsConfirmationScreen),
+            lambda: (
+                isinstance(app.screen, UnsavedAISettingsConfirmationScreen)
+                and bool(app.screen.query("#ai-unsaved-discard").nodes)
+            ),
         )
         app.screen.query_one("#ai-unsaved-discard", Button).press()
         await wait_for(
