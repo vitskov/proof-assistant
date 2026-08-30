@@ -26,6 +26,9 @@ from ..ai import (
     DriverStatus as DriverStatus,
 )
 from ..ai import (
+    DriverTransport as DriverTransport,
+)
+from ..ai import (
     InstallPlan as InstallPlan,
 )
 from ..ai import (
@@ -49,7 +52,7 @@ from ..ai import (
 from ..ai import (
     TaskPreference as TaskPreference,
 )
-from ..ai.contracts import validate_model_identifier
+from ..ai.contracts import validate_model_identifier as validate_model_identifier
 
 CONTRACT_SCHEMA_VERSION = 10
 

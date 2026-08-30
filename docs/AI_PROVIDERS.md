@@ -26,30 +26,45 @@ proof-assistant
 
 On a new installation, the backend checks the configured primary driver. If
 the machine provider configuration has never been confirmed and that driver is
-not ready, the TUI opens **Set up your primary AI driver** before project
-creation. The page lets you:
+not ready, the TUI opens **Set up verification AI** before project creation.
+It is a focused three-step flow:
 
-1. choose the primary driver;
-2. inspect installation, authentication, model-catalog source, and supported
-   difficulty values;
-3. review and explicitly approve a supported user-local CLI installation;
-4. copy the provider's native login command, or submit an API key once to the
-   OS keyring;
-5. assign a model and reasoning difficulty to each RepoProver role, or use
-   **Use recommended defaults for selected provider** to populate the complete
-   role matrix; and
-6. recheck the sanitized status before continuing.
+1. **Choose provider** shows every provider and its sanitized readiness state.
+2. **Connect provider** shows only the selected provider's installation,
+   authentication, model-catalog, credential, and explicit recheck actions.
+   CLI installation and Copilot account verification remain separately
+   reviewed, cancel-first operations.
+3. **Review eight-role team** shows the model and reasoning effort for every
+   RepoProver role before **Finish setup** opens the project catalog.
+
+Back, Continue, Recheck, and Exit remain in the fixed action bar, including at
+80x24. A credential-store mutation is serialized and temporarily blocks page
+or global navigation so an earlier secret can never overwrite a later one.
 
 The screen cannot read provider credential files and never receives a stored
 credential value. Provider status, paths, commands, catalogs, and task-policy
 explanations are displayed in selectable text.
 
-Provider settings are available later under **Settings → AI Providers**. Press
-**F3** from an ordinary screen to open Settings and **F2** to return to the
-main menu. These are global shortcuts. On a modal dialog, the first F2/F3 press
-dismisses the dialog; press the key again to navigate. Opening Settings from a
-running verification detaches only that TUI observer. It does not cancel the
-backend job.
+Provider settings are available later under **Settings → Verification AI**.
+The settings home has three focused destinations: **Verification AI**,
+**Runtime & resources**, and **Advanced / compatibility**. Verification AI in
+turn has three peer views:
+
+1. **Role assignments** — the complete eight-role roster and its selected-role
+   editor;
+2. **Provider connection** — installation, authentication, credential source,
+   and provider-level fallback; and
+3. **Provider diagnostics** — exact sanitized status, catalog provenance, and
+   resolved task-policy detail.
+
+Press **F3** from an ordinary screen to open Settings and **F2** to return to
+the main menu. These are global shortcuts. On a modal dialog, the first F2/F3
+press dismisses the dialog; press the key again to navigate. Opening Settings
+from a running verification preserves the exact progress screen and its TUI
+observer. Closing Settings restores them. Choosing the main menu detaches only
+that TUI observer; it does not cancel the backend job. If background work
+finishes while Settings is open, the result waits behind the overlay until it
+closes.
 
 ## Command-line setup
 
@@ -122,11 +137,16 @@ credits and is not available to every account or organization. Proof Assistant
 therefore reserves `fable` for the hardest independent proof attempt and uses
 `best` for the primary proof lane. The packaged Claude role defaults are:
 
-- primary proof: `best` / `high`;
-- independent duplicate proof: `fable` / `xhigh`;
-- clarification, diagnosis, and review: `opus` / `high`;
-- proof sketch and maintenance/fix: `sonnet` / `medium`; and
-- progress/reporting: `haiku` / `low`.
+| Role shown in Settings | Model | Effort |
+|---|---|---|
+| Author clarification | `opus` | `high` |
+| Scan / triage diagnostics | `opus` | `high` |
+| Primary prove agent | `best` | `high` |
+| Sketch agent | `sonnet` | `medium` |
+| Maintain / fix agent | `sonnet` | `medium` |
+| Math and engineering reviewers | `opus` | `high` |
+| Independent prove agent | `fable` | `xhigh` (Extra high) |
+| Progress / reporting agent | `haiku` | `low` |
 
 These defaults are capability-gated. Claude Code older than 2.1.170 does not
 advertise `best` or `fable`, and any model whose catalog does not support the
@@ -163,12 +183,16 @@ approval for that unchanged plan.
 
 The current supported installer uses the provider's official npm package in a
 user-local prefix under `$HOME/.local`, without `sudo`. It requires working
-Node.js and npm; Claude Code and Copilot require Node.js 22 or newer. After an
+Node.js and npm; Claude Code and Copilot require Node.js 22 or newer. This
+explicitly approved provider installation is the only provider setup action
+that may add its executable directory to shell startup files. Dependency-lock,
+test, snapshot, and Textual debugging tooling never edits those files. After an
 approved installation, the backend:
 
 - adds `$HOME/.local/bin` to the current process path;
-- records that path idempotently in the appropriate zsh, bash, or POSIX shell
-  startup files;
+- appends an idempotent guarded path entry to existing effective shell startup
+  files without replacing their contents or creating a higher-priority Bash
+  login file that could shadow `.profile`;
 - runs the driver's version and executable-identity checks; and
 - reports the provider's native login step if authentication is still needed.
 
@@ -214,17 +238,17 @@ maintenance    review      duplicate_proof  reporting
 Automatic policy prefers a stronger available model for clarification,
 diagnosis, proof, review, and duplicate proof; a lighter model for reporting;
 and a middle-tier model for sketching and maintenance. The normal recommended
-difficulty is `high`, with `xhigh` for the independent duplicate proof,
+difficulty is `high`, with `xhigh` for the independent proof recheck,
 `medium` for sketch/maintenance, and `low` for reporting. If a model lacks the
 preferred level, the resolver chooses the nearest role-appropriate advertised
 level and never selects `none` automatically. These are Proof Assistant
 policies, not provider promises.
 
-The UI names the same roles in RepoProver terms: author clarification; scan /
-triage diagnostics; primary prove agent; sketch agent; maintain / fix agent;
-math and engineering reviewers; independent prove agent; and progress /
-reporting agent. Proof Assistant's current incremental execution actively uses
-the primary proof and clarification assignments. It freezes all eight so later
+The UI displays all eight rows together: author clarification; scan / triage
+diagnostics; primary prove agent; sketch agent; maintain / fix agent; math and
+engineering reviewers; independent prove agent; and progress / reporting
+agent. Proof Assistant's current incremental execution actively uses the
+primary proof and clarification assignments. It freezes all eight so later
 RepoProver role dispatch cannot silently inherit one global model.
 
 Supported difficulty names are:
@@ -251,11 +275,19 @@ task-specific difficulty   > provider difficulty  > task recommendation
 ```
 
 The TUI edits the machine's primary driver, provider connections, per-role
-model/difficulty matrix, provider fallback, and credential source. The
-provider-aware default button regenerates all role assignments from the current
-capability catalog. From an existing project's dashboard, the same panel can
-save a project-only provider plus complete role matrix or reset that project to
-the machine policy. The override is stored in
+model/difficulty matrix, provider fallback, and credential source. In **Role
+assignments**, the scope is always explicit: **Machine defaults** or **This
+project**. Provider connections and credentials remain machine-owned in either
+scope.
+
+Changing the provider regenerates a complete capability-checked draft for all
+eight roles. **Apply provider defaults** does the same on demand. **Undo
+defaults** is a one-level draft undo: it restores the assignments that existed
+before the defaults operation, and neither operation persists anything until
+the matching **Save machine team** or **Save project team** action succeeds.
+From an existing project's dashboard, the project scope can save a
+project-only provider plus complete role matrix or select **Use machine
+defaults** to remove the override. The override is stored in
 `.repoprover/verification-settings.json`; it never contains credentials. It is
 resolved when a verification is submitted, and the resulting settings are
 frozen in the durable job, so changing the panel does not mutate a running job.
@@ -323,9 +355,9 @@ policy, isolated execution, and admission are owned by
 override it. The upstream `facebookresearch/repoprover` repository is not
 modified by this integration.
 
-## Machine scope and storage
+## Machine and project scope
 
-Provider policy is currently machine-wide:
+Machine provider policy is stored at:
 
 ```text
 $XDG_CONFIG_HOME/proof-assistant/providers.json
@@ -336,9 +368,14 @@ $HOME/.config/proof-assistant/providers.json
 The file is atomic, revision-checked, mode `0600`, and cannot be placed in a
 Dropbox tree. It contains driver IDs, model/difficulty choices, credential
 source, and sanitized runtime-verification metadata—but never credential
-values. Project-specific provider settings are not enabled in 0.1; the backend
-contracts keep machine policy separate so a future project overlay can be
-added without moving provider authority into the TUI.
+values.
+
+A project override is stored inside that managed project at
+`.repoprover/verification-settings.json`. It contains one provider and the
+complete eight-role model/effort matrix, but no credential source or value.
+Selecting **Use machine defaults** removes the override and restores
+inheritance. Provider installation, authentication, API credentials, and
+account verification always remain machine-owned.
 
 ## Troubleshooting checklist
 

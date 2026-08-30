@@ -346,12 +346,16 @@ evidence is preserved; the TUI never edits project metadata itself.
 
 ## AI provider settings
 
-Open **Settings → AI Providers** to inspect the machine-wide primary driver,
-installation/authentication state, credential source, catalog provenance,
-provider model/difficulty, and resolved task policies. The same screen can
-review a missing CLI's exact user-local install plan, show copyable native
-login instructions, and submit an API key once to the OS keyring. It never
-reads a provider auth file or displays a stored key.
+Press **F3**, then open **Verification AI**. This destination is split into
+**Role assignments**, **Provider connection**, and **Provider diagnostics**, so
+the complete role team is not buried below connection and diagnostic controls.
+Provider connection shows the machine-wide primary driver,
+installation/authentication state, credential source, and provider fallback.
+Provider diagnostics shows exact catalog provenance and resolved task-policy
+details. The connection view can review a missing CLI's exact user-local
+install plan, show copyable native login instructions, and submit an API key
+once to the OS keyring. It never reads a provider auth file or displays a
+stored key.
 
 Automatic model discovery is live for Codex and the three API drivers when the
 configured account is reachable. Claude and Copilot CLI catalogs are explicitly
@@ -360,15 +364,17 @@ account model-list command. Copilot's authentication check also remains
 unknown until the user explicitly approves one tiny no-tools request; normal
 startup and refresh never send that request.
 
-Provider connections and credentials remain machine-owned. When Settings is
-opened from an existing project, **This project's verification AI** can select
-any ready provider, then assign a separate model and reasoning difficulty to
-each role: clarification, diagnostics, primary proof, sketch, maintenance/fix,
-review, independent proof, and reporting. **Use recommended defaults for this
-provider** fills all eight assignments; **Use machine defaults** removes the
-project override. The complete role map affects future submissions only and is
-frozen into each job, including the clarification role. A selected driver still
-shares the same global AI admission controller with all other AI task classes. See
+Provider connections and credentials remain machine-owned. In **Role
+assignments**, an explicit scope switch selects **Machine defaults** or **This
+project**. Both scopes show all eight roles with separate model and reasoning
+effort values: author clarification, scan / triage diagnostics, primary prove,
+sketch, maintain / fix, math and engineering review, independent prove, and
+progress / reporting. **Apply provider defaults** fills the complete matrix for
+the selected provider; **Undo defaults** restores the previous unsaved draft.
+In project scope, **Use machine defaults** removes the project override. The
+complete role map affects future submissions only and is frozen into each job,
+including the clarification role. A selected driver still shares the same
+global AI admission controller with all other AI task classes. See
 [AI providers and first-time setup](AI_PROVIDERS.md) for commands, credential
 handling, model policy, and execution isolation.
 

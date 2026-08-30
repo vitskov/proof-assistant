@@ -5,9 +5,13 @@ from .screens import (
     AIInstallConfirmationScreen,
     AIProviderSettingsScreen,
     ConcurrencyResourcesScreen,
+    DestructiveSettingsConfirmationScreen,
     LegacySettingsScreen,
+    ProjectInheritanceConfirmationScreen,
     SettingsHomeScreen,
     SettingsWarningConfirmationScreen,
+    UnsavedAISettingsConfirmationScreen,
+    UnsavedSettingsConfirmationScreen,
 )
 
 __all__ = [
@@ -15,7 +19,11 @@ __all__ = [
     "AIInstallConfirmationScreen",
     "AIProviderSettingsScreen",
     "ConcurrencyResourcesScreen",
+    "DestructiveSettingsConfirmationScreen",
     "LegacySettingsScreen",
+    "ProjectInheritanceConfirmationScreen",
     "SettingsHomeScreen",
     "SettingsWarningConfirmationScreen",
+    "UnsavedAISettingsConfirmationScreen",
+    "UnsavedSettingsConfirmationScreen",
 ]

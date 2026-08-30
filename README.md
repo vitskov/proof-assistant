@@ -82,15 +82,22 @@ The RepoProver checkout is an integration dependency only. Never push to it or
 open/prepare a pull request against `facebookresearch/repoprover`.
 
 On first launch, Proof Assistant checks its machine-wide primary AI driver. If
-it is not ready, **Set up your primary AI driver** lets you inspect or install a
-CLI, copy its native login step, choose an API credential source, and select a
-model/difficulty. A CLI install requires review and explicit approval, and the
-Copilot quota-consuming account probe is never sent without separate consent.
-After a project exists, its Settings panel can choose a different ready
-provider and a model/difficulty for every RepoProver role. Provider-aware
-recommended defaults fill the complete matrix in one action. Credentials never
-move into the project, and the resolved role map is frozen for an already-running
-job.
+it is not ready, **Set up verification AI** opens a focused **Choose provider →
+Connect provider → Review eight-role team** flow. You can inspect or install a
+CLI, copy its native login step, or choose an API credential source. A CLI
+install requires review and explicit approval, and the Copilot quota-consuming
+account probe is never sent without separate consent.
+
+Later, press **F3**, choose **Verification AI**, and move among **Role
+assignments**, **Provider connection**, and **Provider diagnostics**. Role
+assignments shows the complete eight-role verification team with a model and
+reasoning effort for each role. Its scope switch makes **Machine defaults** and
+**This project** explicit. **Apply provider defaults** fills all eight
+assignments for the selected provider, and **Undo defaults** restores the
+previous draft before you save. Claude Code defaults use Fable with extra-high
+effort for the **Independent prove agent** when the installed CLI advertises
+that capability. Credentials remain machine-owned, and each submitted job
+freezes its resolved role map.
 See
 [AI providers and first-time setup](docs/AI_PROVIDERS.md).
 

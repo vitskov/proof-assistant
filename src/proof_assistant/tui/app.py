@@ -11,10 +11,14 @@ import webbrowser
 from collections.abc import Callable
 from pathlib import Path
 
-from textual.app import App
+from textual.app import App, ComposeResult
+from textual.containers import Vertical
+from textual.events import Resize
 from textual.screen import ModalScreen
+from textual.widgets import Static
 from textual.worker import Worker, get_current_worker
 
+from proof_assistant.tui import layout as responsive_layout
 from proof_assistant.tui.commands import GLOBAL_BINDINGS
 from proof_assistant.tui.screens import (
     ChangeReviewScreen,
@@ -78,18 +82,47 @@ def _default_location_opener(path: Path) -> None:
     webbrowser.open(path.resolve().as_uri())
 
 
+class ResizeNeededScreen(ModalScreen[None]):
+    """Block editing while the terminal is smaller than the supported floor."""
+
+    def __init__(self, width: int, height: int) -> None:
+        super().__init__()
+        self._viewport = (width, height)
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="resize-needed-dialog"):
+            yield Static("Resize terminal", classes="title")
+            yield Static(self._message(), id="resize-needed-message")
+
+    def _message(self) -> str:
+        width, height = self._viewport
+        return (
+            f"Current viewport: {width}x{height}\n"
+            "Proof Assistant needs at least 80x24 before editable controls are "
+            "available. Resize the terminal to continue. Ctrl+Q exits safely."
+        )
+
+    def update_viewport(self, width: int, height: int) -> None:
+        self._viewport = (width, height)
+        nodes = self.query("#resize-needed-message").nodes
+        if nodes and isinstance(nodes[0], Static):
+            nodes[0].update(self._message())
+
+
 class ProofAssistantApp(App[None]):
     """A thin, dependency-injected UI over ``WorkflowServiceContract``."""
 
     TITLE = "Proof Assistant"
     SUB_TITLE = "Persistent manuscript verification"
     BINDINGS = GLOBAL_BINDINGS
+    HORIZONTAL_BREAKPOINTS = responsive_layout.HORIZONTAL_BREAKPOINTS
+    VERTICAL_BREAKPOINTS = responsive_layout.VERTICAL_BREAKPOINTS
     CSS = """
     Screen {
         background: $proof-page-background;
         color: $foreground;
     }
-    Header {
+    Header, AppHeader {
         background: $proof-chrome-background;
         color: $proof-chrome-foreground;
     }
@@ -98,6 +131,66 @@ class ProofAssistantApp(App[None]):
         color: $footer-foreground;
     }
     FooterKey:hover { background: $proof-info-background; }
+    ResizeNeededScreen {
+        align: center middle; background: $proof-overlay;
+    }
+    #resize-needed-dialog {
+        width: 72; max-width: 96%; height: auto;
+        border: round $warning; background: $proof-dialog-background; padding: 1 2;
+    }
+    ResponsivePage, .responsive-page {
+        width: 100%; height: 100%;
+        layout: vertical; overflow: hidden;
+        background: $proof-page-background;
+    }
+    PageHeader, .page-header {
+        width: 100%; height: auto; max-height: 4;
+        overflow: hidden;
+    }
+    PageWorkspace, .page-workspace {
+        width: 100%; height: 1fr; min-height: 1;
+        overflow-x: hidden; overflow-y: auto;
+    }
+    ActionBar, .action-bar {
+        width: 100%; height: auto; max-height: 4;
+        layout: horizontal; overflow: hidden;
+        align-vertical: middle;
+    }
+    ActionBar Button, .action-bar Button,
+    ResponsiveToolbar Button, .responsive-toolbar Button {
+        width: auto; min-width: 0; margin-right: 1;
+    }
+    ResponsiveToolbar, .responsive-toolbar {
+        width: 100%; height: auto;
+        layout: horizontal; overflow: hidden;
+    }
+    .role-master-detail {
+        width: 100%; height: auto; layout: vertical; overflow: hidden;
+    }
+    .role-detail-back { width: auto; }
+    .wide .role-master-detail { layout: horizontal; }
+    .wide .role-master-detail RoleRoster { width: 2fr; }
+    .wide .role-master-detail SelectedRoleDetail { width: 1fr; }
+    .wide .role-detail-back { display: none; }
+    ScrollableDialogBody, .dialog-body {
+        width: 100%; height: 1fr; min-height: 1;
+        overflow-x: hidden; overflow-y: auto;
+    }
+    .compact ResponsivePage, .compact .responsive-page,
+    .compact-short ResponsivePage, .compact-short .responsive-page,
+    .resize-needed ResponsivePage, .resize-needed .responsive-page {
+        padding: 0 1;
+    }
+    .standard ResponsivePage, .standard .responsive-page {
+        padding: 1 2;
+    }
+    .wide ResponsivePage, .wide .responsive-page {
+        padding: 1 3;
+    }
+    .compact ResponsiveToolbar, .compact .responsive-toolbar,
+    .compact-short ResponsiveToolbar, .compact-short .responsive-toolbar {
+        layout: vertical;
+    }
     #page {
         width: 100%; height: 100%; padding: 1 3;
         background: $proof-page-background;
@@ -239,11 +332,29 @@ class ProofAssistantApp(App[None]):
         height: 1fr; min-height: 7;
         background: $proof-warning-background; color: $proof-warning-text;
     }
-    AIInstallConfirmationScreen, AIAccountVerificationConfirmationScreen {
+    AIInstallConfirmationScreen, AIAccountVerificationConfirmationScreen,
+    UnsavedAISettingsConfirmationScreen, ProjectInheritanceConfirmationScreen,
+    DestructiveSettingsConfirmationScreen, UnsavedSettingsConfirmationScreen {
         align: center middle; background: $proof-overlay;
     }
     #ai-install-dialog, #ai-account-check-dialog {
         width: 96%; max-width: 104; height: 92%; max-height: 32;
+        border: round $warning; background: $proof-dialog-background; padding: 1 2;
+    }
+    #ai-unsaved-dialog {
+        width: 92%; max-width: 76; height: auto;
+        border: round $warning; background: $proof-dialog-background; padding: 1 2;
+    }
+    #project-inheritance-dialog {
+        width: 92%; max-width: 76; height: auto;
+        border: round $warning; background: $proof-dialog-background; padding: 1 2;
+    }
+    #settings-destructive-dialog {
+        width: 92%; max-width: 82; height: auto;
+        border: round $warning; background: $proof-dialog-background; padding: 1 2;
+    }
+    #settings-unsaved-dialog {
+        width: 92%; max-width: 76; height: auto;
         border: round $warning; background: $proof-dialog-background; padding: 1 2;
     }
     #ai-install-commands { height: 1fr; min-height: 8; }
@@ -278,17 +389,53 @@ class ProofAssistantApp(App[None]):
         self._active_observation: VerificationJobObservation | None = None
         self._observer_worker: Worker[None] | None = None
         self._progress_screen: ProgressScreen | None = None
+        self._pending_settings_snapshot: WorkflowSnapshot | None = None
+        self._pending_settings_navigation: Callable[[], None] | None = None
 
     def get_theme_variable_defaults(self) -> dict[str, str]:
         return THEME_VARIABLE_DEFAULTS
 
+    @property
+    def viewport_composition(self) -> responsive_layout.ViewportComposition:
+        """Return the composition represented by the managed root class."""
+
+        return responsive_layout.classify_viewport(self.size.width, self.size.height)
+
+    def _apply_viewport_composition(self, width: int, height: int) -> None:
+        composition_class = responsive_layout.classify_viewport(width, height).value
+        self.remove_class(*responsive_layout.COMPOSITION_CLASSES)
+        self.add_class(composition_class)
+
     def on_mount(self) -> None:
+        self._apply_viewport_composition(self.size.width, self.size.height)
         for theme in PROOF_THEMES:
             self.register_theme(theme)
         self.theme = DEFAULT_PROOF_THEME
         self.push_screen(WelcomeScreen(ai_setup_supported=self._ai_setup_supported))
+        self.call_after_refresh(
+            self._sync_resize_gate, self.size.width, self.size.height
+        )
         if self._ai_setup_supported:
             self._probe_ai_setup_on_startup()
+
+    def on_resize(self, event: Resize) -> None:
+        """Keep one conjunctive root composition in sync with native breakpoints."""
+
+        self._apply_viewport_composition(event.size.width, event.size.height)
+        self.call_after_refresh(
+            self._sync_resize_gate, event.size.width, event.size.height
+        )
+
+    def _sync_resize_gate(self, width: int, height: int) -> None:
+        composition = responsive_layout.classify_viewport(width, height)
+        if composition is responsive_layout.ViewportComposition.RESIZE_NEEDED:
+            if isinstance(self.screen, ResizeNeededScreen):
+                self.screen.update_viewport(width, height)
+            else:
+                self.push_screen(ResizeNeededScreen(width, height))
+            return
+        if isinstance(self.screen, ResizeNeededScreen):
+            self.screen.dismiss(None)
 
     def _probe_ai_setup_on_startup(self) -> None:
         """Probe through the workflow service without delaying Textual startup."""
@@ -309,6 +456,11 @@ class ProofAssistantApp(App[None]):
 
     def _route_after_startup_ai_probe(self, snapshot: ProviderSetupSnapshot) -> None:
         self.record_ai_setup(snapshot)
+        if self._defer_navigation_while_settings(
+            lambda: self._route_after_startup_ai_probe(snapshot),
+            notice="AI provider setup finished loading. Close Settings to continue.",
+        ):
+            return
         # Revision zero identifies setup that has never been confirmed. A later
         # outage must not hide durable projects or their reports from the user.
         if not snapshot.primary_ready and snapshot.settings.revision == 0:
@@ -341,6 +493,8 @@ class ProofAssistantApp(App[None]):
         screen = self.screen
         if not isinstance(screen, ModalScreen):
             return False
+        if isinstance(screen, ResizeNeededScreen):
+            return True
         screen.dismiss(None)
         return True
 
@@ -349,18 +503,32 @@ class ProofAssistantApp(App[None]):
 
         if self._dismiss_modal_before_global_navigation():
             return
-        if (
-            isinstance(self.screen, AIProviderSettingsScreen)
-            and self.screen.first_run
-            and (
-                self._ai_setup_snapshot is None
-                or not self._ai_setup_snapshot.primary_ready
-            )
-        ):
-            self.screen.show_notice(
-                "Finish primary AI setup before starting a new project.", error=True
-            )
+        if isinstance(self.screen, AIProviderSettingsScreen):
+            if self.screen.first_run and not self.screen.first_run_navigation_ready:
+                notice = (
+                    "Finish primary AI setup and review the complete eight-role "
+                    "team before leaving."
+                )
+                self.screen.clear_transient_secrets()
+                self.screen.show_notice(notice, error=True)
+                return
+            self.screen.request_main_menu()
             return
+        if isinstance(self.screen, (ConcurrencyResourcesScreen, LegacySettingsScreen)):
+            self.screen.request_main_menu()
+            return
+        if self._settings_overlay_active:
+            self._pending_settings_snapshot = None
+            self._pending_settings_navigation = None
+            self.pop_screen()
+            self._settings_overlay_active = False
+        self.show_welcome()
+
+    def finish_main_menu_navigation(self) -> None:
+        """Complete a settings-owned, already-guarded return to the landing page."""
+
+        self._pending_settings_snapshot = None
+        self._pending_settings_navigation = None
         if self._settings_overlay_active:
             self.pop_screen()
             self._settings_overlay_active = False
@@ -371,7 +539,21 @@ class ProofAssistantApp(App[None]):
 
         if self._dismiss_modal_before_global_navigation():
             return
-        if isinstance(self.screen, (SettingsHomeScreen, AIProviderSettingsScreen)):
+        if isinstance(self.screen, SettingsHomeScreen):
+            return
+        if isinstance(self.screen, AIProviderSettingsScreen):
+            if self.screen.first_run:
+                self.screen.clear_transient_secrets()
+                self.screen.show_notice(
+                    "Finish first-run provider setup here; machine Settings opens "
+                    "after the complete role team is ready.",
+                    error=True,
+                )
+                return
+            self.screen.request_settings_home()
+            return
+        if isinstance(self.screen, (ConcurrencyResourcesScreen, LegacySettingsScreen)):
+            self.screen.request_settings_home()
             return
         screen_snapshot = getattr(self.screen, "snapshot", None)
         machine_snapshot = (
@@ -388,6 +570,8 @@ class ProofAssistantApp(App[None]):
         self.show_settings(machine_snapshot, project=project)
 
     def show_welcome(self) -> None:
+        if isinstance(self.screen, AIProviderSettingsScreen):
+            self.screen.clear_transient_secrets()
         self._detach_active_verification_client()
         self.switch_screen(
             WelcomeScreen(
@@ -419,10 +603,11 @@ class ProofAssistantApp(App[None]):
     ) -> None:
         """Push settings once, then replace only pages within that overlay."""
 
+        if isinstance(self.screen, AIProviderSettingsScreen):
+            self.screen.clear_transient_secrets()
         if self._settings_overlay_active:
             self.switch_screen(screen)
             return
-        self._detach_active_verification_client()
         self.push_screen(screen)
         self._settings_overlay_active = True
 
@@ -465,6 +650,30 @@ class ProofAssistantApp(App[None]):
             return
         self._settings_overlay_active = False
         self.pop_screen()
+        pending_navigation = self._pending_settings_navigation
+        self._pending_settings_snapshot = None
+        self._pending_settings_navigation = None
+        if pending_navigation is not None:
+            self.call_after_refresh(pending_navigation)
+
+    def _defer_navigation_while_settings(
+        self,
+        navigation: Callable[[], None],
+        *,
+        snapshot: WorkflowSnapshot | None = None,
+        notice: str = "Background work finished while Settings was open. Close "
+        "Settings to view the result.",
+    ) -> bool:
+        """Preserve the settings overlay until a background result is acknowledged."""
+
+        if not self._settings_overlay_active:
+            return False
+        self._pending_settings_snapshot = snapshot
+        self._pending_settings_navigation = navigation
+        active_screen = self.screen
+        if hasattr(active_screen, "show_notice"):
+            active_screen.show_notice(notice)
+        return True
 
     def show_new_project(self, draft: NewProjectDraft | None = None) -> None:
         self.switch_screen(NewProjectScreen(draft))
@@ -544,6 +753,12 @@ class ProofAssistantApp(App[None]):
         project: ProjectSummary,
         inspection: ProjectDeletionInspection,
     ) -> None:
+        if self._defer_navigation_while_settings(
+            lambda: self._confirm_project_deletion(project, inspection),
+            notice="Project deletion preflight finished. Close Settings to review "
+            "the confirmation.",
+        ):
+            return
         dialog = ProjectDeletionConfirmationScreen(project, inspection)
 
         def after_confirmation(confirmed: bool | None) -> None:
@@ -600,6 +815,12 @@ class ProofAssistantApp(App[None]):
         result: ProjectDeletionResult | None,
         error: str | None,
     ) -> None:
+        if self._defer_navigation_while_settings(
+            lambda: self._show_project_deletion_outcome(
+                project, inspection, result, error
+            )
+        ):
+            return
         self.switch_screen(
             ProjectDeletionOutcomeScreen(
                 project,
@@ -650,6 +871,10 @@ class ProofAssistantApp(App[None]):
         document: ReportDocument | None,
         error: str | None,
     ) -> None:
+        if self._defer_navigation_while_settings(
+            lambda: self._show_report_viewer(snapshot, document, error)
+        ):
+            return
         self.switch_screen(ReportViewerScreen(snapshot, document=document, error=error))
 
     def view_failure_report(self, snapshot: WorkflowSnapshot) -> None:
@@ -691,6 +916,10 @@ class ProofAssistantApp(App[None]):
         report: FailureDependencyReport | None,
         error: str | None,
     ) -> None:
+        if self._defer_navigation_while_settings(
+            lambda: self._show_failure_report(snapshot, report, error)
+        ):
+            return
         self.switch_screen(
             FailureDependencyScreen(snapshot, report=report, error=error)
         )
@@ -738,6 +967,10 @@ class ProofAssistantApp(App[None]):
         inspection: SourceInspection,
         destination: ProjectDestinationInspection,
     ) -> None:
+        if self._defer_navigation_while_settings(
+            lambda: self._after_source_inspection(draft, inspection, destination)
+        ):
+            return
         if not inspection.candidates:
             self.show_error(
                 "Source inspection failed",
@@ -761,6 +994,10 @@ class ProofAssistantApp(App[None]):
         draft: NewProjectDraft,
         inspection: ProjectDestinationInspection,
     ) -> None:
+        if self._defer_navigation_while_settings(
+            lambda: self._show_destination_conflict(draft, inspection)
+        ):
+            return
         self.switch_screen(ProjectDestinationConflictScreen(draft, inspection))
 
     def select_existing_project_main_file(
@@ -814,6 +1051,10 @@ class ProofAssistantApp(App[None]):
 
     def _after_create(self, snapshot: WorkflowSnapshot) -> None:
         self.current_snapshot = snapshot
+        if self._defer_navigation_while_settings(
+            lambda: self._after_create(snapshot), snapshot=snapshot
+        ):
+            return
         if snapshot.pending_plan is not None:
             self.show_snapshot(snapshot)
             return
@@ -921,6 +1162,10 @@ class ProofAssistantApp(App[None]):
     def _after_plan(
         self, project: ProjectSummary, plan: ChangeImpactPlan | None
     ) -> None:
+        if self._defer_navigation_while_settings(
+            lambda: self._after_plan(project, plan)
+        ):
+            return
         if plan is None or not plan.has_changes:
             if (
                 self.current_snapshot is not None
@@ -1091,6 +1336,10 @@ class ProofAssistantApp(App[None]):
         project: ProjectSummary,
         observation: VerificationJobObservation,
     ) -> None:
+        if self._defer_navigation_while_settings(
+            lambda: self._attach_to_verification(project, observation)
+        ):
+            return
         progress_screen = ProgressScreen(
             "Observing detached verification",
             project=project.project_path,
@@ -1234,6 +1483,13 @@ class ProofAssistantApp(App[None]):
 
     def show_snapshot(self, snapshot: WorkflowSnapshot) -> None:
         self.current_snapshot = snapshot
+        if self._defer_navigation_while_settings(
+            lambda: self.show_snapshot(snapshot),
+            snapshot=snapshot,
+            notice="Verification finished while Settings was open. Close Settings "
+            "to view the result.",
+        ):
+            return
         state = snapshot.state
         if state == WorkflowState.CHANGE_REVIEW and snapshot.pending_plan is not None:
             self.switch_screen(ChangeReviewScreen(snapshot))
@@ -1309,17 +1565,7 @@ class ProofAssistantApp(App[None]):
                     observation,
                 )
                 return
-            self.call_from_thread(
-                self.switch_screen,
-                RecoveryScreen(
-                    snapshot,
-                    detail=(
-                        "The backend reports project activity, but no attachable "
-                        "verification observation is currently available. This TUI "
-                        "owns neither the verification nor its lock."
-                    ),
-                ),
-            )
+            self.call_from_thread(self._show_unattachable_activity, snapshot)
 
         self.run_worker(
             discover,
@@ -1328,7 +1574,32 @@ class ProofAssistantApp(App[None]):
             group="verification-discovery",
         )
 
+    def _show_unattachable_activity(self, snapshot: WorkflowSnapshot) -> None:
+        if self._defer_navigation_while_settings(
+            lambda: self._show_unattachable_activity(snapshot),
+            snapshot=snapshot,
+            notice="Verification discovery needs attention. Close Settings to view "
+            "the recovery details.",
+        ):
+            return
+        self.switch_screen(
+            RecoveryScreen(
+                snapshot,
+                detail=(
+                    "The backend reports project activity, but no attachable "
+                    "verification observation is currently available. This TUI "
+                    "owns neither the verification nor its lock."
+                ),
+            )
+        )
+
     def show_error(self, title: str, detail: str, project: Path | None) -> None:
+        if self._defer_navigation_while_settings(
+            lambda: self.show_error(title, detail, project),
+            notice="Background work needs attention. Close Settings to view the "
+            "details.",
+        ):
+            return
         self.switch_screen(RecoveryScreen.from_error(title, detail, project))
 
     def _snapshot_for_project(self, project: ProjectSummary) -> WorkflowSnapshot:

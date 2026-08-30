@@ -63,6 +63,41 @@ def test_tui_cannot_bypass_project_management_backend():
     assert violations == []
 
 
+def test_every_concrete_tui_page_uses_the_responsive_screen_contract():
+    violations: list[str] = []
+    for relative_path in (
+        Path("src/proof_assistant/tui/screens.py"),
+        Path("src/proof_assistant/tui/settings/screens.py"),
+    ):
+        path = ROOT / relative_path
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in tree.body:
+            if not isinstance(node, ast.ClassDef):
+                continue
+            bases = {ast.unparse(base) for base in node.bases}
+            if not bases.intersection({"NoticeScreen", "_SettingsEditorScreen"}):
+                continue
+            if not any(
+                isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and item.name == "compose"
+                for item in node.body
+            ):
+                continue
+            names = {
+                child.id for child in ast.walk(node) if isinstance(child, ast.Name)
+            }
+            missing = {
+                "ResponsivePage",
+                "PageWorkspace",
+                "ActionBar",
+            } - names
+            if missing:
+                violations.append(
+                    f"{relative_path}:{node.name} missing {', '.join(sorted(missing))}"
+                )
+    assert violations == []
+
+
 def test_project_management_is_a_distinct_backend_component():
     service = (ROOT / "src/proof_assistant/workflow/service.py").read_text(
         encoding="utf-8"
@@ -124,4 +159,7 @@ def test_distribution_identity_and_version_are_consistent():
     assert project["license"] == "CC-BY-NC-4.0"
     assert project["scripts"]["proof-assistant"] == "proof_assistant.cli:main"
     assert project["scripts"]["repoprover-codex"] == "proof_assistant.cli:main"
-    assert "textual>=1,<2" in project["dependencies"]
+    assert "rich>=14.2,<15" in project["dependencies"]
+    assert "textual>=8.2.8,<9" in project["dependencies"]
+    assert "textual-dev>=1.8,<2" in project["optional-dependencies"]["dev"]
+    assert "pytest-textual-snapshot==1.1.0" in project["optional-dependencies"]["dev"]

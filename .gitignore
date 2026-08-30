@@ -24,6 +24,7 @@ htmlcov/
 
 # Local caches and temporary output.
 .cache/
+.omx/
 .uv-cache/
 .tmp/
 *.tmp

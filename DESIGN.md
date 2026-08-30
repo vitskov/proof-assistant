@@ -2,8 +2,8 @@
 
 ## Source of truth
 
-- Status: Draft
-- Last refreshed: 2026-08-29
+- Status: Implemented responsive baseline and living design contract
+- Last refreshed: 2026-08-30
 - Primary product surfaces: terminal project catalog, project creation, project
   dashboard, live verification, author clarification, findings and failure
   analysis, report viewing, and machine/project settings.
@@ -263,12 +263,13 @@ complete resulting role matrix remains visible. Applying recommendations edits
 a draft, reports how many assignments changed, and offers Undo. It does not
 persist until Save.
 
-Changing the provider for a scope opens a preview of the new provider and all
-eight recommended assignments. **Apply to draft** changes the provider and
-matrix together; Cancel leaves both unchanged. Provider changes never silently
-rewrite role assignments or leave a mixed-provider matrix. Recommendation Undo
-exists until the draft is saved, discarded, or replaced by another provider or
-recommendation operation.
+Changing the provider for a scope changes only the provider in the current
+draft and leaves the eight assignments untouched. **Apply provider defaults**
+then replaces the complete matrix in one generation-checked operation; **Undo
+defaults** restores the immediately preceding complete draft. Provider changes
+never silently rewrite role assignments, and stale results from a previously
+selected provider are discarded. Recommendation Undo exists until the draft is
+saved, discarded, or replaced by another recommendation operation.
 
 ### Scope is always explicit
 
@@ -319,7 +320,8 @@ descriptions do.
 - `OptionList` for stable navigation and compact semantic lists.
 - `DataTable(cursor_type="row")` for project, provider, role, and change
   rosters when columns materially aid comparison.
-- `ContentSwitcher` for a settings shell or wide master/detail workspace.
+- `ContentSwitcher` for a settings shell or wide master/detail workspace only
+  when every child is lightweight and safe to remain mounted while hidden.
 - `TabbedContent` for three to five peer views or alternate representations of
   the same artifact.
 - `Tree` only for proof/dependency hierarchy.
@@ -341,6 +343,16 @@ descriptions do.
 - `ResponsiveToolbar`: visible primary action plus compact or stacked secondary
   actions on narrow terminals.
 - `ScrollableDialogBody`: modal body scrolls while Cancel/Confirm stay fixed.
+
+`ContentSwitcher` toggles display; it does not unmount inactive children. Hidden
+panes must therefore own no workers, timers, credential value, or secret-bearing
+draft, and no hidden element may remain in the active focus chain. A screen-owned
+controller may refresh lightweight presentation widgets in hidden panes so the
+next visit is current; asynchronous results are still generation-checked before
+they can change a draft. Sensitive input is dynamically mounted only on the
+visible connection page and is cleared and removed at every page or navigation
+boundary. Tests inspect hidden focus and secret absence, while production tests
+exercise stale-result rejection and transient-input destruction.
 
 ### Role-assignment reference layout
 
@@ -376,6 +388,24 @@ returns to the same selected row.
 Roster cells use human display names. A long model name may be ellipsized in a
 bounded column, but its exact provider model ID and full name are always visible
 in the inspector and copyable detail. Ellipsis must not hide effort or state.
+
+The canonical deterministic Claude Code fixture for design, Pilot, and SVG
+snapshot review is:
+
+| Stable `TaskKind` | Display role | Model | Effort |
+| --- | --- | --- | --- |
+| `clarification` | Author clarification | `opus` | High |
+| `diagnostic` | Scan / triage diagnostics | `opus` | High |
+| `proof` | Primary prove agent | `best` | High |
+| `sketch` | Sketch agent | `sonnet` | Medium |
+| `maintenance` | Maintain / fix agent | `sonnet` | Medium |
+| `review` | Math and engineering reviewers | `opus` | High |
+| `duplicate_proof` | Independent prove agent | `fable` | Extra high (`xhigh`) |
+| `reporting` | Progress / reporting agent | `haiku` | Low |
+
+`duplicate_proof` is the stable backend/storage identifier. The user-facing role
+name is **Independent prove agent** because the lane independently rechecks the
+primary proof; do not expose “Duplicate proof” as a competing display name.
 
 ### Role editor state machine
 
@@ -542,6 +572,47 @@ and state; do not squeeze controls into unusable geometry.
 - Horizontal toolbars collapse to the primary action plus keyboard-advertised
   secondary actions, or stack vertically when all actions must remain visible.
 
+Textual breakpoint mechanics are explicit:
+
+- `HORIZONTAL_BREAKPOINTS = [(0, "-h-under-min"), (80, "-h-compact"),
+  (120, "-h-standard"), (140, "-h-wide")]`;
+- `VERTICAL_BREAKPOINTS = [(0, "-v-under-min"), (24, "-v-compact"),
+  (32, "-v-standard"), (40, "-v-wide")]`.
+
+A pure `composition_for(width, height)` function derives exactly one additional
+root class, applied on mount and resize after removing the previous composition
+class:
+
+1. `resize-needed` if `width < 80` or `height < 24`;
+2. `wide` if `width >= 140` and `height >= 40`;
+3. `standard` if `120 <= width < 140` and `height >= 32`;
+4. `compact` if `80 <= width < 120` and `height >= 24`;
+5. `compact-short` otherwise.
+
+TCSS selects layout only through the mutually exclusive derived composition
+class, avoiding ambiguous precedence between independent horizontal/vertical
+classes. Tests also assert Textual applied the expected axis classes. Boundary
+coverage is mandatory at widths 79/80, 119/120, 139/140 and heights 23/24,
+31/32, 39/40, including 120x32 and 140x40.
+
+### Viewport composition truth table
+
+Width and height requirements are conjunctive. A viewport below either minimum
+shows resize-needed; wide requires both wide width and its height floor; a
+standard-width or wide-width terminal below the standard/wide height floor uses
+the compact sequential composition rather than squeezing the richer layout.
+
+| Viewport | Composition | Settings navigation | Role workspace |
+| --- | --- | --- | --- |
+| 79x24 | Resize-needed | Safe status and exit/global commands only | No editable roster |
+| 80x23 | Resize-needed | Safe status and exit/global commands only | No editable roster |
+| 80x24 | Compact | Category -> destination drill-down | Roster/detail replace each other |
+| 100x32 | Compact | Category -> destination drill-down | Roster/detail replace each other |
+| 120x31 | Compact-short | Sequential composition; fixed action bar | Roster/detail replace each other |
+| 120x40 | Standard | Horizontal peer categories | Full-width eight-row roster |
+| 140x39 | Compact-short | Sequential composition; fixed action bar | Roster/detail replace each other |
+| 140x48 | Wide | Category rail + workspace | Roster + inspector side by side |
+
 ### Geometry budgets
 
 - Header/breadcrumb/context: 2–4 rows.
@@ -643,8 +714,74 @@ and state; do not squeeze controls into unusable geometry.
 
 ## Implementation constraints
 
-- Framework/styling system: Python 3.13 and Textual 1.x; preserve the current
-  backend/TUI boundary.
+- Framework/styling system: Python 3.13; first land a behavior-preserving
+  compatibility upgrade to Textual 8.2.8 (`textual>=8.2.8,<9`) and Rich 14.2
+  (`rich>=14.2,<15`), then begin redesign using Textual 8 native horizontal and
+  vertical breakpoints. Preserve the current backend/TUI boundary.
+- Development/QC tooling: `textual-dev>=1.8,<2` and
+  `pytest-textual-snapshot==1.1.0` are development dependencies, not runtime UI
+  authority.
+- Reproducible dependency mechanism: pin build tools in
+  `requirements/py313-build.txt` (`setuptools==80.9.0`, `wheel==0.45.1`),
+  generate a hash-locked `requirements/py313-build.lock`, then generate/commit
+  `requirements/py313-dev.lock` with both `pyproject.toml` and the build pins as
+  inputs:
+  `"$uv012" pip compile pyproject.toml requirements/py313-build.txt --extra dev
+  --python-version 3.13 --universal --generate-hashes -o
+  requirements/py313-dev.lock`. A clean unseeded venv first installs exact
+  setuptools/wheel wheels from the hash-locked build lock with
+  `--only-binary=:all:`, then hash-syncs the full lock with
+  `--no-build-isolation`; this lets the
+  pinned setuptools/wheel build the hash-verified `pylatexenc` sdist without an
+  untracked isolated build environment. The exact uv 0.12.0 command surface has been
+  checked to support `--universal`, `--generate-hashes`, `--require-hashes`, and
+  `--no-build-isolation`.
+- Pinned uv bootstrap: do not run the remote installer. Select the official uv
+  0.12.0 release artifact by `uname`: `uv-x86_64-unknown-linux-gnu.tar.gz` for
+  Linux x86_64, `uv-aarch64-apple-darwin.tar.gz` for macOS arm64, or
+  `uv-x86_64-apple-darwin.tar.gz` for macOS x86_64. Verify against committed
+  `requirements/uv-0.12.0-sha256.txt`, containing the official digests
+  `eaf842262aa1c418d8ecc5605f02ee1ebfd369124fa48548e85f9481a47831a9`,
+  `2b9e582af54f84fa50c115427451a6c13e80f43b52f8282b8af5791077317bbf`,
+  and `d41593beaefc54bab7d062af0ef6ca093bfb81d001d58ebbef39e44423f9c496`
+  for those three artifacts respectively. Calculate SHA-256 with
+  `sha256sum` on Linux or `shasum -a 256` on macOS, compare exact digests, and
+  extract only into a task-specific temporary directory. Set
+  `UV_NO_MODIFY_PATH=1`; a raw artifact installs no updater metadata and no
+  updater is invoked. Hash every existing `.bash_profile`, `.bashrc`, `.profile`,
+  `.zprofile`, and `.zshrc` before/after bootstrap and require byte-identical
+  files. Reject ambient uv, including this host's 0.12.7.
+- Required jobs create a clean Python 3.13 venv, install
+  `requirements/py313-build.lock` with `pip install --require-hashes
+  --only-binary=:all:`, then run `"$uv012" pip sync --require-hashes
+  --strict --no-build-isolation requirements/py313-dev.lock`,
+  and install the checkout with `"$uv012" pip install --no-deps
+  --no-build-isolation -e .`. Test commands use direct `.venv/bin/*` tools or
+  `uv run --no-sync`; ordinary `uv run` is forbidden after the immutable gate.
+  Capture sorted `uv pip freeze` before and after all checks and require exact
+  equality; upload the reviewed resolution and Textual/Rich versions.
+- Dependency freshness: a separate scheduled/manual latest-within-major canary
+  installs `.[dev]` without the lock but within the declared `<9`, `<15`, and
+  `<2` bounds, runs the same TUI/snapshot gate, and uploads its resolved versions
+  and SVG diffs. Canary drift does not silently rewrite the reviewed lock.
+- Active local deployment: after clean CI passes, separately review the dry-run
+  resolution for `/data1/homes/vui1/.venvs/proof-assistant`. That environment
+  contains editable `/data1/homes/vui1/src/repoprover`; never run `pip sync`
+  against it. Compile a temporary hash-locked union of Proof Assistant dev
+  dependencies, exact build pins, and the dependencies declared by the current
+  local RepoProver checkout. Diff it against the complete active freeze and
+  create a hash-locked file containing only direct/changed third-party packages;
+  first bootstrap `requirements/py313-build.lock` into the active interpreter
+  with `uv pip install --require-hashes --only-binary=:all:`. Only after those
+  build requirements are present, install the reviewed changes file with
+  `uv pip install --require-hashes
+  --no-build-isolation` so extras are preserved, then reinstall
+  both local projects editable with `--no-deps --no-build-isolation`. Require
+  `"$uv012" pip check`; verify both projects' import paths, RepoProver Git commit/
+  dirty state, and dependency resolution before and after; then launch the
+  installed TUI to inspect Settings. This deployment gate
+  is not evidence for clean CI and clean CI is not evidence for the installed
+  local environment.
 - Design-token constraints: extend existing semantic theme tokens and shared
   layout classes; do not add literal per-screen colors or a parallel theme.
 - Performance constraints:
@@ -676,7 +813,8 @@ and state; do not squeeze controls into unusable geometry.
     authority;
   - first-run readiness enforcement cannot be bypassed by global navigation.
 - Test/screenshot expectations:
-  - exercise 80x24, 100x32, 120x40, and 140x48;
+  - exercise the full truth table above, including 79x24, 80x23, 120x31, and
+    140x39 boundary compositions;
   - use maximum-length paths, provider/model names, eight roles, many projects,
     many findings, long source excerpts, and long failure text;
   - assert primary widgets have positive geometry and lie within the viewport;
@@ -692,25 +830,41 @@ and state; do not squeeze controls into unusable geometry.
   - assert no nested-scroll trap is required to reach an action;
   - retain behavior/integration tests for backend requests and revision checks.
 
-## Recommended implementation sequence
+## Implementation and quality-control record
 
-1. Add shared responsive shell, action bar, list/detail, and modal-body
-   primitives with geometry tests.
-2. Rebuild **Verification AI** as role assignments, provider connections, and
-   Provider diagnostics views. Fix scope-specific saving, dirty state, recommendation
-   preview/undo, and the clipped project summary as part of replacement.
-3. Rebuild first-run AI setup as the gated three-step onboarding flow while
-   preserving all readiness, secret, and confirmation boundaries.
-4. Split **Runtime & resources** into policy, overview, and calibration.
-5. Rebuild **Live progress** and **Clarification** around a fixed action bar and
-   one flexible workspace.
-6. Convert project catalog and project creation to list/detail and a concise
-   wizard.
-7. Normalize change review, findings, recovery, and modal geometry.
-8. Apply consistency polish to the already sound folder picker, failure
-   dependency, report viewer, and dashboard surfaces.
-9. Run the full TUI viewport matrix, lint, type checking, complete tests, and
-   Linux/macOS CI before release.
+The redesign is implemented as one shared system rather than a collection of
+screen-local exceptions:
+
+1. Textual 8.2.8, Rich 14, textual-dev 1.8, and the snapshot tooling are pinned
+   by reviewed, hash-locked Python 3.13 resolutions. Linux and macOS CI install
+   those exact files; a scheduled latest-within-major canary catches drift.
+2. `ResponsivePage`, `PageWorkspace`, `ActionBar`, roster/detail components,
+   and modal-body patterns provide the common geometry. Boundary, production,
+   keyboard, and SVG snapshot tests exercise the shared contract.
+3. **Verification AI** now separates role assignments, provider connections,
+   and diagnostics. Machine and project scopes retain distinct drafts,
+   revision-checked saves, provider defaults, and one-level Undo.
+4. First run is the gated **Choose provider → Connect provider → Review team**
+   flow. Global navigation, transient secrets, explicit account checks, and
+   reviewed installation commands retain their safety boundaries.
+5. **Runtime & resources** is split into policy, overview, and calibration.
+6. **Live progress** and **Clarification** use one flexible workspace, compact
+   peer views, wide split views, and fixed actions.
+7. Catalog, project creation, review, findings, recovery, reports, and the
+   remaining workflow screens use the same bounded-workspace/fixed-action
+   hierarchy, with list/detail or focused steps where content can grow.
+8. Background settings loads are generation-checked. Out-of-order provider,
+   role-policy, and project-policy results cannot overwrite newer reads,
+   mutations, or unsaved edits. Credential-store mutations are serialized.
+9. Closing Settings restores the exact originating screen; background workflow
+   results wait behind the overlay and appear only after it closes.
+10. Release quality gates are Ruff, the typing-policy check, strict mypy, the
+    complete pytest and snapshot suites, textual-dev diagnostics/smoke, locked
+    dependency immutability, and Linux/macOS CI.
+11. Local deployment uses the same reviewed lock without syncing away the
+    editable RepoProver install, followed by `uv pip check`, compiler, import,
+    executable, and Settings smoke checks. Shell startup files must remain
+    byte-for-byte unchanged during that deployment.
 
 ## Review checklist
 

@@ -16,6 +16,7 @@ from textual.widgets import (
     DataTable,
     Input,
     MarkdownViewer,
+    OptionList,
     RadioButton,
     Select,
     TabbedContent,
@@ -24,7 +25,12 @@ from textual.widgets import (
 
 import proof_assistant.tui.screens as tui_screens
 from proof_assistant.tui import ProofAssistantApp
-from proof_assistant.tui.commands import CommandFooter
+from proof_assistant.tui.commands import (
+    AppHeader,
+    AppHeaderIcon,
+    AppHeaderTitle,
+    CommandFooter,
+)
 from proof_assistant.tui.screens import (
     ChangeReviewScreen,
     ClarificationScreen,
@@ -557,6 +563,10 @@ class FakeWorkflowService:
         self.settings_previews: list[MachineSettingsUpdateRequest] = []
         self.settings_applications: list[tuple[str, tuple[str, ...]]] = []
         self.settings_resets: list[int] = []
+        self.settings_preview_started = threading.Event()
+        self.settings_preview_release: threading.Event | None = None
+        self.settings_apply_started = threading.Event()
+        self.settings_apply_release: threading.Event | None = None
         self.settings_warnings: tuple[SettingsWarning, ...] = ()
         self._preview: SettingsChangePreview | None = None
         self.benchmarks: list[tuple[BenchmarkKind, Path | None, bool]] = []
@@ -630,6 +640,10 @@ class FakeWorkflowService:
     def preview_machine_settings(
         self, request: MachineSettingsUpdateRequest
     ) -> SettingsChangePreview:
+        if self.settings_preview_release is not None:
+            self.settings_preview_started.set()
+            if not self.settings_preview_release.wait(timeout=5):
+                raise AssertionError("timed out waiting to release settings preview")
         if request.scope != SettingsScopeKind.MACHINE:
             raise ValueError("only MACHINE settings are supported")
         if request.expected_revision != self.machine_settings.revision:
@@ -661,6 +675,10 @@ class FakeWorkflowService:
         preview_token: str,
         accepted_warning_ids: tuple[str, ...] = (),
     ) -> MachineSettingsSnapshot:
+        if self.settings_apply_release is not None:
+            self.settings_apply_started.set()
+            if not self.settings_apply_release.wait(timeout=5):
+                raise AssertionError("timed out waiting to release settings apply")
         if self._preview is None or self._preview.preview_token != preview_token:
             raise ValueError("unknown or expired preview")
         expected_warnings = {warning.warning_id for warning in self._preview.warnings}
@@ -993,11 +1011,34 @@ async def activate_scrolled_button(
     await pilot.press("enter")
 
 
-async def settle_screen(pilot: Pilot[None]) -> None:
-    """Flush Textual 1.0 Header callbacks before another switch or teardown."""
+async def select_runtime_destination(
+    pilot: Pilot[None], app: ProofAssistantApp, index: int
+) -> None:
+    """Open one peer destination in Runtime & resources."""
 
-    await wait_for(pilot, lambda: bool(pilot.app.screen.query("HeaderTitle").nodes))
-    await pilot.pause(0.05)
+    navigation = app.screen.query_one("#runtime-settings-nav", OptionList)
+    navigation.highlighted = index
+    navigation.focus()
+    await pilot.press("enter")
+    await pilot.pause()
+
+
+async def settle_screen(pilot: Pilot[None]) -> None:
+    """Wait until the current screen's application header is mounted and laid out."""
+
+    def header_is_ready() -> bool:
+        headers = pilot.app.screen.query(AppHeader).nodes
+        if not headers:
+            return False
+        header = headers[0]
+        return bool(
+            header.is_mounted
+            and header.screen is pilot.app.screen
+            and header.region.width > 0
+        )
+
+    await wait_for(pilot, header_is_ready)
+    await pilot.pause()
 
 
 def test_nonselectable_static_output_has_an_explicit_copyable_twin() -> None:
@@ -1022,6 +1063,70 @@ def test_nonselectable_static_output_has_an_explicit_copyable_twin() -> None:
     }
     assert ids == {"source-excerpt"}
     assert "source-excerpt-copy" in source_path.read_text(encoding="utf-8")
+
+
+@async_test
+async def test_application_header_renders_title_and_subtitle() -> None:
+    service = FakeWorkflowService()
+    app = ProofAssistantApp(service)
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        await settle_screen(pilot)
+        title = app.screen.query_one(AppHeaderTitle)
+        assert app.title in title.content.plain
+        assert app.sub_title in title.content.plain
+
+
+@async_test
+async def test_application_header_survives_rapid_screen_replacement() -> None:
+    service = FakeWorkflowService()
+    app = ProofAssistantApp(service)
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        await settle_screen(pilot)
+        retired_header = app.screen.query_one(AppHeader)
+
+        for _ in range(4):
+            app.switch_screen(WelcomeScreen(ai_setup_supported=True))
+        app.title = "Replacement-safe title"
+
+        await wait_for(pilot, lambda: not retired_header.is_attached)
+        await settle_screen(pilot)
+        title = app.screen.query_one(AppHeaderTitle)
+        await wait_for(pilot, lambda: "Replacement-safe title" in title.content.plain)
+
+
+@async_test
+async def test_application_header_title_click_toggles_tall_layout() -> None:
+    service = FakeWorkflowService()
+    app = ProofAssistantApp(service)
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        await settle_screen(pilot)
+        header = app.screen.query_one(AppHeader)
+        assert not header.has_class("-tall")
+        await pilot.click("AppHeaderTitle")
+        await wait_for(pilot, lambda: header.has_class("-tall"))
+        await pilot.click("AppHeaderTitle")
+        await wait_for(pilot, lambda: not header.has_class("-tall"))
+
+
+@async_test
+async def test_application_header_icon_opens_palette_without_toggling_tall() -> None:
+    service = FakeWorkflowService()
+    app = ProofAssistantApp(service)
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        await settle_screen(pilot)
+        header = app.screen.query_one(AppHeader)
+        assert app.screen.query_one(AppHeaderIcon).tooltip == "Open the command palette"
+        await pilot.click("AppHeaderIcon")
+        await wait_for(pilot, lambda: app.screen.__class__.__name__ == "CommandPalette")
+        assert not header.has_class("-tall")
 
 
 @async_test
@@ -1119,9 +1224,7 @@ async def test_f2_f3_global_navigation_is_input_safe_and_cancel_first() -> None:
 
 
 @async_test
-async def test_global_navigation_detaches_only_client_and_blocks_late_completion() -> (
-    None
-):
+async def test_settings_preserves_observer_and_main_menu_detaches_only_client() -> None:
     service = FakeWorkflowService()
     service.verification_release = threading.Event()
     app = ProofAssistantApp(service)
@@ -1132,35 +1235,31 @@ async def test_global_navigation_detaches_only_client_and_blocks_late_completion
         await wait_for(pilot, lambda: progress_log_contains(app, "INDEXING"))
         progress = app.screen
         assert isinstance(progress, ProgressScreen)
+        observer = app._observer_worker
+        observation = app._active_observation
+        assert observer is not None
+        assert observation is not None
 
         await pilot.press("f3")
         await wait_for(pilot, lambda: settings_home_is_ready(app))
         assert service.cancel_requests == []
+        assert app._observer_worker is observer
+        assert app._active_observation == observation
+        assert app._progress_screen is progress
+
+        app.screen.query_one("#settings-back", Button).press()
+        await wait_for(pilot, lambda: app.screen is progress)
+        await pilot.press("f2")
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
         assert app._observer_worker is None
         assert app._active_observation is None
         assert app._progress_screen is None
 
-        # A terminal callback already queued by the observer is identity-guarded
-        # and therefore cannot steal the Settings screen after detachment.
-        app._finish_observed_job(progress, service.verify_result)
-        await pilot.pause()
-        assert isinstance(app.screen, SettingsHomeScreen)
+        # A late terminal result from the detached observer is identity-guarded
+        # and cannot steal the landing screen.
         service.verification_release.set()
         await pilot.pause(0.05)
-        assert isinstance(app.screen, SettingsHomeScreen)
-
-        app.screen.query_one("#settings-back", Button).press()
-        await wait_for(pilot, lambda: app.screen is progress)
-        status = progress.query_one("#status-line", TextArea)
-        assert "observer is detached" in status.text
-        assert "not cancelled" in status.text
-        status.select_all()
-        assert "Resume / open" in status.selected_text
-        assert progress.query_one("#cancel", Button).disabled
-        assert progress.query_one("#detach-observer", Button).disabled
-
-        await pilot.press("f2")
-        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        assert isinstance(app.screen, WelcomeScreen)
         assert service.cancel_requests == []
 
 
@@ -2061,8 +2160,7 @@ async def test_verification_progress_lists_copyable_sources_and_typed_stages() -
 
     async with app.run_test(size=(100, 30)) as pilot:
         await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
-        # Let Textual 1.0 finish mounting Header internals before switching.
-        await pilot.pause(0.1)
+        await settle_screen(pilot)
         app.start_verification(service.project, None)
         await wait_for(
             pilot,
@@ -2555,6 +2653,176 @@ async def test_persistent_cancel_survives_client_and_terminal_routes_recovery() 
 
 
 @async_test
+async def test_settings_overlay_restores_exact_live_verification_observer() -> None:
+    service = FakeWorkflowService()
+    service.verification_release = threading.Event()
+    app = ProofAssistantApp(service)
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        app.start_verification(service.project, None)
+        await wait_for(pilot, lambda: progress_log_contains(app, "INDEXING"))
+        progress = app.screen
+        assert isinstance(progress, ProgressScreen)
+        observation = app._active_observation
+        observer_worker = app._observer_worker
+        assert observation is not None
+        assert observer_worker is not None
+
+        await pilot.press("f3")
+        await wait_for(pilot, lambda: isinstance(app.screen, SettingsHomeScreen))
+        assert app._active_observation is not None
+        assert app._active_observation.job.job_id == observation.job.job_id
+        assert app._observer_worker is observer_worker
+        assert not observer_worker.is_cancelled
+
+        app.screen.action_back()
+        await wait_for(pilot, lambda: app.screen is progress)
+        assert app._active_observation is not None
+        assert app._active_observation.job.job_id == observation.job.job_id
+        assert app._observer_worker is observer_worker
+        assert not observer_worker.is_cancelled
+
+        service.verification_release.set()
+        await wait_for(pilot, lambda: isinstance(app.screen, FindingsScreen))
+
+
+@async_test
+async def test_verification_completion_waits_for_settings_overlay_to_close() -> None:
+    service = FakeWorkflowService()
+    service.verification_release = threading.Event()
+    app = ProofAssistantApp(service)
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        app.start_verification(service.project, None)
+        await wait_for(pilot, lambda: progress_log_contains(app, "INDEXING"))
+        await pilot.press("f3")
+        await wait_for(pilot, lambda: isinstance(app.screen, SettingsHomeScreen))
+
+        service.verification_release.set()
+        await wait_for(pilot, lambda: app._pending_settings_snapshot is not None)
+        assert isinstance(app.screen, SettingsHomeScreen)
+        assert app._settings_overlay_active
+        assert app._observer_worker is None
+        assert app._progress_screen is None
+
+        app.screen.action_back()
+        await wait_for(pilot, lambda: isinstance(app.screen, FindingsScreen))
+        assert not app._settings_overlay_active
+        assert app._pending_settings_snapshot is None
+
+
+@async_test
+async def test_non_observer_snapshot_completion_waits_for_settings_overlay() -> None:
+    service = FakeWorkflowService()
+    app = ProofAssistantApp(service)
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        app.current_snapshot = service.resume_result
+        progress = ProgressScreen(
+            "Saving existing project's main file",
+            project=service.project.project_path,
+        )
+        app.switch_screen(progress)
+        await wait_for(pilot, lambda: app.screen is progress)
+
+        await pilot.press("f3")
+        await wait_for(pilot, lambda: isinstance(app.screen, SettingsHomeScreen))
+        app.show_snapshot(service.verify_result)
+        await pilot.pause()
+
+        assert isinstance(app.screen, SettingsHomeScreen)
+        assert app._settings_overlay_active
+        assert app._pending_settings_snapshot is service.verify_result
+
+        app.screen.action_back()
+        await wait_for(pilot, lambda: isinstance(app.screen, FindingsScreen))
+        assert not app._settings_overlay_active
+        assert app._pending_settings_snapshot is None
+
+
+@async_test
+async def test_unattachable_activity_recovery_waits_for_settings_overlay() -> None:
+    service = FakeWorkflowService()
+    app = ProofAssistantApp(service)
+    snapshot = WorkflowSnapshot(WorkflowState.VERIFYING, service.project)
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        progress = ProgressScreen(
+            "Discovering verification",
+            project=service.project.project_path,
+        )
+        app.switch_screen(progress)
+        await wait_for(pilot, lambda: app.screen is progress)
+        await pilot.press("f3")
+        await wait_for(pilot, lambda: isinstance(app.screen, SettingsHomeScreen))
+
+        app._show_unattachable_activity(snapshot)
+        await pilot.pause()
+        assert isinstance(app.screen, SettingsHomeScreen)
+        assert app._pending_settings_navigation is not None
+
+        app.screen.action_back()
+        await wait_for(pilot, lambda: isinstance(app.screen, RecoveryScreen))
+        assert not app._settings_overlay_active
+
+
+@async_test
+async def test_deletion_confirmation_waits_for_settings_overlay() -> None:
+    service = FakeWorkflowService()
+    app = ProofAssistantApp(service)
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        app.show_settings(service.machine_settings)
+        await wait_for(pilot, lambda: isinstance(app.screen, SettingsHomeScreen))
+
+        app._confirm_project_deletion(
+            service.project,
+            service.deletion_inspection_result,
+        )
+        await pilot.pause()
+        assert isinstance(app.screen, SettingsHomeScreen)
+        assert app._pending_settings_navigation is not None
+
+        app.screen.action_back()
+        await wait_for(
+            pilot,
+            lambda: isinstance(app.screen, ProjectDeletionConfirmationScreen),
+        )
+        assert not app._settings_overlay_active
+        await pilot.press("escape")
+
+
+@async_test
+async def test_main_menu_discards_queued_settings_completion_result() -> None:
+    service = FakeWorkflowService()
+    service.verification_release = threading.Event()
+    app = ProofAssistantApp(service)
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        app.start_verification(service.project, None)
+        await wait_for(pilot, lambda: progress_log_contains(app, "INDEXING"))
+        await pilot.press("f3")
+        await wait_for(pilot, lambda: isinstance(app.screen, SettingsHomeScreen))
+        service.verification_release.set()
+        await wait_for(pilot, lambda: app._pending_settings_snapshot is not None)
+
+        await pilot.press("f2")
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        assert app._pending_settings_snapshot is None
+        app.show_settings(service.machine_settings)
+        await wait_for(pilot, lambda: isinstance(app.screen, SettingsHomeScreen))
+        app.screen.action_back()
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        assert not isinstance(app.screen, FindingsScreen)
+
+
+@async_test
 async def test_polling_error_is_copyable_and_detached_job_may_continue() -> None:
     service = FakeWorkflowService()
     service.verification_release = threading.Event()
@@ -2707,6 +2975,7 @@ async def test_concurrency_settings_preview_apply_and_replacement_tui_persistenc
         first_app.screen.query_one("#max-builds", Input).value = "2"
         first_app.screen.query_one("#agents-per-target", Input).value = "3"
         first_app.screen.query_one("#duplicate-escalation", Checkbox).value = False
+        await pilot.pause()
         first_app.screen.query_one("#save-concurrency", Button).press()
         await wait_for(pilot, lambda: bool(service.settings_applications))
         await wait_for(
@@ -2873,6 +3142,45 @@ async def test_reset_to_auto_recalculates_and_updates_editors() -> None:
         )
         await settle_screen(pilot)
         app.screen.query_one("#reset-concurrency", Button).press()
+        await wait_for(
+            pilot,
+            lambda: (
+                bool(app.screen.query("#settings-destructive-confirm").nodes)
+                and app.screen.focused
+                is app.screen.query_one("#settings-destructive-cancel", Button)
+            ),
+        )
+        assert service.settings_resets == []
+        assert app.screen.focused is app.screen.query_one(
+            "#settings-destructive-cancel", Button
+        )
+        await pilot.press("f3")
+        await wait_for(
+            pilot, lambda: isinstance(app.screen, ConcurrencyResourcesScreen)
+        )
+        assert service.settings_resets == []
+
+        app.screen.query_one("#reset-concurrency", Button).press()
+        await wait_for(
+            pilot,
+            lambda: (
+                bool(app.screen.query("#settings-destructive-confirm").nodes)
+                and app.screen.focused
+                is app.screen.query_one("#settings-destructive-cancel", Button)
+            ),
+        )
+        await pilot.press("enter")
+        await wait_for(
+            pilot, lambda: isinstance(app.screen, ConcurrencyResourcesScreen)
+        )
+        assert service.settings_resets == []
+
+        app.screen.query_one("#reset-concurrency", Button).press()
+        await wait_for(
+            pilot,
+            lambda: bool(app.screen.query("#settings-destructive-confirm").nodes),
+        )
+        app.screen.query_one("#settings-destructive-confirm", Button).press()
         await wait_for(pilot, lambda: bool(service.settings_resets))
         await wait_for(
             pilot,
@@ -2889,6 +3197,135 @@ async def test_reset_to_auto_recalculates_and_updates_editors() -> None:
         assert app.screen.query_one("#lean-pool", Input).value == "Auto"
         assert app.screen.query_one("#max-builds", Input).value == "Auto"
         assert "reset to Auto" in app.screen.query_one("#status-line", TextArea).text
+
+
+@async_test
+async def test_machine_settings_editors_guard_dirty_navigation() -> None:
+    service = FakeWorkflowService()
+    app = ProofAssistantApp(service)
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        app.show_concurrency_settings(service.machine_settings)
+        await wait_for(
+            pilot, lambda: isinstance(app.screen, ConcurrencyResourcesScreen)
+        )
+        runtime = app.screen
+        assert isinstance(runtime, ConcurrencyResourcesScreen)
+        await wait_for(pilot, lambda: bool(runtime.query("#ai-concurrency").nodes))
+        runtime.query_one("#ai-concurrency", Input).value = "6"
+        runtime.action_back()
+        await wait_for(
+            pilot,
+            lambda: bool(app.screen.query("#settings-unsaved-continue").nodes),
+        )
+        assert app.screen.focused is app.screen.query_one(
+            "#settings-unsaved-continue", Button
+        )
+        await pilot.press("enter")
+        await wait_for(pilot, lambda: app.screen is runtime)
+        assert runtime.query_one("#ai-concurrency", Input).value == "6"
+        assert service.settings_previews == []
+
+        await pilot.press("f2")
+        await wait_for(
+            pilot,
+            lambda: bool(app.screen.query("#settings-unsaved-save").nodes),
+        )
+        app.screen.query_one("#settings-unsaved-save", Button).press()
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        assert service.machine_settings.configured.ai_initial == 6
+
+        app.show_legacy_settings(service.machine_settings)
+        await wait_for(pilot, lambda: isinstance(app.screen, LegacySettingsScreen))
+        legacy = app.screen
+        assert isinstance(legacy, LegacySettingsScreen)
+        await wait_for(pilot, lambda: bool(legacy.query("#legacy-proof-jobs").nodes))
+        legacy.query_one("#legacy-proof-jobs", Input).value = "5"
+        await pilot.press("f3")
+        await wait_for(
+            pilot,
+            lambda: bool(app.screen.query("#settings-unsaved-discard").nodes),
+        )
+        app.screen.query_one("#settings-unsaved-discard", Button).press()
+        await wait_for(pilot, lambda: isinstance(app.screen, SettingsHomeScreen))
+        assert service.machine_settings.legacy.proof_jobs != 5
+
+
+@async_test
+async def test_runtime_newer_edit_survives_in_flight_apply_and_cancels_leave() -> None:
+    service = FakeWorkflowService()
+    service.settings_apply_release = threading.Event()
+    app = ProofAssistantApp(service)
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        app.show_concurrency_settings(service.machine_settings)
+        await wait_for(
+            pilot, lambda: isinstance(app.screen, ConcurrencyResourcesScreen)
+        )
+        screen = app.screen
+        assert isinstance(screen, ConcurrencyResourcesScreen)
+        await wait_for(pilot, lambda: bool(screen.query("#ai-concurrency").nodes))
+        screen.query_one("#ai-concurrency", Input).value = "6"
+        screen.action_back()
+        await wait_for(
+            pilot,
+            lambda: bool(app.screen.query("#settings-unsaved-save").nodes),
+        )
+        app.screen.query_one("#settings-unsaved-save", Button).press()
+        await wait_for(pilot, service.settings_apply_started.is_set)
+        screen.query_one("#ai-concurrency", Input).value = "7"
+
+        service.settings_apply_release.set()
+        await wait_for(
+            pilot,
+            lambda: (
+                app.screen is screen
+                and "newer edits remain unsaved"
+                in screen.query_one("#status-line", TextArea).text
+            ),
+        )
+        assert service.machine_settings.configured.ai_initial == 6
+        assert screen.query_one("#ai-concurrency", Input).value == "7"
+        assert screen._draft_is_dirty()
+
+
+@async_test
+async def test_legacy_newer_edit_survives_in_flight_preview_and_cancels_leave() -> None:
+    service = FakeWorkflowService()
+    service.settings_preview_release = threading.Event()
+    app = ProofAssistantApp(service)
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        app.show_legacy_settings(service.machine_settings)
+        await wait_for(pilot, lambda: isinstance(app.screen, LegacySettingsScreen))
+        screen = app.screen
+        assert isinstance(screen, LegacySettingsScreen)
+        await wait_for(pilot, lambda: bool(screen.query("#legacy-proof-jobs").nodes))
+        screen.query_one("#legacy-proof-jobs", Input).value = "3"
+        screen.action_back()
+        await wait_for(
+            pilot,
+            lambda: bool(app.screen.query("#settings-unsaved-save").nodes),
+        )
+        app.screen.query_one("#settings-unsaved-save", Button).press()
+        await wait_for(pilot, service.settings_preview_started.is_set)
+        screen.query_one("#legacy-proof-jobs", Input).value = "4"
+
+        service.settings_preview_release.set()
+        await wait_for(
+            pilot,
+            lambda: (
+                app.screen is screen
+                and "newer edits remain unsaved"
+                in screen.query_one("#status-line", TextArea).text
+            ),
+        )
+        assert service.machine_settings.legacy.proof_jobs == 3
+        assert screen.query_one("#legacy-proof-jobs", Input).value == "4"
+        assert screen._draft_is_dirty()
 
 
 @async_test
@@ -2948,6 +3385,7 @@ async def test_benchmark_actions_are_backend_owned_copyable_and_codex_safe() -> 
             pilot, lambda: isinstance(app.screen, ConcurrencyResourcesScreen)
         )
         await settle_screen(pilot)
+        await select_runtime_destination(pilot, app, 2)
         app.screen.query_one("#benchmark-codex", Button).press()
         await wait_for(pilot, lambda: len(service.benchmarks) == 1)
         await wait_for(
@@ -2997,7 +3435,14 @@ async def test_concurrency_reset_actions_are_backend_owned_and_copyable() -> Non
             pilot, lambda: isinstance(app.screen, ConcurrencyResourcesScreen)
         )
         await settle_screen(pilot)
+        await select_runtime_destination(pilot, app, 2)
         await activate_scrolled_button(pilot, app, "#reset-lean-calibration")
+        await wait_for(
+            pilot,
+            lambda: bool(app.screen.query("#settings-destructive-confirm").nodes),
+        )
+        assert service.calibration_resets == []
+        app.screen.query_one("#settings-destructive-confirm", Button).press()
         await wait_for(pilot, lambda: bool(service.calibration_resets))
         result = app.screen.query_one("#benchmark-result", TextArea)
         await wait_for(pilot, lambda: "Lean calibration reset" in result.text)
@@ -3006,6 +3451,12 @@ async def test_concurrency_reset_actions_are_backend_owned_and_copyable() -> Non
         assert "profile-test" in result.selected_text
 
         await activate_scrolled_button(pilot, app, "#reset-adaptive-history")
+        await wait_for(
+            pilot,
+            lambda: bool(app.screen.query("#settings-destructive-confirm").nodes),
+        )
+        assert service.adaptive_history_resets == 0
+        app.screen.query_one("#settings-destructive-confirm", Button).press()
         await wait_for(pilot, lambda: service.adaptive_history_resets == 1)
         await wait_for(pilot, lambda: "Adaptive history reset" in result.text)
         result.select_all()

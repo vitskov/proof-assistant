@@ -4,13 +4,15 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+  schedule:
+    - cron: "17 9 * * 1"
 
 permissions:
   contents: read
 
 jobs:
   test:
-    name: Python 3.13 / ${{ matrix.os }}
+    name: Locked Python 3.13 / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -24,9 +26,13 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
-      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
-        with:
-          version: "0.12.0"
+
+      - name: Bootstrap checksum-verified uv 0.12.0
+        shell: bash
+        run: |
+          uv_bin="$(scripts/bootstrap-uv.sh "$RUNNER_TEMP/proof-assistant-uv")"
+          printf 'UV_BIN=%s\n' "$uv_bin" >> "$GITHUB_ENV"
+
       - name: Install pinned Lean toolchain
         shell: bash
         run: |
@@ -48,18 +54,101 @@ jobs:
           "${CC:-cc}" "$preflight_dir/preflight.c" -o "$preflight_dir/preflight"
           "$preflight_dir/preflight"
 
-      - name: Install dependencies
+      - name: Install hash-locked development environment
+        shell: bash
         run: |
-          uv venv --python 3.13
-          uv pip install --python .venv/bin/python -e ".[dev]"
+          "$UV_BIN" venv --python 3.13 .venv
+          "$UV_BIN" pip install --python .venv/bin/python --require-hashes \
+            --only-binary=:all: -r requirements/py313-build.lock
+          "$UV_BIN" pip sync --python .venv/bin/python --require-hashes --strict \
+            --no-build-isolation requirements/py313-dev.lock
+          "$UV_BIN" pip install --python .venv/bin/python --no-deps \
+            --no-build-isolation -e .
+          "$UV_BIN" pip check --python .venv/bin/python
+          mkdir -p artifacts
+          "$UV_BIN" pip freeze --python .venv/bin/python | LC_ALL=C sort \
+            > "artifacts/resolved-before-${RUNNER_OS}.txt"
+          .venv/bin/python - <<'PY' > "artifacts/tool-versions-${RUNNER_OS}.txt"
+          from importlib.metadata import version
+          for package in ("textual", "rich", "textual-dev", "pytest-textual-snapshot"):
+              print(f"{package}=={version(package)}")
+          PY
+
       - name: Validate Lean compiler integration
         shell: bash
         run: env -u LEAN_CC .venv/bin/proof-assistant compiler-check
       - name: Lint
-        run: uv run --no-sync ruff check src tests scripts
+        run: .venv/bin/ruff check src tests scripts
       - name: Strict type check
+        shell: bash
         run: |
-          uv run --no-sync python scripts/check_typing_policy.py
-          uv run --no-sync mypy
+          .venv/bin/python scripts/check_typing_policy.py
+          .venv/bin/mypy
       - name: Test
-        run: uv run --no-sync pytest -q
+        run: .venv/bin/pytest -q
+
+      - name: Verify test tooling did not mutate dependencies
+        if: always()
+        shell: bash
+        run: |
+          "$UV_BIN" pip freeze --python .venv/bin/python | LC_ALL=C sort \
+            > "artifacts/resolved-after-${RUNNER_OS}.txt"
+          diff -u "artifacts/resolved-before-${RUNNER_OS}.txt" \
+            "artifacts/resolved-after-${RUNNER_OS}.txt"
+
+      - name: Upload dependency and snapshot evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: locked-test-evidence-${{ runner.os }}
+          if-no-files-found: ignore
+          path: |
+            artifacts/
+            snapshot_report.html
+            snapshot_report/
+            tests/__snapshots__/**/*.svg
+
+  latest-within-major:
+    name: Latest within major / ${{ matrix.os }}
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Bootstrap checksum-verified uv 0.12.0
+        shell: bash
+        run: |
+          uv_bin="$(scripts/bootstrap-uv.sh "$RUNNER_TEMP/proof-assistant-uv")"
+          printf 'UV_BIN=%s\n' "$uv_bin" >> "$GITHUB_ENV"
+      - name: Resolve latest versions within declared major bounds
+        shell: bash
+        run: |
+          "$UV_BIN" venv --python 3.13 .venv
+          "$UV_BIN" pip install --python .venv/bin/python --upgrade -e ".[dev]"
+          "$UV_BIN" pip check --python .venv/bin/python
+          mkdir -p artifacts
+          "$UV_BIN" pip freeze --python .venv/bin/python | LC_ALL=C sort \
+            > "artifacts/canary-resolution-${RUNNER_OS}.txt"
+      - name: Run compatibility canary
+        run: .venv/bin/pytest -q tests/test_tui*.py
+      - name: Upload canary resolution and snapshot differences
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: latest-within-major-${{ runner.os }}
+          if-no-files-found: ignore
+          path: |
+            artifacts/
+            snapshot_report.html
+            snapshot_report/
+            tests/__snapshots__/**/*.svg

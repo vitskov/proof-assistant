@@ -11,6 +11,11 @@
   higher-priority login file that shadows `.profile`. Honor `ZDOTDIR` for zsh
   and `XDG_CONFIG_HOME` for fish, use runtime-guarded PATH additions, and refuse
   broken symlinks or non-regular startup targets.
+- The reproducible dependency and quality-control tooling does not edit shell
+  startup files. `scripts/bootstrap-uv.sh` sets `UV_NO_MODIFY_PATH=1`, installs
+  into a task-specific directory, and fails if `.bash_profile`, `.bashrc`,
+  `.profile`, `.zprofile`, or `.zshrc` changes. This rule applies on Linux and
+  macOS; developers add a desired executable directory to `PATH` themselves.
 - Compiler validation must exercise standard headers and `lean/lean.h` through
   `leanc`; never export Lean's bundled `bin/clang` as `LEAN_CC`.
 - Resolve Lean's toolchain from the target project's directory so its
@@ -36,6 +41,43 @@ proof-assistant compiler-check
 Follow [Python 3.13 development style](PYTHON_STYLE.md) for strict typing,
 validated JSON boundaries, selective dataclass slots, and recommendations for
 reducing the remaining dynamic surface.
+
+## Reproducible Python 3.13 environment
+
+CI on Linux and macOS uses the committed hash-locked inputs. Bootstrap the
+repository-pinned `uv` 0.12.0 binary, create an unseeded external environment,
+install the pinned build tools, sync the reviewed development lock, and then
+install the checkout without dependency re-resolution:
+
+```bash
+cd "$HOME/src/proof-assistant"
+work_dir="$(mktemp -d)"
+uv_bin="$(scripts/bootstrap-uv.sh "$work_dir/uv")"
+"$uv_bin" venv --python 3.13 "$work_dir/venv"
+"$uv_bin" pip install --python "$work_dir/venv/bin/python" \
+  --require-hashes --only-binary=:all: -r requirements/py313-build.lock
+"$uv_bin" pip sync --python "$work_dir/venv/bin/python" \
+  --require-hashes --strict --no-build-isolation requirements/py313-dev.lock
+"$uv_bin" pip install --python "$work_dir/venv/bin/python" \
+  --no-deps --no-build-isolation -e .
+"$uv_bin" pip check --python "$work_dir/venv/bin/python"
+```
+
+`scripts/bootstrap-uv.sh` selects the reviewed Linux x86-64, macOS arm64, or
+macOS x86-64 release artifact and verifies it against
+`requirements/uv-0.12.0-sha256.txt`. It does not run Astral's remote installer,
+invoke an updater, or edit shell startup files. Refresh the two lock files only
+as a deliberate dependency change:
+
+```bash
+scripts/refresh-dev-lock.sh
+git diff -- requirements/py313-build.lock requirements/py313-dev.lock
+```
+
+Do not use `pip sync` on a shared or active environment that contains unrelated
+packages or an editable RepoProver checkout. Use the clean environment above;
+deployment to an existing environment requires a separately reviewed
+preserving install.
 
 ## Architectural rules
 
@@ -81,6 +123,41 @@ provider tool calls return through the common host admission boundary.
 
 ## TUI and workflow acceptance
 
+The reviewed lock resolves Textual 8.2.8 and textual-dev 1.8.0. The declared
+bounds are Textual `>=8.2.8,<9` and `textual-dev>=1.8,<2`; visual regression
+tests pin `pytest-textual-snapshot==1.1.0`.
+
+Run the deterministic, service-free responsive settings fixture with Textual's
+live console from two terminals:
+
+```bash
+# Terminal 1
+textual console
+```
+
+```bash
+# Terminal 2, from the repository root
+textual run --dev tests/textual_dev_app.py
+```
+
+The fixture shows the eight-role Claude layout, including Fable / extra-high
+for the Independent prove agent, without connecting to a provider. Use it to
+inspect focus, resize behavior, and Textual log messages. Record diagnostics
+with:
+
+```bash
+python -m textual_dev diagnose
+```
+
+The snapshot gate covers Proof Ink and Proof Paper at 80×24, 120×40, and
+140×48. Review SVG changes rather than updating them blindly:
+
+```bash
+python -m pytest -q tests/test_tui_layout.py tests/test_tui_snapshots.py
+# After deliberate visual review only:
+python -m pytest -q tests/test_tui_snapshots.py --snapshot-update
+```
+
 Test the Textual app with its pilot/headless driver. Cover:
 
 1. one-file automatic main-file announcement, multi-file explicit root
@@ -105,7 +182,11 @@ Test the Textual app with its pilot/headless driver. Cover:
     navigation; and
 16. a permanent context-sensitive command footer, F1 shortcut reference,
     editable-field-safe `?`, command palette, and WCAG-checked light/dark
-    semantic themes at both ordinary and 80×24 terminal sizes.
+    semantic themes at both ordinary and 80×24 terminal sizes; and
+17. all eight AI role rows at 120×40, explicit machine/project scope,
+    provider-default and one-level Undo behavior, selection preservation, and
+    removal of secret input values from the DOM when leaving the connection
+    view.
 
 Backend source tests must cover rapid editor-style replace sequences,
 simultaneous changes to several `\input` files, adds/deletes/renames, and staged

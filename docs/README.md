@@ -33,8 +33,9 @@ This index separates ordinary use from implementation and maintenance details.
 
 ## Maintainers and automation
 
-- [Development and testing](DEVELOPMENT.md) — local development, regression
-  tests, integration checks, and release checks.
+- [Development and testing](DEVELOPMENT.md) — hash-locked Python 3.13 setup,
+  Textual live debugging and snapshots, regression tests, integration checks,
+  and release checks.
 - [Python 3.13 development style](PYTHON_STYLE.md) — strict typing, validated
   data boundaries, measured runtime optimization, and future recommendations.
 - [Working as an AI agent](AI_AGENTS.md) — mandatory safety constraints,

@@ -8,9 +8,194 @@ screens from inventing subtly different labels for the same interaction.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 
+from textual.app import ComposeResult, RenderResult
 from textual.binding import Binding
-from textual.widgets import Footer
+from textual.content import Content
+from textual.events import Click
+from textual.reactive import Reactive
+from textual.widget import Widget
+from textual.widgets import Footer, Static
+
+
+class AppHeaderIcon(Widget):
+    """Command-palette affordance at the left edge of the app header."""
+
+    DEFAULT_CSS = """
+    AppHeaderIcon {
+        dock: left;
+        padding: 0 1;
+        width: 8;
+        content-align: left middle;
+    }
+    AppHeaderIcon:hover { background: $foreground 10%; }
+    """
+
+    icon: Reactive[str] = Reactive("⭘")
+
+    def on_mount(self) -> None:
+        if self.app.ENABLE_COMMAND_PALETTE:
+            self.tooltip = "Open the command palette"
+        else:
+            self.disabled = True
+
+    async def on_click(self, event: Click) -> None:
+        event.stop()
+        await self.run_action("app.command_palette")
+
+    def render(self) -> RenderResult:
+        return self.icon
+
+
+class AppHeaderClockSpace(Widget):
+    """Right-side space that keeps the header title centered."""
+
+    DEFAULT_CSS = """
+    AppHeaderClockSpace {
+        dock: right;
+        width: 10;
+        padding: 0 1;
+    }
+    """
+
+    def render(self) -> RenderResult:
+        return ""
+
+
+class AppHeaderClock(AppHeaderClockSpace):
+    """Optional live clock rendered at the right edge of the header."""
+
+    DEFAULT_CSS = """
+    AppHeaderClock {
+        background: $foreground-darken-1 5%;
+        color: $foreground;
+        text-opacity: 85%;
+        content-align: center middle;
+    }
+    """
+
+    time_format: Reactive[str] = Reactive("%X")
+
+    def on_mount(self) -> None:
+        self.set_interval(1, callback=self.refresh, name="update header clock")
+
+    def render(self) -> RenderResult:
+        return datetime.now().time().strftime(self.time_format)
+
+
+class AppHeaderTitle(Static):
+    """Centered application title and subtitle."""
+
+    DEFAULT_CSS = """
+    AppHeaderTitle {
+        text-wrap: nowrap;
+        text-overflow: ellipsis;
+        content-align: center middle;
+        width: 100%;
+    }
+    """
+
+
+class AppHeader(Widget):
+    """Textual-compatible header safe under rapid screen replacement."""
+
+    DEFAULT_CSS = """
+    AppHeader {
+        dock: top;
+        width: 100%;
+        background: $panel;
+        color: $foreground;
+        height: 1;
+    }
+    AppHeader.-tall { height: 3; }
+    """
+
+    tall: Reactive[bool] = Reactive(False)
+    icon: Reactive[str] = Reactive("⭘")
+    time_format: Reactive[str] = Reactive("%X")
+
+    def __init__(
+        self,
+        show_clock: bool = False,
+        *,
+        name: str | None = None,
+        id: str | None = None,
+        classes: str | None = None,
+        icon: str | None = None,
+        time_format: str | None = None,
+    ) -> None:
+        super().__init__(name=name, id=id, classes=classes)
+        self._show_clock = show_clock
+        if icon is not None:
+            self.icon = icon
+        if time_format is not None:
+            self.time_format = time_format
+
+    def compose(self) -> ComposeResult:
+        yield AppHeaderIcon().data_bind(AppHeader.icon)
+        yield AppHeaderTitle()
+        yield (
+            AppHeaderClock().data_bind(AppHeader.time_format)
+            if self._show_clock
+            else AppHeaderClockSpace()
+        )
+
+    def watch_tall(self, tall: bool) -> None:
+        self.set_class(tall, "-tall")
+
+    def on_click(self) -> None:
+        self.toggle_class("-tall")
+
+    def format_title(self) -> Content:
+        return self.app.format_title(
+            self.screen_title,
+            self.screen_sub_title,
+        )
+
+    @property
+    def screen_title(self) -> str:
+        title = self.screen.title
+        return title if title is not None else self.app.title
+
+    @property
+    def screen_sub_title(self) -> str:
+        sub_title = self.screen.sub_title
+        return sub_title if sub_title is not None else self.app.sub_title
+
+    def on_mount(self) -> None:
+        self.call_after_refresh(self._install_title_watchers)
+
+    def _install_title_watchers(self) -> None:
+        """Bind title updates after this header's composed subtree is ready."""
+
+        if not self.is_mounted or not self.is_attached:
+            return
+        containing_screen = self.screen
+        if not containing_screen.is_current:
+            return
+        title = self.query_one(AppHeaderTitle)
+        if title.parent is not self or not title.is_mounted or not title.is_attached:
+            return
+
+        async def set_title() -> None:
+            # A reactive callback may already be queued when its screen is
+            # replaced. Ignore only a detached header/title subtree; all update
+            # and formatting failures on the live subtree remain visible.
+            if not self.is_mounted or not self.is_attached:
+                return
+            if (
+                title.parent is not self
+                or not title.is_mounted
+                or not title.is_attached
+            ):
+                return
+            title.update(self.format_title())
+
+        self.watch(self.app, "title", set_title)
+        self.watch(self.app, "sub_title", set_title)
+        self.watch(containing_screen, "title", set_title)
+        self.watch(containing_screen, "sub_title", set_title)
 
 
 @dataclass(frozen=True)

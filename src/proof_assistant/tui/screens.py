@@ -10,12 +10,12 @@ from typing import TYPE_CHECKING
 from rich.syntax import Syntax
 from rich.text import Text
 from textual.app import ComposeResult
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Horizontal, Vertical
+from textual.events import Resize
 from textual.screen import ModalScreen, Screen
 from textual.widgets import (
     Button,
     DataTable,
-    Header,
     Input,
     Label,
     MarkdownViewer,
@@ -53,6 +53,17 @@ from proof_assistant.tui.commands import (
     VERIFY,
     CommandFooter,
     shortcut_reference_text,
+)
+from proof_assistant.tui.commands import AppHeader as Header
+from proof_assistant.tui.layout import (
+    COMPOSITION_CLASSES,
+    ActionBar,
+    PageHeader,
+    PageWorkspace,
+    ResponsivePage,
+    ResponsiveToolbar,
+    ScrollableDialogBody,
+    classify_viewport,
 )
 from proof_assistant.workflow.contracts import (
     ChangeImpactPlan,
@@ -249,19 +260,20 @@ class ShortcutHelpScreen(ModalScreen[None]):
     BINDINGS = [BACK.binding(action="close"), CLOSE.binding()]
 
     def compose(self) -> ComposeResult:
-        with VerticalScroll(id="shortcut-help-dialog"):
+        with Vertical(id="shortcut-help-dialog"):
             yield CopyableText("Keyboard commands", classes="title")
-            yield CopyableText(
-                shortcut_reference_text(),
-                id="shortcut-reference",
-                soft_wrap=False,
-                expand=True,
-            )
-            yield CopyableText(
-                "The footer always shows commands for the active screen and focused "
-                "control.",
-                classes="muted",
-            )
+            with ScrollableDialogBody():
+                yield CopyableText(
+                    shortcut_reference_text(),
+                    id="shortcut-reference",
+                    soft_wrap=False,
+                    expand=True,
+                )
+                yield CopyableText(
+                    "The footer always shows commands for the active screen and "
+                    "focused control.",
+                    classes="muted",
+                )
         yield CommandFooter()
 
     def action_close(self) -> None:
@@ -303,24 +315,34 @@ class WelcomeScreen(NoticeScreen):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        with Vertical(id="page"):
-            yield CopyableText("Proof Assistant", classes="title")
-            yield CopyableText(
-                "Verify a LaTeX manuscript in a backend-managed project. Source "
-                "paths, project paths, findings, and status text remain selectable "
-                "for terminal copy and paste."
-            )
-            yield CopyableText(
-                self._ai_status_text(),
-                id="landing-ai-provider-status",
-                classes=(
-                    "muted"
-                    if self.ai_setup is None or self.ai_setup.primary_ready
-                    else "warning"
-                ),
-            )
-            yield CopyableText("Start a new verification", classes="section")
-            with Horizontal(classes="toolbar"):
+        with ResponsivePage(id="page"):
+            with PageHeader():
+                yield CopyableText("Proof Assistant", classes="title")
+                yield CopyableText(
+                    self._ai_status_text(),
+                    id="landing-ai-provider-status",
+                    classes=(
+                        "muted"
+                        if self.ai_setup is None or self.ai_setup.primary_ready
+                        else "warning"
+                    ),
+                )
+            with PageWorkspace():
+                yield CopyableText(
+                    "Verify a LaTeX manuscript in a backend-managed project. Source "
+                    "paths, project paths, findings, and status text remain selectable "
+                    "for terminal copy and paste."
+                )
+                yield CopyableText(
+                    "Open or resume an existing project", classes="section"
+                )
+                yield CopyableText(
+                    "Resume continues from durable backend state. Opening this TUI "
+                    "does not take ownership of a project or its verification job.",
+                    classes="muted",
+                )
+                yield Vertical(id="project-list")
+            with ActionBar():
                 yield Button(
                     "New project…",
                     id="new-project",
@@ -337,16 +359,9 @@ class WelcomeScreen(NoticeScreen):
                 )
                 yield Button("Settings", id="settings")
                 yield Button("Refresh list", id="refresh-projects")
-            yield CopyableText("Open or resume an existing project", classes="section")
-            yield CopyableText(
-                "Resume continues from durable backend state. Opening this TUI does "
-                "not take ownership of a project or its verification job.",
-                classes="muted",
-            )
-            yield Vertical(id="project-list")
-            yield CopyableText(
-                "Loading project catalog…", id="status-line", classes="muted"
-            )
+                yield CopyableText(
+                    "Loading project catalog…", id="status-line", classes="muted"
+                )
         yield CommandFooter()
 
     def on_mount(self) -> None:
@@ -531,42 +546,46 @@ class ProjectDeletionConfirmationScreen(ModalScreen[bool]):
         self.inspection = inspection
 
     def compose(self) -> ComposeResult:
-        with VerticalScroll(id="delete-project-dialog"):
+        with Vertical(id="delete-project-dialog"):
             yield CopyableText("Delete managed project?", classes="title")
-            yield CopyableText(
-                f"Project name: {self.project.name}\n"
-                "Managed project selected for recoverable deletion: "
-                f"{self.inspection.project_path}\n"
-                "External manuscript source (untouched): "
-                f"{_path_text(self.inspection.source_path)}\n"
-                f"Backend preflight: {self.inspection.availability.value}",
-                id="delete-project-paths",
-                max_lines=6,
-            )
-            yield CopyableText(
-                "Only the managed project folder will be moved to Proof Assistant's "
-                "recoverable deletion storage. The external manuscript source will "
-                "not be changed, moved, or deleted. The managed project remains "
-                "recoverable until you manually remove the returned destination.",
-                classes="warning",
-                id="delete-project-safety",
-                max_lines=6,
-            )
-            if self.inspection.source_in_dropbox:
+            with ScrollableDialogBody():
                 yield CopyableText(
-                    "The external manuscript source is in Dropbox; it remains "
-                    "completely untouched.",
+                    f"Project name: {self.project.name}\n"
+                    "Managed project selected for recoverable deletion: "
+                    f"{self.inspection.project_path}\n"
+                    "External manuscript source (untouched): "
+                    f"{_path_text(self.inspection.source_path)}\n"
+                    f"Backend preflight: {self.inspection.availability.value}",
+                    id="delete-project-paths",
+                    max_lines=6,
+                )
+                yield CopyableText(
+                    "Only the managed project folder will be moved to Proof "
+                    "Assistant's recoverable deletion storage. The external "
+                    "manuscript source will not be changed, moved, or deleted. The "
+                    "managed project remains recoverable until you manually remove "
+                    "the returned destination.",
                     classes="warning",
-                    id="delete-project-dropbox",
+                    id="delete-project-safety",
+                    max_lines=6,
                 )
-            if self.inspection.issue:
-                yield CopyableText(
-                    f"Backend preflight issue: {self.inspection.issue}",
-                    classes="error" if not self.inspection.can_delete else "warning",
-                    id="delete-project-issue",
-                    max_lines=5,
-                )
-            with Horizontal(classes="toolbar"):
+                if self.inspection.source_in_dropbox:
+                    yield CopyableText(
+                        "The external manuscript source is in Dropbox; it remains "
+                        "completely untouched.",
+                        classes="warning",
+                        id="delete-project-dropbox",
+                    )
+                if self.inspection.issue:
+                    yield CopyableText(
+                        f"Backend preflight issue: {self.inspection.issue}",
+                        classes=(
+                            "error" if not self.inspection.can_delete else "warning"
+                        ),
+                        id="delete-project-issue",
+                        max_lines=5,
+                    )
+            with ActionBar():
                 yield Button("Cancel", id="delete-project-cancel", variant="primary")
                 yield Button(
                     "Delete managed project (recoverable)",
@@ -628,47 +647,56 @@ class ProjectDeletionOutcomeScreen(NoticeScreen):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        with VerticalScroll(id="page"):
-            if self.result is not None:
+        with ResponsivePage(id="page"):
+            with PageHeader():
                 yield CopyableText(
-                    "Managed project moved to recoverable deletion storage",
-                    classes="title success",
+                    (
+                        "Managed project moved to recoverable deletion storage"
+                        if self.result is not None
+                        else "Project deletion failed"
+                    ),
+                    classes=(
+                        "title success" if self.result is not None else "title error"
+                    ),
                 )
-                yield CopyableText(
-                    f"Former managed project path: {self.result.project_path}\n"
-                    "Recoverable deletion destination: "
-                    f"{self.result.trash_path}\n"
-                    "External manuscript source (untouched): "
-                    f"{self.result.source_path}\n"
-                    f"Deleted at: {self.result.deleted_at}\n"
-                    f"Recoverable: {'yes' if self.result.recoverable else 'no'}",
-                    id="delete-project-result",
-                    classes="success",
-                    max_lines=8,
-                )
-                yield CopyableText(
-                    "The external manuscript source was not changed, moved, or "
-                    "deleted. The managed project can be recovered from the returned "
-                    "destination until you manually remove that destination.",
-                    id="delete-project-result-safety",
-                    max_lines=4,
-                )
-            else:
-                source = (
-                    self.inspection.source_path
-                    if self.inspection is not None
-                    else self.project.source_path
-                )
-                yield CopyableText("Project deletion failed", classes="title error")
-                yield CopyableText(
-                    f"Managed project: {self.project.project_path}\n"
-                    f"External manuscript source (untouched): {_path_text(source)}\n"
-                    f"Error: {self.error or 'Deletion was not completed.'}",
-                    id="delete-project-error",
-                    classes="error",
-                    max_lines=10,
-                )
-            with Horizontal(classes="toolbar"):
+            with PageWorkspace():
+                if self.result is not None:
+                    yield CopyableText(
+                        f"Former managed project path: {self.result.project_path}\n"
+                        "Recoverable deletion destination: "
+                        f"{self.result.trash_path}\n"
+                        "External manuscript source (untouched): "
+                        f"{self.result.source_path}\n"
+                        f"Deleted at: {self.result.deleted_at}\n"
+                        f"Recoverable: {'yes' if self.result.recoverable else 'no'}",
+                        id="delete-project-result",
+                        classes="success",
+                        max_lines=8,
+                    )
+                    yield CopyableText(
+                        "The external manuscript source was not changed, moved, or "
+                        "deleted. The managed project can be recovered from the "
+                        "returned destination until you manually remove that "
+                        "destination.",
+                        id="delete-project-result-safety",
+                        max_lines=4,
+                    )
+                else:
+                    source = (
+                        self.inspection.source_path
+                        if self.inspection is not None
+                        else self.project.source_path
+                    )
+                    yield CopyableText(
+                        f"Managed project: {self.project.project_path}\n"
+                        "External manuscript source (untouched): "
+                        f"{_path_text(source)}\n"
+                        f"Error: {self.error or 'Deletion was not completed.'}",
+                        id="delete-project-error",
+                        classes="error",
+                        max_lines=10,
+                    )
+            with ActionBar():
                 yield Button(
                     "Return to refreshed projects",
                     id="deletion-projects",
@@ -676,11 +704,11 @@ class ProjectDeletionOutcomeScreen(NoticeScreen):
                 )
                 if self.result is None:
                     yield Button("Retry preflight", id="deletion-retry")
-            yield CopyableText(
-                "Returning to projects reloads the backend-owned catalog.",
-                id="status-line",
-                classes="muted",
-            )
+                yield CopyableText(
+                    "Returning reloads the catalog.",
+                    id="status-line",
+                    classes="muted",
+                )
         yield CommandFooter()
 
     def on_mount(self) -> None:
@@ -718,26 +746,28 @@ class ManuscriptFolderPickerScreen(NoticeScreen):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        with Vertical(id="page"):
-            yield CopyableText("Choose manuscript source folder", classes="title")
-            yield CopyableText(
-                "Loading the backend-owned starting folder…",
-                id="folder-picker-current",
-                max_lines=4,
-            )
-            yield DataTable(
-                show_row_labels=False,
-                cursor_type="row",
-                zebra_stripes=True,
-                id="folder-picker-table",
-            )
-            yield CopyableText(
-                "No child folder selected.",
-                id="folder-picker-selection",
-                classes="muted",
-                max_lines=3,
-            )
-            with Horizontal(id="folder-picker-controls", classes="toolbar"):
+        with ResponsivePage(id="page"):
+            with PageHeader():
+                yield CopyableText("Choose manuscript source folder", classes="title")
+                yield CopyableText(
+                    "Loading the backend-owned starting folder…",
+                    id="folder-picker-current",
+                    max_lines=4,
+                )
+            with PageWorkspace():
+                yield DataTable(
+                    show_row_labels=False,
+                    cursor_type="row",
+                    zebra_stripes=True,
+                    id="folder-picker-table",
+                )
+                yield CopyableText(
+                    "No child folder selected.",
+                    id="folder-picker-selection",
+                    classes="muted",
+                    max_lines=3,
+                )
+            with ActionBar(id="folder-picker-controls"):
                 yield Button("Up", id="folder-picker-parent", disabled=True)
                 yield Button("Home", id="folder-picker-home")
                 yield Button(
@@ -752,15 +782,12 @@ class ManuscriptFolderPickerScreen(NoticeScreen):
                     disabled=True,
                 )
                 yield Button("Cancel", id="folder-picker-cancel")
-            yield CopyableText(
-                "Arrow keys highlight folders; Enter opens one. Backspace goes up "
-                "and Ctrl+Home returns home. "
-                "The chooser works entirely in this terminal; no desktop file "
-                "dialog is used.",
-                id="status-line",
-                classes="muted",
-                max_lines=3,
-            )
+                yield CopyableText(
+                    "Enter opens; Backspace goes up; Ctrl+Home returns home.",
+                    id="status-line",
+                    classes="muted",
+                    max_lines=3,
+                )
         yield CommandFooter()
 
     def on_mount(self) -> None:
@@ -907,70 +934,80 @@ class NewProjectScreen(NoticeScreen):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        with VerticalScroll(id="page"):
-            yield CopyableText("New verification project", classes="title")
-            yield Label("Project name")
-            yield Input(
-                value=self.draft.name if self.draft is not None else "",
-                placeholder="my-paper",
-                id="project-name",
-            )
-            yield Label("Existing manuscript source folder")
-            with Horizontal(id="source-folder-controls"):
+        with ResponsivePage(id="page"):
+            with PageHeader():
+                yield CopyableText("New verification project", classes="title")
+                yield CopyableText(
+                    "Step 1 of 3 · Source, destination, and verification task",
+                    classes="muted",
+                )
+            with PageWorkspace():
+                yield Label("Project name")
+                yield Input(
+                    value=(self.draft.name if self.draft is not None else ""),
+                    placeholder="my-paper",
+                    id="project-name",
+                )
+                yield Label("Existing manuscript source folder")
+                with ResponsiveToolbar(id="source-folder-controls"):
+                    yield Input(
+                        value=(
+                            str(self.draft.source_path)
+                            if self.draft is not None
+                            else ""
+                        ),
+                        placeholder="/absolute/path/to/manuscript",
+                        id="source-path",
+                    )
+                    yield Button("Browse folders", id="browse-source")
+                yield CopyableText(
+                    "The source may be in Dropbox. Files are copied into a managed, "
+                    "Git-versioned project before verification.",
+                    classes="muted",
+                )
+                yield Label("Managed project folder (optional)")
                 yield Input(
                     value=(
-                        str(self.draft.source_path) if self.draft is not None else ""
+                        str(self.draft.project_path)
+                        if self.draft is not None
+                        and self.draft.project_path is not None
+                        else ""
                     ),
-                    placeholder="/absolute/path/to/manuscript",
-                    id="source-path",
+                    placeholder="$HOME/proof-assistant/<project-name>",
+                    id="project-path",
                 )
-                yield Button("Browse folders", id="browse-source")
-            yield CopyableText(
-                "The source may be in Dropbox. Files are copied into a managed, "
-                "Git-versioned "
-                "project before verification.",
-                classes="muted",
-            )
-            yield Label("Managed project folder (optional)")
-            yield Input(
-                value=(
-                    str(self.draft.project_path)
-                    if self.draft is not None and self.draft.project_path is not None
-                    else ""
-                ),
-                placeholder="$HOME/proof-assistant/<project-name>",
-                id="project-path",
-            )
-            yield CopyableText(
-                "Managed projects, Python environments, and Lean caches must not "
-                "be in Dropbox.",
-                classes="warning",
-            )
-            yield CopyableText("Verification task", classes="section")
-            with Horizontal(classes="toolbar"):
-                yield Button("Use default task", id="default-task", variant="primary")
-                yield Button("Customize task", id="custom-task")
-            yield TextArea(
-                (
-                    self.draft.task_text
-                    if self.draft is not None and self.draft.task_text is not None
-                    else self.proof_app.service.default_task_text()
-                ),
-                id="task-editor",
-                language="markdown",
-                show_line_numbers=True,
-                disabled=not self._custom_task,
-            )
-            with Horizontal(classes="toolbar"):
+                yield CopyableText(
+                    "Managed projects, Python environments, and Lean caches must "
+                    "not be in Dropbox.",
+                    classes="warning",
+                )
+                yield CopyableText("Verification task", classes="section")
+                with ResponsiveToolbar():
+                    yield Button(
+                        "Use default task", id="default-task", variant="primary"
+                    )
+                    yield Button("Customize task", id="custom-task")
+                yield TextArea(
+                    (
+                        self.draft.task_text
+                        if self.draft is not None and self.draft.task_text is not None
+                        else self.proof_app.service.default_task_text()
+                    ),
+                    id="task-editor",
+                    language="markdown",
+                    show_line_numbers=True,
+                    disabled=not self._custom_task,
+                )
+            with ActionBar():
                 yield Button(
                     "Continue: inspect source", id="continue", variant="success"
                 )
                 yield Button("Cancel", id="cancel")
-            yield CopyableText(
-                "No project will be created until you review and confirm all settings.",
-                id="status-line",
-                classes="muted",
-            )
+                yield CopyableText(
+                    "No project is created before review.",
+                    id="status-line",
+                    classes="muted",
+                )
         yield CommandFooter()
 
     def action_back(self) -> None:
@@ -1060,49 +1097,59 @@ class MainFileSelectionScreen(NoticeScreen):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        with VerticalScroll(id="page"):
-            yield CopyableText(
-                "Select the manuscript's main LaTeX file", classes="title"
-            )
-            yield CopyableText(
-                f"Source folder: {self.inspection.source_path}\n"
-                f"Found {len(self.inspection.candidates)} LaTeX files. Select the "
-                "single root document Proof Assistant should verify. Its recursive "
-                "\\input and \\include files will be resolved by the backend.",
-            )
-            yield CopyableText(
-                "Candidate LaTeX files:\n"
-                + "\n".join(
-                    f"  {_candidate_text(candidate, self.inspection.suggested_main_file)}"
-                    for candidate in self.inspection.candidates
-                ),
-                id="main-file-candidates-copy",
-                max_lines=12,
-            )
-            buttons: list[RadioButton] = []
-            for index, candidate in enumerate(self.inspection.candidates):
-                # Intentionally do not preselect the suggestion. Multiple-source
-                # projects require a deliberate user decision.
-                buttons.append(
-                    RadioButton(
-                        _candidate_text(candidate, self.inspection.suggested_main_file),
-                        value=candidate.relative_path == self.selected_main,
-                        id=f"main-option-{index}",
-                    )
+        with ResponsivePage(id="page"):
+            with PageHeader():
+                yield CopyableText(
+                    "Select the manuscript's main LaTeX file", classes="title"
                 )
-            yield RadioSet(*buttons, id="main-file-options")
-            with Horizontal(classes="toolbar"):
+                yield CopyableText(
+                    f"Step 2 of 3 · Source: {self.inspection.source_path}",
+                    classes="muted",
+                )
+            with PageWorkspace():
+                yield CopyableText(
+                    f"Found {len(self.inspection.candidates)} LaTeX files. Select the "
+                    "single root document Proof Assistant should verify. Its "
+                    "recursive \\input and \\include files are resolved by the "
+                    "backend."
+                )
+                yield CopyableText(
+                    "Candidate LaTeX files:\n"
+                    + "\n".join(
+                        "  "
+                        + _candidate_text(
+                            candidate, self.inspection.suggested_main_file
+                        )
+                        for candidate in self.inspection.candidates
+                    ),
+                    id="main-file-candidates-copy",
+                    max_lines=12,
+                )
+                buttons: list[RadioButton] = []
+                for index, candidate in enumerate(self.inspection.candidates):
+                    # Suggestions remain hints; ambiguous sources require a choice.
+                    buttons.append(
+                        RadioButton(
+                            _candidate_text(
+                                candidate, self.inspection.suggested_main_file
+                            ),
+                            value=candidate.relative_path == self.selected_main,
+                            id=f"main-option-{index}",
+                        )
+                    )
+                yield RadioSet(*buttons, id="main-file-options")
+            with ActionBar():
                 yield Button("Continue to review", id="select-main", variant="success")
                 yield Button("Back", id="back")
-            yield CopyableText(
-                (
-                    f"Selected main file: {self.selected_main}"
-                    if self.selected_main is not None
-                    else "No file is selected yet. The suggestion is only a hint."
-                ),
-                id="status-line",
-                classes="muted",
-            )
+                yield CopyableText(
+                    (
+                        f"Selected: {self.selected_main}"
+                        if self.selected_main is not None
+                        else "No file selected; suggestion is only a hint."
+                    ),
+                    id="status-line",
+                    classes="muted",
+                )
         yield CommandFooter()
 
     def action_back(self) -> None:
@@ -1155,17 +1202,23 @@ class ProjectReviewScreen(NoticeScreen):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        with VerticalScroll(id="page"):
-            yield CopyableText("Review new verification project", classes="title")
-            if self.inspection.source_in_dropbox:
+        with ResponsivePage(id="page"):
+            with PageHeader():
+                yield CopyableText("Review new verification project", classes="title")
                 yield CopyableText(
-                    "Dropbox source detected. This is supported: files will be copied "
-                    "into managed project storage before verification.",
-                    classes="warning",
-                    id="dropbox-warning",
+                    "Step 3 of 3 · Confirm before managed storage is created",
+                    classes="muted",
                 )
-            yield CopyableText(self._detail(), id="project-review")
-            with Horizontal(classes="toolbar"):
+            with PageWorkspace():
+                if self.inspection.source_in_dropbox:
+                    yield CopyableText(
+                        "Dropbox source detected. This is supported: files will be "
+                        "copied into managed project storage before verification.",
+                        classes="warning",
+                        id="dropbox-warning",
+                    )
+                yield CopyableText(self._detail(), id="project-review")
+            with ActionBar():
                 yield Button(
                     "Confirm, create, and verify",
                     id="confirm-create",
@@ -1173,12 +1226,11 @@ class ProjectReviewScreen(NoticeScreen):
                 )
                 yield Button("Back", id="review-back")
                 yield Button("Cancel", id="cancel")
-            yield CopyableText(
-                "This confirmation creates the managed project and starts its first "
-                "verification iteration.",
-                id="status-line",
-                classes="muted",
-            )
+                yield CopyableText(
+                    "Confirm creates the project and starts verification.",
+                    id="status-line",
+                    classes="muted",
+                )
         yield CommandFooter()
 
     def _detail(self) -> str:
@@ -1243,46 +1295,51 @@ class ExistingProjectMainFileSelectionScreen(NoticeScreen):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        with VerticalScroll(id="page"):
-            yield CopyableText(
-                "Select a main file for the existing project", classes="title"
-            )
-            yield CopyableText(
-                f"Project: {self.entry.project_path}\n"
-                f"Source: {_path_text(self.entry.source_path)}\n"
-                f"Issue: {self.entry.issue or 'Main-file selection is required.'}",
-            )
-            yield CopyableText(
-                "Candidate LaTeX files:\n"
-                + "\n".join(
-                    f"  {_candidate_text(candidate, self.entry.suggested_main_file)}"
-                    for candidate in self.entry.main_file_candidates
-                ),
-                id="existing-main-file-candidates-copy",
-                max_lines=12,
-            )
-            buttons: list[RadioButton] = []
-            for index, candidate in enumerate(self.entry.main_file_candidates):
-                buttons.append(
-                    RadioButton(
-                        _candidate_text(candidate, self.entry.suggested_main_file),
-                        value=False,
-                        id=f"existing-main-option-{index}",
-                    )
+        with ResponsivePage(id="page"):
+            with PageHeader():
+                yield CopyableText(
+                    "Select a main file for the existing project", classes="title"
                 )
-            yield RadioSet(*buttons, id="existing-main-file-options")
-            with Horizontal(classes="toolbar"):
+                yield CopyableText(
+                    f"Project: {self.entry.project_path}", classes="muted"
+                )
+            with PageWorkspace():
+                yield CopyableText(
+                    f"Source: {_path_text(self.entry.source_path)}\n"
+                    f"Issue: {self.entry.issue or 'Main-file selection is required.'}"
+                )
+                yield CopyableText(
+                    "Candidate LaTeX files:\n"
+                    + "\n".join(
+                        "  "
+                        + _candidate_text(candidate, self.entry.suggested_main_file)
+                        for candidate in self.entry.main_file_candidates
+                    ),
+                    id="existing-main-file-candidates-copy",
+                    max_lines=12,
+                )
+                buttons: list[RadioButton] = []
+                for index, candidate in enumerate(self.entry.main_file_candidates):
+                    buttons.append(
+                        RadioButton(
+                            _candidate_text(candidate, self.entry.suggested_main_file),
+                            value=False,
+                            id=f"existing-main-option-{index}",
+                        )
+                    )
+                yield RadioSet(*buttons, id="existing-main-file-options")
+            with ActionBar():
                 yield Button(
                     "Save selected main file",
                     id="confirm-existing-main",
                     variant="success",
                 )
                 yield Button("Projects", id="back")
-            yield CopyableText(
-                "Selection is persisted by the backend before the project resumes.",
-                id="status-line",
-                classes="muted",
-            )
+                yield CopyableText(
+                    "The backend persists selection before resume.",
+                    id="status-line",
+                    classes="muted",
+                )
         yield CommandFooter()
 
     def action_back(self) -> None:
@@ -1320,26 +1377,28 @@ class ProjectDestinationConflictScreen(NoticeScreen):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        with Vertical(id="page"):
-            yield CopyableText(
-                "Managed project destination is unavailable", classes="title"
-            )
-            yield CopyableText(
-                f"Resolved project path: {self.inspection.project_path}\n"
-                f"Classification: {self.inspection.availability.value}\n"
-                f"Issue: {self.inspection.issue or 'The destination is unavailable.'}",
-                classes="error",
-                id="destination-conflict",
-            )
-            with Horizontal(classes="toolbar"):
+        with ResponsivePage(id="page"):
+            with PageHeader():
+                yield CopyableText(
+                    "Managed project destination is unavailable", classes="title"
+                )
+            with PageWorkspace():
+                yield CopyableText(
+                    f"Resolved project path: {self.inspection.project_path}\n"
+                    f"Classification: {self.inspection.availability.value}\n"
+                    f"Issue: {self.inspection.issue or 'The destination is unavailable.'}",
+                    classes="error",
+                    id="destination-conflict",
+                )
+            with ActionBar():
                 yield Button("Back to setup", id="back", variant="primary")
                 yield Button("Return to projects", id="projects")
                 yield Button("Open folder", id="open-folder")
-            yield CopyableText(
-                "No source was imported and no project was created.",
-                id="status-line",
-                classes="muted",
-            )
+                yield CopyableText(
+                    "No source imported; no project created.",
+                    id="status-line",
+                    classes="muted",
+                )
         yield CommandFooter()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -1372,29 +1431,32 @@ class DashboardScreen(NoticeScreen):
     def compose(self) -> ComposeResult:
         project = self.snapshot.project
         yield Header()
-        with Vertical(id="page"):
-            yield CopyableText(project.name, classes="title")
-            yield CopyableText(f"Project: {project.project_path}")
-            yield CopyableText(f"Authoritative source: {project.source_path}")
-            yield CopyableText(f"Main LaTeX file: {project.main_file}")
-            inputs = ", ".join(project.input_files) or "none"
-            yield CopyableText(f"Resolved inputs: {inputs}")
-            yield CopyableText(f"State: {self.snapshot.state.value}")
-            warning = _dropbox_warning(project)
-            if warning:
-                yield CopyableText(warning, classes="warning", id="dropbox-warning")
-            if self.snapshot.error:
-                yield CopyableText(self.snapshot.error, classes="error")
-            with Horizontal(classes="toolbar"):
+        with ResponsivePage(id="page"):
+            with PageHeader():
+                yield CopyableText(project.name, classes="title")
+                yield CopyableText(
+                    f"State: {self.snapshot.state.value} · Main: {project.main_file}",
+                    classes="muted",
+                )
+            with PageWorkspace():
+                yield CopyableText(f"Project: {project.project_path}")
+                yield CopyableText(f"Authoritative source: {project.source_path}")
+                inputs = ", ".join(project.input_files) or "none"
+                yield CopyableText(f"Resolved inputs: {inputs}")
+                warning = _dropbox_warning(project)
+                if warning:
+                    yield CopyableText(warning, classes="warning", id="dropbox-warning")
+                if self.snapshot.error:
+                    yield CopyableText(self.snapshot.error, classes="error")
+            with ActionBar():
                 yield Button("Start verification", id="verify", variant="success")
                 yield Button(
                     "Check for source changes", id="check-changes", variant="primary"
                 )
-            with Horizontal(classes="toolbar"):
                 yield Button("Open project folder", id="open-project")
                 yield Button("Settings", id="settings")
                 yield Button("Projects", id="projects")
-            yield CopyableText("", id="status-line", classes="muted")
+                yield CopyableText("", id="status-line", classes="muted")
         yield CommandFooter()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -1431,7 +1493,129 @@ class DashboardScreen(NoticeScreen):
 class ProgressScreen(NoticeScreen):
     """Live view of typed progress events emitted by the workflow service."""
 
+    CSS = """
+    #progress-view-switcher {
+        display: none;
+        height: 3;
+    }
+    #progress-panels {
+        width: 100%;
+        height: auto;
+        layout: vertical;
+    }
+    .progress-panel {
+        width: 100%;
+        height: auto;
+    }
+    #progress-live-panels {
+        width: 100%;
+        height: auto;
+        layout: vertical;
+    }
+    #progress-actions {
+        width: auto;
+        height: 3;
+    }
+    ProgressScreen #status-line {
+        width: 1fr;
+        height: 3;
+        margin: 0;
+    }
+    ProgressScreen.-h-compact #progress-workspace,
+    ProgressScreen.compact-short #progress-workspace,
+    ProgressScreen.wide #progress-workspace {
+        overflow: hidden;
+    }
+    ProgressScreen.-h-compact #progress-view-switcher,
+    ProgressScreen.compact-short #progress-view-switcher {
+        display: block;
+        layout: horizontal;
+    }
+    ProgressScreen.-h-compact #progress-panels,
+    ProgressScreen.-h-compact #progress-live-panels,
+    ProgressScreen.-h-compact .progress-panel,
+    ProgressScreen.compact-short #progress-panels,
+    ProgressScreen.compact-short #progress-live-panels,
+    ProgressScreen.compact-short .progress-panel {
+        height: 1fr;
+    }
+    ProgressScreen.-h-compact #progress-source-panel,
+    ProgressScreen.-h-compact #progress-stage-panel,
+    ProgressScreen.compact-short #progress-source-panel,
+    ProgressScreen.compact-short #progress-stage-panel {
+        display: none;
+    }
+    ProgressScreen.-h-compact.show-progress-stages #progress-event-panel,
+    ProgressScreen.-h-compact.show-progress-sources #progress-event-panel,
+    ProgressScreen.compact-short.show-progress-stages #progress-event-panel,
+    ProgressScreen.compact-short.show-progress-sources #progress-event-panel {
+        display: none;
+    }
+    ProgressScreen.-h-compact.show-progress-stages #progress-stage-panel,
+    ProgressScreen.-h-compact.show-progress-sources #progress-source-panel,
+    ProgressScreen.compact-short.show-progress-stages #progress-stage-panel,
+    ProgressScreen.compact-short.show-progress-sources #progress-source-panel {
+        display: block;
+    }
+    ProgressScreen.-h-compact #progress-sources,
+    ProgressScreen.-h-compact #progress-stages,
+    ProgressScreen.-h-compact #progress-log,
+    ProgressScreen.compact-short #progress-sources,
+    ProgressScreen.compact-short #progress-stages,
+    ProgressScreen.compact-short #progress-log {
+        height: 1fr;
+        min-height: 1;
+        margin-bottom: 0;
+    }
+    ProgressScreen.-h-compact #progress-actions-bar,
+    ProgressScreen.compact-short #progress-actions-bar {
+        height: 7;
+        max-height: 7;
+        layout: vertical;
+    }
+    ProgressScreen.-h-compact #progress-actions,
+    ProgressScreen.compact-short #progress-actions {
+        width: 100%;
+    }
+    ProgressScreen.wide #progress-panels {
+        height: 1fr;
+    }
+    ProgressScreen.wide #progress-source-panel {
+        height: auto;
+        max-height: 12;
+    }
+    ProgressScreen.wide #progress-live-panels {
+        height: 1fr;
+        layout: horizontal;
+    }
+    ProgressScreen.wide #progress-stage-panel {
+        width: 2fr;
+        height: 1fr;
+        padding-right: 1;
+    }
+    ProgressScreen.wide #progress-event-panel {
+        width: 3fr;
+        height: 1fr;
+    }
+    ProgressScreen.wide #progress-stages,
+    ProgressScreen.wide #progress-log {
+        height: 1fr;
+        min-height: 1;
+        margin-bottom: 0;
+    }
+    """
+
     BINDINGS = [CANCEL_JOB.binding(), DETACH_JOB.binding()]
+
+    def on_mount(self) -> None:
+        self._sync_composition(self.app.size.width, self.app.size.height)
+
+    def on_resize(self, event: Resize) -> None:
+        self._sync_composition(event.size.width, event.size.height)
+
+    def _sync_composition(self, width: int, height: int) -> None:
+        self.remove_class(*COMPOSITION_CLASSES)
+        self.add_class(classify_viewport(width, height).value)
 
     def __init__(
         self,
@@ -1463,59 +1647,73 @@ class ProgressScreen(NoticeScreen):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        # The outer scroll is intentional: every copyable pane remains usable on
-        # a short terminal instead of forcing the full stage list into 24 rows.
-        with VerticalScroll(id="page"):
-            yield CopyableText(self.heading, classes="title")
-            yield TextArea(
-                self._source_detail(),
-                read_only=True,
-                soft_wrap=False,
-                id="progress-sources",
-            )
-            if self.source_in_dropbox:
+        with ResponsivePage(id="page"):
+            with PageHeader():
+                yield CopyableText(self.heading, classes="title")
+                yield ProgressBar(total=100, show_eta=False, id="progress-bar")
+            with PageWorkspace(id="progress-workspace"):
+                with ResponsiveToolbar(id="progress-view-switcher"):
+                    yield Button("Events", id="show-progress-events", variant="primary")
+                    yield Button("Stages", id="show-progress-stages")
+                    yield Button("Sources", id="show-progress-sources")
+                with Vertical(id="progress-panels"):
+                    with Vertical(id="progress-source-panel", classes="progress-panel"):
+                        yield TextArea(
+                            self._source_detail(),
+                            read_only=True,
+                            soft_wrap=False,
+                            id="progress-sources",
+                        )
+                        if self.source_in_dropbox:
+                            yield TextArea(
+                                "Dropbox source detected. Proof Assistant is verifying a "
+                                "stable managed snapshot; finish all related source edits "
+                                "before the next change review.",
+                                read_only=True,
+                                soft_wrap=True,
+                                classes="warning progress-warning",
+                                id="dropbox-warning",
+                            )
+                    with Horizontal(id="progress-live-panels"):
+                        with Vertical(
+                            id="progress-stage-panel", classes="progress-panel"
+                        ):
+                            yield TextArea(
+                                self._stage_detail(),
+                                read_only=True,
+                                soft_wrap=True,
+                                id="progress-stages",
+                            )
+                        with Vertical(
+                            id="progress-event-panel", classes="progress-panel"
+                        ):
+                            yield TextArea(
+                                "Waiting for progress…",
+                                read_only=True,
+                                soft_wrap=True,
+                                id="progress-log",
+                            )
+            with ActionBar(id="progress-actions-bar"):
+                with Horizontal(id="progress-actions"):
+                    yield Button(
+                        "Request cooperative cancellation",
+                        id="cancel",
+                        variant="warning",
+                        disabled=not self.cancellable or self.detached_job,
+                    )
+                    if self.detached_job:
+                        yield Button(
+                            "Detach to projects",
+                            id="detach-observer",
+                            variant="primary",
+                        )
                 yield TextArea(
-                    "Dropbox source detected. Proof Assistant is verifying a stable "
-                    "managed snapshot; finish all related source edits before the next "
-                    "change review.",
+                    self._observer_status(),
                     read_only=True,
                     soft_wrap=True,
-                    classes="warning progress-warning",
-                    id="dropbox-warning",
+                    id="status-line",
+                    classes="muted",
                 )
-            yield ProgressBar(total=100, show_eta=False, id="progress-bar")
-            yield TextArea(
-                self._stage_detail(),
-                read_only=True,
-                soft_wrap=True,
-                id="progress-stages",
-            )
-            yield TextArea(
-                "Waiting for progress…",
-                read_only=True,
-                soft_wrap=True,
-                id="progress-log",
-            )
-            with Horizontal(classes="toolbar"):
-                yield Button(
-                    "Request cooperative cancellation",
-                    id="cancel",
-                    variant="warning",
-                    disabled=not self.cancellable or self.detached_job,
-                )
-                if self.detached_job:
-                    yield Button(
-                        "Detach to projects",
-                        id="detach-observer",
-                        variant="primary",
-                    )
-            yield TextArea(
-                self._observer_status(),
-                read_only=True,
-                soft_wrap=True,
-                id="status-line",
-                classes="muted",
-            )
         yield CommandFooter()
 
     def _source_detail(self) -> str:
@@ -1720,10 +1918,32 @@ class ProgressScreen(NoticeScreen):
         return phase_start + unit_ratio * (phase_end - phase_start)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "cancel" and self.cancellable:
+        if event.button.id == "show-progress-events":
+            self._show_progress_view("events")
+        elif event.button.id == "show-progress-stages":
+            self._show_progress_view("stages")
+        elif event.button.id == "show-progress-sources":
+            self._show_progress_view("sources")
+        elif event.button.id == "cancel" and self.cancellable:
             self.action_cancel_job()
         elif event.button.id == "detach-observer" and self.detached_job:
             self.action_detach_job()
+
+    def _show_progress_view(self, view: str) -> None:
+        """Select one compact progress peer without changing workflow state."""
+
+        self.remove_class("show-progress-stages", "show-progress-sources")
+        if view == "stages":
+            self.add_class("show-progress-stages")
+        elif view == "sources":
+            self.add_class("show-progress-sources")
+        variants = {
+            "events": "primary" if view == "events" else "default",
+            "stages": "primary" if view == "stages" else "default",
+            "sources": "primary" if view == "sources" else "default",
+        }
+        for peer, variant in variants.items():
+            self.query_one(f"#show-progress-{peer}", Button).variant = variant
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         if action == "cancel_job":
@@ -1751,12 +1971,87 @@ class ProgressScreen(NoticeScreen):
 class ClarificationScreen(NoticeScreen):
     """Show exact source context for a persisted clarification request."""
 
+    CSS = """
+    #clarification-primary-actions,
+    #clarification-navigation-actions {
+        width: auto;
+        height: 3;
+        overflow: hidden;
+    }
+    #clarification-view-switcher {
+        display: none;
+        height: 3;
+    }
+    #clarification-panels {
+        width: 100%;
+        height: auto;
+        layout: vertical;
+    }
+    .clarification-panel {
+        width: 100%;
+        height: auto;
+    }
+    ClarificationScreen #status-line {
+        width: 1fr;
+        height: 1;
+        margin: 0;
+    }
+    ClarificationScreen.-h-compact #clarification-view-switcher,
+    ClarificationScreen.compact-short #clarification-view-switcher {
+        display: block;
+        layout: horizontal;
+    }
+    ClarificationScreen.-h-compact #clarification-resolution-panel,
+    ClarificationScreen.compact-short #clarification-resolution-panel {
+        display: none;
+    }
+    ClarificationScreen.-h-compact.show-resolution #clarification-source-panel,
+    ClarificationScreen.compact-short.show-resolution #clarification-source-panel {
+        display: none;
+    }
+    ClarificationScreen.-h-compact.show-resolution #clarification-resolution-panel,
+    ClarificationScreen.compact-short.show-resolution #clarification-resolution-panel {
+        display: block;
+    }
+    ClarificationScreen.-h-compact #clarification-actions,
+    ClarificationScreen.compact-short #clarification-actions {
+        height: 7;
+        max-height: 7;
+        layout: vertical;
+    }
+    ClarificationScreen.-h-compact #clarification-primary-actions,
+    ClarificationScreen.-h-compact #clarification-navigation-actions,
+    ClarificationScreen.compact-short #clarification-primary-actions,
+    ClarificationScreen.compact-short #clarification-navigation-actions {
+        width: 100%;
+    }
+    ClarificationScreen.standard #clarification-panels,
+    ClarificationScreen.wide #clarification-panels {
+        layout: horizontal;
+    }
+    ClarificationScreen.standard .clarification-panel,
+    ClarificationScreen.wide .clarification-panel {
+        width: 1fr;
+        padding-right: 1;
+    }
+    """
+
     BINDINGS = [
         PREVIOUS.binding(),
         NEXT.binding(),
         CHECK_CHANGES.binding(),
         OPEN.binding(),
     ]
+
+    def on_mount(self) -> None:
+        self._sync_composition(self.app.size.width, self.app.size.height)
+
+    def on_resize(self, event: Resize) -> None:
+        self._sync_composition(event.size.width, event.size.height)
+
+    def _sync_composition(self, width: int, height: int) -> None:
+        self.remove_class(*COMPOSITION_CLASSES)
+        self.add_class(classify_viewport(width, height).value)
 
     def __init__(self, snapshot: WorkflowSnapshot, index: int = 0) -> None:
         super().__init__()
@@ -1771,52 +2066,84 @@ class ClarificationScreen(NoticeScreen):
         question = self.question
         location = question.location
         yield Header()
-        with Vertical(id="page"):
-            yield CopyableText(
-                "Clarification required "
-                f"({self.index + 1}/{len(self.snapshot.clarifications)})",
-                classes="title",
-            )
-            warning = _dropbox_warning(self.snapshot.project)
-            if warning:
-                yield CopyableText(warning, classes="warning", id="dropbox-warning")
-            yield CopyableText(f"{question.headline}\n{question.explanation}")
-            yield CopyableText(
-                f"Claim: {question.claim_id} · Category: {question.category}\n"
-                f"Source: {location.relative_path}:{location.start_line}:"
-                f"{location.start_column}\n"
-                f"Absolute path: {location.absolute_path}",
-                classes="section",
-                id="source-location",
-            )
-            yield Static(self._syntax(question), id="source-excerpt")
-            yield CopyableText(
-                location.excerpt,
-                id="source-excerpt-copy",
-                soft_wrap=True,
-                max_lines=10,
-            )
-            yield CopyableText(
-                self._request_detail(question), id="clarification-detail"
-            )
-            with Horizontal(classes="toolbar"):
-                yield Button("Open exact file", id="open-file", variant="primary")
-                yield Button("Open source folder", id="open-folder")
-                yield Button(
-                    "Check all files for changes", id="check-changes", variant="success"
+        with ResponsivePage(id="page"):
+            with PageHeader():
+                yield CopyableText(
+                    "Clarification required "
+                    f"({self.index + 1}/{len(self.snapshot.clarifications)})",
+                    classes="title",
                 )
-                yield Button("Previous", id="previous", disabled=self.index == 0)
-                yield Button(
-                    "Next",
-                    id="next",
-                    disabled=self.index + 1 >= len(self.snapshot.clarifications),
+                yield CopyableText(
+                    f"{question.claim_id} · {question.category} · "
+                    f"{location.relative_path}:{location.start_line}",
+                    classes="muted",
                 )
-            yield CopyableText(
-                "Edit the authoritative source, finish all related edits, then check "
-                "for changes.",
-                id="status-line",
-                classes="muted",
-            )
+            with PageWorkspace():
+                with ResponsiveToolbar(id="clarification-view-switcher"):
+                    yield Button(
+                        "Source context",
+                        id="show-clarification-source",
+                        variant="primary",
+                    )
+                    yield Button(
+                        "Resolution guidance", id="show-clarification-resolution"
+                    )
+                with Horizontal(id="clarification-panels"):
+                    with Vertical(
+                        id="clarification-source-panel", classes="clarification-panel"
+                    ):
+                        warning = _dropbox_warning(self.snapshot.project)
+                        if warning:
+                            yield CopyableText(
+                                warning, classes="warning", id="dropbox-warning"
+                            )
+                        yield CopyableText(
+                            f"Claim: {question.claim_id} · "
+                            f"Category: {question.category}\n"
+                            f"Source: {location.relative_path}:{location.start_line}:"
+                            f"{location.start_column}\n"
+                            f"Absolute path: {location.absolute_path}",
+                            classes="section",
+                            id="source-location",
+                        )
+                        yield Static(self._syntax(question), id="source-excerpt")
+                        yield CopyableText(
+                            location.excerpt,
+                            id="source-excerpt-copy",
+                            soft_wrap=True,
+                            max_lines=10,
+                        )
+                    with Vertical(
+                        id="clarification-resolution-panel",
+                        classes="clarification-panel",
+                    ):
+                        yield CopyableText(
+                            f"{question.headline}\n{question.explanation}"
+                        )
+                        yield CopyableText(
+                            self._request_detail(question), id="clarification-detail"
+                        )
+            with ActionBar(id="clarification-actions"):
+                with Horizontal(id="clarification-primary-actions"):
+                    yield Button("Open exact file", id="open-file", variant="primary")
+                    yield Button("Open source folder", id="open-folder")
+                    yield Button(
+                        "Check all files for changes",
+                        id="check-changes",
+                        variant="success",
+                    )
+                with Horizontal(id="clarification-navigation-actions"):
+                    yield Button("Previous", id="previous", disabled=self.index == 0)
+                    yield Button(
+                        "Next",
+                        id="next",
+                        disabled=(self.index + 1 >= len(self.snapshot.clarifications)),
+                    )
+                yield CopyableText(
+                    "Finish related edits, then check changes.",
+                    id="status-line",
+                    classes="muted",
+                )
         yield CommandFooter()
 
     def _syntax(self, question: ClarificationPresentation) -> Syntax:
@@ -1846,7 +2173,17 @@ class ClarificationScreen(NoticeScreen):
         )
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "open-file":
+        if event.button.id == "show-clarification-source":
+            self.remove_class("show-resolution")
+            self.query_one("#show-clarification-source", Button).variant = "primary"
+            self.query_one("#show-clarification-resolution", Button).variant = "default"
+            self.query_one(PageWorkspace).scroll_home(animate=False)
+        elif event.button.id == "show-clarification-resolution":
+            self.add_class("show-resolution")
+            self.query_one("#show-clarification-source", Button).variant = "default"
+            self.query_one("#show-clarification-resolution", Button).variant = "primary"
+            self.query_one(PageWorkspace).scroll_home(animate=False)
+        elif event.button.id == "open-file":
             self.action_open()
         elif event.button.id == "open-folder":
             self.proof_app.open_location(self.question.location.absolute_path.parent)
@@ -1903,27 +2240,35 @@ class ChangeReviewScreen(NoticeScreen):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        with Vertical(id="page"):
-            yield CopyableText("Review manuscript changes", classes="title")
-            warning = _dropbox_warning(self.plan)
-            if warning:
-                yield CopyableText(warning, classes="warning", id="dropbox-warning")
-            yield CopyableText(
-                "Review the complete stable change set. Confirmation revalidates "
-                "the source "
-                "inventory before the next iteration starts."
-            )
-            yield CopyableText(self._detail(), id="impact-detail", expand=True)
-            with Horizontal(classes="toolbar"):
+        with ResponsivePage(id="page"):
+            with PageHeader():
+                yield CopyableText("Review manuscript changes", classes="title")
+                yield CopyableText(
+                    f"Plan {self.plan.plan_id} · {len(self.plan.file_changes)} file "
+                    "change(s)",
+                    classes="muted",
+                )
+            with PageWorkspace():
+                warning = _dropbox_warning(self.plan)
+                if warning:
+                    yield CopyableText(warning, classes="warning", id="dropbox-warning")
+                yield CopyableText(
+                    "Review the complete stable change set. Confirmation revalidates "
+                    "the source inventory before the next iteration starts."
+                )
+                yield CopyableText(self._detail(), id="impact-detail", expand=True)
+            with ActionBar():
                 yield Button("Start next iteration", id="confirm", variant="success")
                 yield Button(
                     "Keep waiting for more edits", id="wait", variant="primary"
                 )
                 yield Button("Open source folder", id="open-source")
                 yield Button("Projects", id="projects")
-            yield CopyableText(
-                "Explicit confirmation is required.", id="status-line", classes="muted"
-            )
+                yield CopyableText(
+                    "Explicit confirmation required.",
+                    id="status-line",
+                    classes="muted",
+                )
         yield CommandFooter()
 
     def _detail(self) -> str:
@@ -2014,15 +2359,23 @@ class FindingsScreen(NoticeScreen):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        with Vertical(id="page"):
-            yield CopyableText(
-                f"Verification finished: {self.findings.outcome}", classes="title"
-            )
-            warning = _dropbox_warning(self.snapshot.project)
-            if warning:
-                yield CopyableText(warning, classes="warning", id="dropbox-warning")
-            yield CopyableText(self._detail(), id="findings-detail", expand=True)
-            with Horizontal(classes="toolbar"):
+        with ResponsivePage(id="page"):
+            with PageHeader():
+                yield CopyableText(
+                    f"Verification finished: {self.findings.outcome}", classes="title"
+                )
+                yield CopyableText(
+                    f"{len(self.findings.verified)} verified · "
+                    f"{len(self.findings.unresolved)} unresolved · "
+                    f"{len(self.findings.counterexamples)} counterexample(s)",
+                    classes="muted",
+                )
+            with PageWorkspace():
+                warning = _dropbox_warning(self.snapshot.project)
+                if warning:
+                    yield CopyableText(warning, classes="warning", id="dropbox-warning")
+                yield CopyableText(self._detail(), id="findings-detail", expand=True)
+            with ActionBar():
                 yield Button(
                     "Check for manuscript changes",
                     id="check-changes",
@@ -2036,12 +2389,11 @@ class FindingsScreen(NoticeScreen):
                 yield Button("Load failure analysis", id="open-failures")
                 yield Button("Open project folder", id="open-project")
                 yield Button("Projects", id="projects")
-            yield CopyableText(
-                "All reports, certificates, source snapshots, and logs remain in "
-                "the project folder.",
-                id="status-line",
-                classes="muted",
-            )
+                yield CopyableText(
+                    "Artifacts remain in the project folder.",
+                    id="status-line",
+                    classes="muted",
+                )
         yield CommandFooter()
 
     def _detail(self) -> str:
@@ -2199,47 +2551,58 @@ class FailureDependencyScreen(NoticeScreen):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        with Vertical(id="page"):
-            if self.report is None:
-                yield CopyableText("Failure dependency analysis", classes="title")
-                yield CopyableText(
-                    f"Project: {self.snapshot.project.project_path}\n"
-                    f"Failure-report error: {self.error or 'No failure report is available.'}",
-                    classes="error",
-                    id="failure-report-error",
-                    max_lines=10,
-                )
-            else:
-                yield CopyableText(
-                    self._compact_header(),
-                    id="failure-report-meta",
-                    max_lines=4 if self.report.has_cycles else 3,
-                )
-                with TabbedContent(initial="failure-map-pane", id="failure-tabs"):
-                    with TabPane(
-                        "Cycle components" if self.report.has_cycles else "Proof tree",
-                        id="failure-map-pane",
-                    ):
-                        if self.report.has_cycles:
-                            if self._component_table is not None:
-                                yield self._component_table
-                        elif self._tree is not None:
-                            yield self._tree
-                    with TabPane("Exact reason", id="failure-detail-pane"):
-                        yield CopyableText(
-                            self._initial_detail(),
-                            soft_wrap=True,
-                            id="failure-detail",
-                            expand=True,
-                        )
-                    with TabPane("Copyable full outline", id="failure-outline-pane"):
-                        yield CopyableText(
-                            self._full_outline(),
-                            soft_wrap=True,
-                            id="failure-outline",
-                            expand=True,
-                        )
-            with Horizontal(classes="toolbar"):
+        with ResponsivePage(id="page"):
+            with PageHeader():
+                if self.report is None:
+                    yield CopyableText("Failure dependency analysis", classes="title")
+                else:
+                    yield CopyableText(
+                        self._compact_header(),
+                        id="failure-report-meta",
+                        max_lines=4 if self.report.has_cycles else 3,
+                    )
+            with PageWorkspace():
+                if self.report is None:
+                    yield CopyableText(
+                        f"Project: {self.snapshot.project.project_path}\n"
+                        "Failure-report error: "
+                        f"{self.error or 'No failure report is available.'}",
+                        classes="error",
+                        id="failure-report-error",
+                        max_lines=10,
+                    )
+                else:
+                    with TabbedContent(initial="failure-map-pane", id="failure-tabs"):
+                        with TabPane(
+                            (
+                                "Cycle components"
+                                if self.report.has_cycles
+                                else "Proof tree"
+                            ),
+                            id="failure-map-pane",
+                        ):
+                            if self.report.has_cycles:
+                                if self._component_table is not None:
+                                    yield self._component_table
+                            elif self._tree is not None:
+                                yield self._tree
+                        with TabPane("Exact reason", id="failure-detail-pane"):
+                            yield CopyableText(
+                                self._initial_detail(),
+                                soft_wrap=True,
+                                id="failure-detail",
+                                expand=True,
+                            )
+                        with TabPane(
+                            "Copyable full outline", id="failure-outline-pane"
+                        ):
+                            yield CopyableText(
+                                self._full_outline(),
+                                soft_wrap=True,
+                                id="failure-outline",
+                                expand=True,
+                            )
+            with ActionBar():
                 yield Button("Back", id="failure-back", variant="primary")
                 yield Button(
                     "View verification report",
@@ -2250,13 +2613,12 @@ class FailureDependencyScreen(NoticeScreen):
                     ),
                 )
                 yield Button("Close to projects", id="failure-close")
-            yield CopyableText(
-                "Map: Up/Down/Page keys move; Space toggles; Enter opens reason. "
-                "Text panes: Ctrl+A selects all; Ctrl+C copies. Color is optional.",
-                id="status-line",
-                classes="muted",
-                max_lines=2,
-            )
+                yield CopyableText(
+                    "Enter opens reason; Ctrl+A/C copies text.",
+                    id="status-line",
+                    classes="muted",
+                    max_lines=2,
+                )
         yield CommandFooter()
 
     def _make_tree(self) -> FailureTree:
@@ -2605,6 +2967,14 @@ class FailureDependencyScreen(NoticeScreen):
             detail.focus()
 
     def on_mount(self) -> None:
+        # Textual 8 mounts the Screen before every composed descendant is
+        # guaranteed to be queryable. Initialize focus and selection after the
+        # first complete layout so detail widgets always exist.
+        self.call_after_refresh(self._initialize_selection)
+
+    def _initialize_selection(self) -> None:
+        if not self.is_mounted or self.app.screen is not self:
+            return
         if self.report is None:
             self.query_one("#failure-back", Button).focus()
         elif self.report.has_cycles and self._component_table is not None:
@@ -2688,45 +3058,49 @@ class ReportViewerScreen(NoticeScreen):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        with Vertical(id="page"):
-            yield CopyableText("Verification report", classes="title")
-            if self.document is not None:
-                yield CopyableText(
-                    f"Report path: {self.document.path}", id="report-path"
-                )
-                with TabbedContent(initial="report-rendered-pane", id="report-tabs"):
-                    with TabPane("Rendered", id="report-rendered-pane"):
-                        yield MarkdownViewer(
-                            self.document.markdown,
-                            show_table_of_contents=True,
-                            open_links=False,
-                            id="report-markdown",
-                        )
-                    with TabPane("Copyable source", id="report-source-pane"):
-                        yield TextArea(
-                            self.document.markdown,
-                            language="markdown",
-                            read_only=True,
-                            soft_wrap=True,
-                            id="report-source",
-                        )
-            else:
-                yield CopyableText(
-                    f"Project: {self.snapshot.project.project_path}\n"
-                    f"Report error: {self.error or 'Report is unavailable.'}",
-                    classes="error",
-                    id="report-error",
-                    max_lines=12,
-                )
-            with Horizontal(classes="toolbar"):
+        with ResponsivePage(id="page"):
+            with PageHeader():
+                yield CopyableText("Verification report", classes="title")
+                if self.document is not None:
+                    yield CopyableText(
+                        f"Report path: {self.document.path}", id="report-path"
+                    )
+            with PageWorkspace():
+                if self.document is not None:
+                    with TabbedContent(
+                        initial="report-rendered-pane", id="report-tabs"
+                    ):
+                        with TabPane("Rendered", id="report-rendered-pane"):
+                            yield MarkdownViewer(
+                                self.document.markdown,
+                                show_table_of_contents=True,
+                                open_links=False,
+                                id="report-markdown",
+                            )
+                        with TabPane("Copyable source", id="report-source-pane"):
+                            yield TextArea(
+                                self.document.markdown,
+                                language="markdown",
+                                read_only=True,
+                                soft_wrap=True,
+                                id="report-source",
+                            )
+                else:
+                    yield CopyableText(
+                        f"Project: {self.snapshot.project.project_path}\n"
+                        f"Report error: {self.error or 'Report is unavailable.'}",
+                        classes="error",
+                        id="report-error",
+                        max_lines=12,
+                    )
+            with ActionBar():
                 yield Button("Back to findings", id="back", variant="primary")
                 yield Button("Close to projects", id="close")
-            yield CopyableText(
-                "Use Tab to focus a pane; arrow/Page Up/Page Down scroll it; "
-                "Ctrl+A and Ctrl+C select and copy from the source pane.",
-                id="status-line",
-                classes="muted",
-            )
+                yield CopyableText(
+                    "Tab focuses panes; Ctrl+A/C copies source.",
+                    id="status-line",
+                    classes="muted",
+                )
         yield CommandFooter()
 
     def on_mount(self) -> None:
@@ -2791,30 +3165,47 @@ class RecoveryScreen(NoticeScreen):
         return cls(None, title=title, detail=detail, project=project)
 
     def compose(self) -> ComposeResult:
+        if self._has_cancellation_report:
+            status = (
+                "The backend confirmed the cooperative stop boundary. Resume to "
+                "retry the listed claims."
+            )
+        elif self._interrupted_without_report:
+            status = (
+                "No backend cancellation report was received; certificate "
+                "preservation, retry state, and temporary-worktree cleanup are "
+                "not confirmed."
+            )
+        else:
+            status = "Existing project state is preserved."
         yield Header()
-        with VerticalScroll(id="page"):
-            yield CopyableText(self.heading, classes="title")
-            if self._has_cancellation_report:
-                yield TextArea(
-                    self._cancellation_detail(),
-                    read_only=True,
-                    soft_wrap=True,
-                    id="cancellation-report",
-                )
-            else:
-                yield CopyableText(self.detail, classes="error")
-            if (
-                self.snapshot is not None
-                and self.snapshot.state == WorkflowState.BUSY_EXTERNAL
-            ):
+        with ResponsivePage(id="page"):
+            with PageHeader():
+                yield CopyableText(self.heading, classes="title")
                 yield CopyableText(
-                    "Backend activity is present. This replaceable client is "
-                    "read-only and owns neither verification nor lock; Retry / "
-                    "recover attempts to attach again.",
-                    classes="warning",
+                    f"Project: {_path_text(self.project)}", classes="muted"
                 )
-            yield CopyableText(f"Project: {_path_text(self.project)}")
-            with Horizontal(classes="toolbar"):
+            with PageWorkspace():
+                if self._has_cancellation_report:
+                    yield TextArea(
+                        self._cancellation_detail(),
+                        read_only=True,
+                        soft_wrap=True,
+                        id="cancellation-report",
+                    )
+                else:
+                    yield CopyableText(self.detail, classes="error")
+                if (
+                    self.snapshot is not None
+                    and self.snapshot.state == WorkflowState.BUSY_EXTERNAL
+                ):
+                    yield CopyableText(
+                        "Backend activity is present. This replaceable client is "
+                        "read-only and owns neither verification nor lock; Retry / "
+                        "recover attempts to attach again.",
+                        classes="warning",
+                    )
+            with ActionBar():
                 yield Button(
                     "Retry / recover", id="retry", disabled=self.project is None
                 )
@@ -2829,20 +3220,7 @@ class RecoveryScreen(NoticeScreen):
                     disabled=self.project is None,
                 )
                 yield Button("Projects", id="projects", variant="primary")
-            if self._has_cancellation_report:
-                status = (
-                    "The backend confirmed the cooperative stop boundary. Resume to "
-                    "retry the listed claims."
-                )
-            elif self._interrupted_without_report:
-                status = (
-                    "No backend cancellation report was received; certificate "
-                    "preservation, retry state, and temporary-worktree cleanup are "
-                    "not confirmed."
-                )
-            else:
-                status = "Existing project state is preserved."
-            yield CopyableText(status, id="status-line", classes="muted")
+                yield CopyableText(status, id="status-line", classes="muted")
         yield CommandFooter()
 
     @property
