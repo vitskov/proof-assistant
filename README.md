@@ -32,54 +32,25 @@ introduced project axiom.
 
 ## Quick start
 
-Requirements: macOS 12+ (Intel or Apple Silicon) or Linux with glibc 2.31+, at
-least 4 CPU cores and 16 GiB RAM (8+ cores / 32+ GiB recommended), Git,
-Lean/Lake, a native C compiler, one supported AI provider, and the exact tested
-RepoProver checkout. Supported AI drivers are Codex, Claude Code, and GitHub
-Copilot CLIs plus the OpenAI, Anthropic, and Gemini APIs. Python 3.13 and `uv`
-do not need to be preinstalled: the supported installer uses an existing
-compatible installation or lets `uv` provision Python, and bootstraps `uv`
-with `curl`/`wget` when needed. The installer enforces the OS/CPU/memory floor
-before it downloads or builds anything. See
-[Installation](docs/INSTALLATION.md#system-requirements) for details.
+Proof Assistant supports macOS 12+ on Intel or Apple Silicon and Linux with
+glibc 2.31+. Git, `curl`, and a native C compiler are required.
 
 ```bash
-mkdir -p "$HOME/src"
-git clone https://github.com/vitskov/proof-assistant.git "$HOME/src/proof-assistant"
-cd "$HOME/src/proof-assistant"
-scripts/install-dev.sh
-export PATH="$HOME/.venvs/proof-assistant/bin:$HOME/.local/bin:$PATH"
-uv --version
+bash -c 'set -o pipefail; curl --proto "=https" --tlsv1.2 -fsSL https://raw.githubusercontent.com/vitskov/proof-assistant/main/install.sh | bash'
 ```
 
-Proof Assistant's installer deliberately does not mutate or guess an upstream
-RepoProver checkout. For a fresh machine, run the following block **only when
-`$HOME/src/repoprover` does not already exist**:
+Open a new terminal and launch:
 
 ```bash
-export REPOPROVER_SHA=386adba3df572cb71df534add2c764e071898a2e
-git clone https://github.com/facebookresearch/repoprover.git "$HOME/src/repoprover"
-git -C "$HOME/src/repoprover" checkout --detach "$REPOPROVER_SHA"
-git -C "$HOME/src/repoprover" remote set-url --push origin DISABLED
-```
-
-If that path already exists, do not run `clone` or `checkout` over it. First
-inspect `git -C "$HOME/src/repoprover" status --short` and
-`git -C "$HOME/src/repoprover" rev-parse HEAD`; preserve any existing work and
-use a separate checkout if necessary. Once the chosen checkout is clean and at
-the exact SHA above, install it into the Proof Assistant environment and
-launch. If you used a separate path, substitute it for
-`$HOME/src/repoprover`:
-
-```bash
-uv pip install \
-  --python "$HOME/.venvs/proof-assistant/bin/python" \
-  -e "$HOME/src/repoprover"
 proof-assistant
 ```
 
-The RepoProver checkout is an integration dependency only. Never push to it or
-open/prepare a pull request against `facebookresearch/repoprover`.
+The installer handles Python, `uv`, elan, Lean/Lake, the tested RepoProver
+checkout, compiler validation, cache initialization, tests, and shell PATH
+setup on both supported operating systems. It preserves existing shell
+configuration and never uses `sudo` or a system package manager. See
+[Installation](docs/INSTALLATION.md) for requirements, locations, and the few
+supported overrides.
 
 On first launch, Proof Assistant checks its machine-wide primary AI driver. If
 it is not ready, **Set up verification AI** opens a focused **Choose provider →

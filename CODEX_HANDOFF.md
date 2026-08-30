@@ -219,7 +219,7 @@ possible-resolution facts. Invalid output falls back deterministically.
 
 ```bash
 cd "$HOME/src/proof-assistant"
-scripts/install-dev.sh
+./install.sh
 proof-assistant compiler-check
 proof-assistant cache doctor
 proof-assistant doctor

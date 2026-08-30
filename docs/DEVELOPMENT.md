@@ -63,8 +63,8 @@ uv_bin="$(scripts/bootstrap-uv.sh "$work_dir/uv")"
 "$uv_bin" pip check --python "$work_dir/venv/bin/python"
 ```
 
-`scripts/bootstrap-uv.sh` selects the reviewed Linux x86-64, macOS arm64, or
-macOS x86-64 release artifact and verifies it against
+`scripts/bootstrap-uv.sh` selects the reviewed Linux x86-64/AArch64 or macOS
+arm64/x86-64 release artifact and verifies it against
 `requirements/uv-0.12.0-sha256.txt`. It does not run Astral's remote installer,
 invoke an updater, or edit shell startup files. Refresh the two lock files only
 as a deliberate dependency change:
@@ -247,7 +247,7 @@ git diff --check
 uv build --python "$HOME/.venvs/proof-assistant/bin/python"
 ```
 
-Run `scripts/install-dev.sh`; install the wheel in a fresh external Python 3.13
+Run `./install.sh`; install the wheel in a fresh external Python 3.13
 environment; run compiler, package-resource, CLI/TUI smoke, cache doctor, and a
 small real Lean acceptance. Audit secrets, credentials, environments, caches,
 artifacts, and temporary files before any authorized publication.

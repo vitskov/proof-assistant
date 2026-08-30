@@ -5,13 +5,28 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
-INSTALLER = ROOT / "scripts" / "install-dev.sh"
+INSTALLER = ROOT / "install.sh"
+ONE_LINE_INSTALL = (
+    'bash -c \'set -o pipefail; curl --proto "=https" --tlsv1.2 -fsSL '
+    "https://raw.githubusercontent.com/vitskov/proof-assistant/main/install.sh | bash'"
+)
 
 
 def _write_executable(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
     path.chmod(0o755)
+
+
+def _clean_install_environment() -> dict[str, str]:
+    """Return the host environment without parent installer overrides."""
+    env = os.environ.copy()
+    for key in tuple(env):
+        if key.startswith("PROOF_ASSISTANT_") or key.startswith("REPOPROVER_CODEX_"):
+            env.pop(key)
+    return env
 
 
 def _relax_hardware_gate(env: dict[str, str]) -> dict[str, str]:
@@ -33,6 +48,7 @@ def _fake_command_path(root: Path) -> Path:
         "env",
         "getconf",
         "grep",
+        "git",
         "mkdir",
         "mv",
         "sh",
@@ -87,6 +103,47 @@ def _fake_uv(path: Path, *, tag: str, working: bool = True) -> None:
     )
 
 
+def _fake_repoprover_checkout(tmp_path: Path) -> tuple[Path, str]:
+    checkout = tmp_path / "repoprover"
+    checkout.mkdir()
+    subprocess.run(
+        ["git", "-c", "init.defaultBranch=main", "init"],
+        cwd=checkout,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    (checkout / "pyproject.toml").write_text(
+        '[project]\nname = "repoprover"\nversion = "0.1.0"\n',
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=checkout, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Proof Assistant Tests",
+            "-c",
+            "user.email=tests@invalid.example",
+            "commit",
+            "-m",
+            "fixture",
+        ],
+        cwd=checkout,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    revision = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=checkout,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    return checkout, revision
+
+
 def _bootstrap_harness(
     tmp_path: Path,
     *,
@@ -104,6 +161,7 @@ def _bootstrap_harness(
     startup_links: dict[str, str] | None = None,
     environment: dict[str, str] | None = None,
     runs: int = 1,
+    managed_repoprover: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], Path, Path, Path]:
     home = tmp_path / "home"
     home.mkdir()
@@ -115,7 +173,9 @@ def _bootstrap_harness(
         startup = home / relative
         startup.parent.mkdir(parents=True, exist_ok=True)
         startup.symlink_to(target)
-    install_dir = custom_install_dir or home / ".local/bin"
+    install_dir = (
+        custom_install_dir or home / ".local" / "share" / "proof-assistant" / "uv"
+    )
     if block_install_dir:
         install_dir.parent.mkdir(parents=True, exist_ok=True)
         install_dir.write_text("not a directory", encoding="utf-8")
@@ -151,61 +211,84 @@ def _bootstrap_harness(
 
     installed_template = tmp_path / "installed-uv"
     _fake_uv(installed_template, tag="installed", working=installed_uv_working)
-    fake_installer = tmp_path / "uv-install.sh"
+    sandbox_root = tmp_path / "installer-project"
+    (sandbox_root / "scripts").mkdir(parents=True)
+    (sandbox_root / "src" / "proof_assistant").mkdir(parents=True)
+    shutil.copy2(INSTALLER, sandbox_root / "install.sh")
+    shutil.copy2(ROOT / "lean-toolchain", sandbox_root / "lean-toolchain")
+    (sandbox_root / "pyproject.toml").write_text(
+        '[project]\nname = "proof-assistant"\nversion = "0.1.0"\n',
+        encoding="utf-8",
+    )
+    fake_bootstrap = sandbox_root / "scripts" / "bootstrap-uv.sh"
     create = (
-        'mkdir -p "$UV_INSTALL_DIR"\n'
-        'cp "$FAKE_UV_TEMPLATE" "$UV_INSTALL_DIR/uv"\n'
-        'chmod +x "$UV_INSTALL_DIR/uv"\n'
+        'mkdir -p "$1"\ncp "$FAKE_UV_TEMPLATE" "$1/uv"\nchmod +x "$1/uv"\n'
         if installer_creates_uv
         else ":\n"
     )
     _write_executable(
-        fake_installer,
+        fake_bootstrap,
         "#!/bin/sh\n"
-        "printf 'installer:dir=%s:no_modify=%s\\n' "
-        '"$UV_INSTALL_DIR" "$UV_NO_MODIFY_PATH" >> "$FAKE_LOG"\n' + create,
+        'printf \'bootstrap:%s\\n\' "$1" >> "$FAKE_LOG"\n'
+        + ("exit 55\n" if not downloader_succeeds or downloader == "none" else create)
+        + "printf '%s\\n' \"$1/uv\"\n",
     )
+    if downloader not in {"curl", "wget", "none"}:
+        raise AssertionError(f"Unknown bootstrap mode: {downloader}")
 
-    def add_downloader(name: str) -> None:
-        action = '/bin/cat "$FAKE_INSTALLER"\n' if downloader_succeeds else "exit 55\n"
-        _write_executable(
-            commands / name,
-            f'#!/bin/sh\nprintf \'{name}:%s\\n\' "$*" >> "$FAKE_LOG"\n' + action,
-        )
-
-    if downloader == "curl":
-        add_downloader("curl")
-        add_downloader("wget")
-    elif downloader == "wget":
-        add_downloader("wget")
-    elif downloader != "none":
-        raise AssertionError(f"Unknown fake downloader: {downloader}")
-
-    env = os.environ.copy()
+    env = _clean_install_environment()
+    repoprover, repoprover_revision = _fake_repoprover_checkout(tmp_path)
+    elan_home = home / ".elan"
+    elan_home.mkdir()
+    _write_executable(
+        elan_home / "elan",
+        "#!/bin/sh\n"
+        'printf \'elan:%s|ELAN_HOME=%s\\n\' "$*" "$ELAN_HOME" >> "$FAKE_LOG"\n'
+        'if [ "$1 $2" = "toolchain list" ]; then\n'
+        '  if [ -f "$ELAN_HOME/fake-toolchain-installed" ]; then\n'
+        "    printf 'leanprover/lean4:v4.28.0\\n'\n"
+        "  fi\n"
+        "  exit 0\n"
+        "fi\n"
+        'if [ "$1 $2" = "toolchain install" ]; then\n'
+        '  : > "$ELAN_HOME/fake-toolchain-installed"\n'
+        "fi\n"
+        "exit 0\n",
+    )
+    (elan_home / "bin").mkdir()
+    (elan_home / "bin" / "elan").symlink_to(elan_home / "elan")
     env.update(
         {
             "HOME": str(home),
             "SHELL": shell,
             "PATH": str(commands),
-            "FAKE_INSTALLER": str(fake_installer),
             "FAKE_LOG": str(log),
             "FAKE_PROOF_TEMPLATE": str(proof_template),
             "FAKE_PYTHON_TEMPLATE": str(python_template),
             "FAKE_UV_TEMPLATE": str(installed_template),
             "PROOF_ASSISTANT_VENV": str(home / ".venvs/proof-assistant"),
             "PROOF_ASSISTANT_CACHE_HOME": str(home / ".cache/repoprover-codex"),
-            "PROOF_ASSISTANT_UV_INSTALL_DIR": str(install_dir),
+            "PROOF_ASSISTANT_UV_HOME": str(install_dir),
+            "PROOF_ASSISTANT_REPOPROVER_REF": repoprover_revision,
+            "PROOF_ASSISTANT_REPOPROVER_URL": str(repoprover),
+            "PROOF_ASSISTANT_ELAN_HOME": str(elan_home),
             # Bootstrap tests exercise uv discovery, not the hardware gate;
             # relax the floor so they pass regardless of the test host's specs.
             "PROOF_ASSISTANT_MIN_CPU_CORES": "1",
             "PROOF_ASSISTANT_MIN_MEMORY_GIB": "1",
         }
     )
+    if not managed_repoprover:
+        env["PROOF_ASSISTANT_REPOPROVER_SOURCE"] = str(repoprover)
     env.update(environment or {})
     result: subprocess.CompletedProcess[str] | None = None
     for _ in range(runs):
         result = subprocess.run(
-            [str(INSTALLER)], text=True, capture_output=True, check=False, env=env
+            [str(sandbox_root / "install.sh")],
+            text=True,
+            capture_output=True,
+            check=False,
+            env=env,
         )
         if result.returncode != 0:
             break
@@ -215,7 +298,9 @@ def _bootstrap_harness(
 
 def test_installer_always_checks_compiler_before_tests():
     lines = [line.strip() for line in INSTALLER.read_text().splitlines()]
-    install = '"${uv_bin}" pip install --python "${venv_path}/bin/python" -e "${project_root}[dev]"'
+    install = '"${uv_bin}" pip install --python "${venv_path}/bin/python" \\'
+    repoprover = '-e "${repoprover_source}" \\'
+    project = '-e "${project_root}[dev]"'
     compiler = '"${venv_path}/bin/proof-assistant" compiler-check'
     cache_init = '"${venv_path}/bin/proof-assistant" cache init'
     tests = '"${venv_path}/bin/python" -m pytest -q "${project_root}/tests"'
@@ -224,15 +309,58 @@ def test_installer_always_checks_compiler_before_tests():
     assert lines.count(cache_init) == 1
     assert (
         lines.index(install)
+        < lines.index(repoprover)
+        < lines.index(project)
         < lines.index(compiler)
         < lines.index(cache_init)
         < lines.index(tests)
     )
 
 
+def test_root_installer_is_the_single_documented_install_entrypoint() -> None:
+    assert INSTALLER.is_file()
+    assert os.access(INSTALLER, os.X_OK)
+    assert not (ROOT / "scripts" / "install-dev.sh").exists()
+    assert ONE_LINE_INSTALL in (ROOT / "README.md").read_text(encoding="utf-8")
+    assert ONE_LINE_INSTALL in (ROOT / "docs" / "INSTALLATION.md").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_documented_one_line_command_propagates_download_failure(
+    tmp_path: Path,
+) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    _write_executable(fake_bin / "curl", "#!/bin/sh\nexit 55\n")
+    env = _clean_install_environment()
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+
+    result = subprocess.run(
+        ["bash", "-c", ONE_LINE_INSTALL],
+        text=True,
+        capture_output=True,
+        check=False,
+        env=env,
+    )
+
+    assert result.returncode == 55
+
+
+def test_installer_pins_and_bootstraps_lean_and_repoprover() -> None:
+    text = INSTALLER.read_text(encoding="utf-8")
+
+    assert "386adba3df572cb71df534add2c764e071898a2e" in text
+    assert "0e36a07b9bbcc5381fa6250df109f9a4f94d7bac" in text
+    assert "--no-modify-path --default-toolchain none" in text
+    assert 'toolchain install "${lean_toolchain}"' in text
+    assert '-e "${repoprover_source}"' in text
+    assert "scripts/bootstrap-uv.sh" in text
+
+
 def test_installer_rejects_dropbox_environment_before_creation(tmp_path):
     forbidden = tmp_path / "Dropbox" / "forbidden-venv"
-    env = _relax_hardware_gate(os.environ.copy())
+    env = _relax_hardware_gate(_clean_install_environment())
     env["PROOF_ASSISTANT_VENV"] = str(forbidden)
     result = subprocess.run(
         [str(INSTALLER)],
@@ -249,7 +377,7 @@ def test_installer_rejects_dropbox_environment_before_creation(tmp_path):
 
 def test_installer_rejects_dropbox_cache_before_creation(tmp_path):
     forbidden = tmp_path / "Dropbox" / "lean-cache"
-    env = _relax_hardware_gate(os.environ.copy())
+    env = _relax_hardware_gate(_clean_install_environment())
     env["PROOF_ASSISTANT_CACHE_HOME"] = str(forbidden)
     env["PROOF_ASSISTANT_VENV"] = str(Path.home() / ".venvs" / "proof-assistant")
     result = subprocess.run(
@@ -268,7 +396,7 @@ def test_installer_rejects_dropbox_cache_before_creation(tmp_path):
 def test_installer_rejects_cache_outside_home_before_creation(tmp_path):
     venv = tmp_path / "external-venv"
     forbidden = tmp_path / "forbidden-cache"
-    env = _relax_hardware_gate(os.environ.copy())
+    env = _relax_hardware_gate(_clean_install_environment())
     env["PROOF_ASSISTANT_CACHE_HOME"] = str(forbidden)
     env["PROOF_ASSISTANT_VENV"] = str(venv)
     result = subprocess.run(
@@ -285,13 +413,77 @@ def test_installer_rejects_cache_outside_home_before_creation(tmp_path):
     assert not forbidden.exists()
 
 
+def test_installer_rejects_relative_override_paths_before_creation(tmp_path: Path):
+    env = _relax_hardware_gate(_clean_install_environment())
+    env["PROOF_ASSISTANT_VENV"] = "relative/venv"
+
+    result = subprocess.run(
+        ["/bin/bash", str(INSTALLER)],
+        text=True,
+        capture_output=True,
+        check=False,
+        env=env,
+    )
+
+    assert result.returncode == 2
+    assert "must be an absolute path: relative/venv" in result.stderr
+    assert not (tmp_path / "relative").exists()
+
+
+def test_installer_rejects_path_symlinked_into_dropbox(tmp_path: Path):
+    home = tmp_path / "home"
+    dropbox = home / "Dropbox" / "environments"
+    dropbox.mkdir(parents=True)
+    (home / "safe-looking").symlink_to(dropbox, target_is_directory=True)
+    env = _relax_hardware_gate(_clean_install_environment())
+    env["HOME"] = str(home)
+    env["PROOF_ASSISTANT_VENV"] = str(home / "safe-looking" / "venv")
+
+    result = subprocess.run(
+        [str(INSTALLER)], text=True, capture_output=True, check=False, env=env
+    )
+
+    assert result.returncode == 2
+    assert "must not reside in Dropbox" in result.stderr
+    assert not (dropbox / "venv").exists()
+
+
+def test_installer_rejects_checkout_reached_through_symlink_into_dropbox(
+    tmp_path: Path,
+):
+    home = tmp_path / "home"
+    checkout = home / "Dropbox" / "proof-assistant"
+    (checkout / "src" / "proof_assistant").mkdir(parents=True)
+    shutil.copy2(INSTALLER, checkout / "install.sh")
+    (checkout / "pyproject.toml").write_text(
+        '[project]\nname = "proof-assistant"\nversion = "0.1.0"\n',
+        encoding="utf-8",
+    )
+    safe_link = tmp_path / "safe-looking-checkout"
+    safe_link.symlink_to(checkout, target_is_directory=True)
+    env = _relax_hardware_gate(_clean_install_environment())
+    env["HOME"] = str(home)
+
+    result = subprocess.run(
+        [str(safe_link / "install.sh")],
+        text=True,
+        capture_output=True,
+        check=False,
+        env=env,
+    )
+
+    assert result.returncode == 2
+    assert "Proof Assistant source must not reside in Dropbox" in result.stderr
+    assert not (home / ".local").exists()
+
+
 def _stub_path_env(tmp_path: Path, stubs: dict[str, str]) -> dict[str, str]:
     """Prepend fake OS-query binaries to PATH; everything else stays real."""
     stub_dir = tmp_path / "stub-bin"
     stub_dir.mkdir()
     for name, script in stubs.items():
         _write_executable(stub_dir / name, script)
-    env = os.environ.copy()
+    env = _clean_install_environment()
     env["PATH"] = f"{stub_dir}{os.pathsep}{env['PATH']}"
     return env
 
@@ -377,6 +569,36 @@ def test_system_check_rejects_linux_when_glibc_cannot_be_detected(tmp_path):
     assert "Unable to determine glibc version" in result.stderr
 
 
+def test_system_check_uses_proc_cpuinfo_when_lscpu_is_unavailable(tmp_path: Path):
+    command_dir = tmp_path / "commands-without-lscpu"
+    command_dir.mkdir()
+    for name in ("awk", "dirname", "getconf"):
+        target = shutil.which(name)
+        assert target is not None
+        (command_dir / name).symlink_to(target)
+    _write_executable(
+        command_dir / "uname",
+        _UNAME_STUB.format(os_name="Linux", os_release="6.8.0"),
+    )
+    env = _clean_install_environment()
+    env["PATH"] = str(command_dir)
+    env["PROOF_ASSISTANT_MIN_CPU_CORES"] = "1"
+    env["PROOF_ASSISTANT_MIN_MEMORY_GIB"] = "1"
+    env["PROOF_ASSISTANT_VENV"] = str(tmp_path / "Dropbox" / "venv")
+
+    result = subprocess.run(
+        ["/bin/bash", str(INSTALLER)],
+        text=True,
+        capture_output=True,
+        check=False,
+        env=env,
+    )
+
+    assert result.returncode == 2
+    assert "System check: Linux 6.8.0" in result.stdout
+    assert "must not reside in Dropbox" in result.stderr
+
+
 def test_system_check_rejects_too_few_cpu_cores(tmp_path):
     env = _stub_path_env(
         tmp_path,
@@ -455,23 +677,247 @@ def test_installer_keeps_existing_cache_path_and_supports_legacy_overrides():
     assert "PROOF_ASSISTANT_CACHE_HOME" in text
     assert "PROOF_ASSISTANT_PYTHON" in text
     assert "PROOF_ASSISTANT_UV_INSTALL_DIR" in text
+    assert "PROOF_ASSISTANT_SOURCE_DIR" in text
+    assert "PROOF_ASSISTANT_REPOPROVER_SOURCE" in text
+    assert "PROOF_ASSISTANT_REPOPROVER_REF" in text
+    assert "PROOF_ASSISTANT_ELAN_HOME" in text
     assert "REPOPROVER_CODEX_VENV" in text
     assert "REPOPROVER_CODEX_CACHE_HOME" in text
     assert "REPOPROVER_CODEX_PYTHON" in text
 
 
+def _remote_installer_fixture(tmp_path: Path) -> tuple[Path, str]:
+    repository = tmp_path / "remote-source"
+    repository.mkdir()
+    subprocess.run(
+        ["git", "-c", "init.defaultBranch=main", "init"],
+        cwd=repository,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    stub = repository / "install.sh"
+    _write_executable(
+        stub,
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "printf 'checked-out-installer:%s\\n' \"$(pwd)\"\n",
+    )
+    subprocess.run(["git", "add", "install.sh"], cwd=repository, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Proof Assistant Tests",
+            "-c",
+            "user.email=tests@invalid.example",
+            "commit",
+            "-m",
+            "installer fixture",
+        ],
+        cwd=repository,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return repository, "main"
+
+
+def _run_streamed_installer(
+    tmp_path: Path,
+    repository: Path,
+    ref: str,
+) -> tuple[subprocess.CompletedProcess[str], Path]:
+    home = tmp_path / "streamed-home"
+    home.mkdir(exist_ok=True)
+    source = home / ".local" / "share" / "proof-assistant" / "source"
+    env = _clean_install_environment()
+    env.update(
+        {
+            "HOME": str(home),
+            "PROOF_ASSISTANT_REPOSITORY_URL": str(repository),
+            "PROOF_ASSISTANT_REF": ref,
+            "PROOF_ASSISTANT_SOURCE_DIR": str(source),
+            "PROOF_ASSISTANT_MIN_CPU_CORES": "1",
+            "PROOF_ASSISTANT_MIN_MEMORY_GIB": "1",
+        }
+    )
+    result = subprocess.run(
+        ["bash"],
+        input=INSTALLER.read_text(encoding="utf-8"),
+        text=True,
+        capture_output=True,
+        check=False,
+        env=env,
+    )
+    return result, source
+
+
+def test_streamed_one_line_installer_clones_and_executes_checked_out_script(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PROOF_ASSISTANT_VENV", "relative/parent")
+    repository, ref = _remote_installer_fixture(tmp_path)
+
+    result, source = _run_streamed_installer(tmp_path, repository, ref)
+
+    assert result.returncode == 0, result.stderr
+    assert "checked-out-installer:" in result.stdout
+    assert (source / ".git").is_dir()
+    assert (source / "install.sh").is_file()
+
+
+def test_streamed_installer_refuses_to_replace_local_checkout_changes(
+    tmp_path: Path,
+) -> None:
+    repository, ref = _remote_installer_fixture(tmp_path)
+    first, source = _run_streamed_installer(tmp_path, repository, ref)
+    assert first.returncode == 0, first.stderr
+    (source / "local-note.txt").write_text("preserve me\n", encoding="utf-8")
+
+    second, _source = _run_streamed_installer(tmp_path, repository, ref)
+
+    assert second.returncode == 2
+    assert "checkout has local changes" in second.stderr
+    assert (source / "local-note.txt").read_text(encoding="utf-8") == "preserve me\n"
+
+
+def test_installer_creates_pinned_managed_repoprover_checkout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "PROOF_ASSISTANT_REPOPROVER_SOURCE", "/parent-installer/repoprover"
+    )
+    result, log, home, _install_dir = _bootstrap_harness(
+        tmp_path,
+        managed_repoprover=True,
+    )
+    checkout = home / ".local" / "share" / "proof-assistant" / "repoprover"
+
+    assert result.returncode == 0, result.stderr
+    assert (checkout / ".git").is_dir()
+    assert (
+        subprocess.run(
+            ["git", "remote", "get-url", "--push", "origin"],
+            cwd=checkout,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        == "DISABLED"
+    )
+    assert f"-e {checkout}" in log.read_text(encoding="utf-8")
+
+
+def test_installer_accepts_explicit_repoprover_linked_worktree(tmp_path: Path) -> None:
+    origin_parent = tmp_path / "origin-fixture"
+    origin_parent.mkdir()
+    origin, revision = _fake_repoprover_checkout(origin_parent)
+    worktree = tmp_path / "linked-repoprover"
+    subprocess.run(
+        ["git", "worktree", "add", "--detach", str(worktree), revision],
+        cwd=origin,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert (worktree / ".git").is_file()
+
+    result, log, _home, _install_dir = _bootstrap_harness(
+        tmp_path,
+        existing_uv="working",
+        environment={
+            "PROOF_ASSISTANT_REPOPROVER_SOURCE": str(worktree),
+            "PROOF_ASSISTANT_REPOPROVER_REF": revision,
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert f"-e {worktree}" in log.read_text(encoding="utf-8")
+
+
 def test_uv_bootstrap_never_uses_privilege_or_system_package_managers():
     text = INSTALLER.read_text(encoding="utf-8")
-    assert "UV_NO_MODIFY_PATH=1" in text
-    assert "https://astral.sh/uv/install.sh" in text
-    assert 'uv_bin="$(command -v uv)"' in text
+    assert "scripts/bootstrap-uv.sh" in text
+    assert "https://astral.sh/uv/install.sh" not in text
+    assert 'uv_bin="$(command -v uv)"' not in text
     for forbidden in ("sudo ", "brew ", "apt ", "apt-get ", "cargo install"):
         assert forbidden not in text
 
 
+@pytest.mark.parametrize(
+    ("os_name", "machine", "target"),
+    (
+        ("Linux", "x86_64", "x86_64-unknown-linux-gnu"),
+        ("Linux", "aarch64", "aarch64-unknown-linux-gnu"),
+        ("Linux", "arm64", "aarch64-unknown-linux-gnu"),
+        ("Darwin", "arm64", "aarch64-apple-darwin"),
+        ("Darwin", "x86_64", "x86_64-apple-darwin"),
+    ),
+)
+def test_checksum_verified_uv_bootstrap_rejects_corrupt_archive(
+    tmp_path: Path,
+    os_name: str,
+    machine: str,
+    target: str,
+):
+    fixture = tmp_path / "bootstrap-fixture"
+    (fixture / "scripts").mkdir(parents=True)
+    (fixture / "requirements").mkdir()
+    shutil.copy2(ROOT / "scripts" / "bootstrap-uv.sh", fixture / "scripts")
+    (fixture / "requirements" / "uv-0.12.0-sha256.txt").write_text(
+        f"{'0' * 64}  uv-{target}.tar.gz\n", encoding="utf-8"
+    )
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    _write_executable(
+        fake_bin / "curl",
+        "#!/bin/sh\n"
+        "output=\n"
+        'while [ "$#" -gt 0 ]; do\n'
+        '  if [ "$1" = "-o" ]; then shift; output=$1; fi\n'
+        "  shift\n"
+        "done\n"
+        "printf 'corrupt archive' > \"$output\"\n",
+    )
+    _write_executable(
+        fake_bin / "uname",
+        "#!/bin/sh\n"
+        f'if [ "$1" = "-s" ]; then echo "{os_name}"; exit 0; fi\n'
+        f'if [ "$1" = "-m" ]; then echo "{machine}"; exit 0; fi\n'
+        "exit 1\n",
+    )
+    env = _clean_install_environment()
+    env["HOME"] = str(tmp_path / "home")
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+
+    result = subprocess.run(
+        [str(fixture / "scripts" / "bootstrap-uv.sh"), str(tmp_path / "uv")],
+        text=True,
+        capture_output=True,
+        check=False,
+        env=env,
+    )
+
+    assert result.returncode == 2
+    assert "SHA-256 mismatch" in result.stderr
+
+
+def test_uv_checksum_manifest_includes_linux_aarch64_release() -> None:
+    manifest = (ROOT / "requirements" / "uv-0.12.0-sha256.txt").read_text(
+        encoding="utf-8"
+    )
+    assert (
+        "2c5d6e3092cc5223b10ff403880cc75121bf64e84644e7a0c69f643b0d89ac95  "
+        "uv-aarch64-unknown-linux-gnu.tar.gz"
+    ) in manifest
+
+
 def test_installer_honors_legacy_environment_override(tmp_path):
     forbidden = tmp_path / "Dropbox" / "legacy-venv"
-    env = _relax_hardware_gate(os.environ.copy())
+    env = _relax_hardware_gate(_clean_install_environment())
     env.pop("PROOF_ASSISTANT_VENV", None)
     env["REPOPROVER_CODEX_VENV"] = str(forbidden)
     result = subprocess.run(
@@ -496,9 +942,38 @@ def test_installer_reuses_a_working_uv_without_downloading(tmp_path):
     assert "Using uv:" in result.stdout
     assert "existing:--version" in calls
     assert "existing:pip install --python" in calls
-    assert "curl:" not in calls
-    assert "wget:" not in calls
+    assert "bootstrap:" not in calls
     assert "installed:" not in calls
+
+
+def test_installer_exports_selected_elan_home_for_every_elan_call(tmp_path: Path):
+    result, log, home, _install_dir = _bootstrap_harness(
+        tmp_path, existing_uv="working"
+    )
+    elan_calls = [
+        line
+        for line in log.read_text(encoding="utf-8").splitlines()
+        if line.startswith("elan:")
+    ]
+
+    assert result.returncode == 0, result.stderr
+    assert elan_calls
+    assert all(f"ELAN_HOME={home / '.elan'}" in line for line in elan_calls)
+
+
+def test_repeated_install_skips_already_installed_lean_toolchain(tmp_path: Path):
+    result, log, _home, _install_dir = _bootstrap_harness(
+        tmp_path, existing_uv="working", runs=2
+    )
+    elan_calls = [
+        line
+        for line in log.read_text(encoding="utf-8").splitlines()
+        if line.startswith("elan:")
+    ]
+
+    assert result.returncode == 0, result.stderr
+    assert sum("toolchain list" in line for line in elan_calls) == 2
+    assert sum("toolchain install" in line for line in elan_calls) == 1
 
 
 def test_installer_reuses_prior_local_bootstrap_even_when_not_on_shell_path(tmp_path):
@@ -510,7 +985,6 @@ def test_installer_reuses_prior_local_bootstrap_even_when_not_on_shell_path(tmp_
     assert f"Using uv: {install_dir / 'uv'}" in result.stdout
     assert "existing-local:--version" in calls
     assert "existing-local:pip install --python" in calls
-    assert f"PATH={install_dir}:" in calls
 
 
 def test_broken_path_uv_does_not_shadow_a_working_local_bootstrap(tmp_path):
@@ -528,18 +1002,15 @@ def test_broken_path_uv_does_not_shadow_a_working_local_bootstrap(tmp_path):
     assert "existing-local:pip install --python" in calls
 
 
-def test_missing_uv_bootstraps_with_curl_and_uses_exact_installed_binary(tmp_path):
+def test_missing_uv_uses_checksum_verified_bootstrap_and_exact_binary(tmp_path):
     result, log, home, install_dir = _bootstrap_harness(tmp_path, downloader="curl")
     calls = log.read_text(encoding="utf-8")
     assert result.returncode == 0, result.stderr
-    assert install_dir == home / ".local/bin"
+    assert install_dir == home / ".local/share/proof-assistant/uv"
     assert (install_dir / "uv").is_file()
-    assert "curl:-LsSf https://astral.sh/uv/install.sh" in calls
-    assert "wget:" not in calls
-    assert f"installer:dir={install_dir}:no_modify=1" in calls
+    assert f"bootstrap:{install_dir}" in calls
     assert "installed:--version" in calls
     assert "installed:pip install --python" in calls
-    assert f"PATH={install_dir}:" in calls
     startup_files = [
         home / ".zprofile",
         home / ".zshrc",
@@ -586,22 +1057,14 @@ def test_broken_uv_is_replaced_in_custom_install_dir(tmp_path):
     assert resolved == install_dir
     assert "existing:--version" in calls
     assert "existing:pip" not in calls
-    assert f"installer:dir={install_dir}:no_modify=1" in calls
+    assert f"bootstrap:{install_dir}" in calls
     assert "installed:pip install --python" in calls
 
 
-def test_wget_is_used_only_when_curl_is_unavailable(tmp_path):
-    result, log, _home, _install_dir = _bootstrap_harness(tmp_path, downloader="wget")
-    calls = log.read_text(encoding="utf-8")
-    assert result.returncode == 0, result.stderr
-    assert "curl:" not in calls
-    assert "wget:-qO- https://astral.sh/uv/install.sh" in calls
-
-
-def test_no_downloader_exits_two_without_creating_uv(tmp_path):
+def test_failed_verified_bootstrap_exits_two_without_creating_uv(tmp_path):
     result, _log, _home, install_dir = _bootstrap_harness(tmp_path, downloader="none")
     assert result.returncode == 2
-    assert "neither curl nor wget" in result.stderr
+    assert "checksum-verified uv bootstrap failed" in result.stderr
     assert not (install_dir / "uv").exists()
 
 
@@ -611,7 +1074,7 @@ def test_bootstrap_must_produce_a_working_uv_before_environment_changes(tmp_path
     )
     calls = log.read_text(encoding="utf-8")
     assert result.returncode == 2
-    assert "did not produce a working uv" in result.stderr
+    assert "did not produce a working executable" in result.stderr
     assert "proof:" not in calls
     assert "python:" not in calls
     assert not (install_dir / "uv").exists()
@@ -626,23 +1089,23 @@ def test_bootstrap_rejects_an_installed_uv_that_fails_verification(tmp_path):
     )
     calls = log.read_text(encoding="utf-8")
     assert result.returncode == 2
-    assert "did not produce a working uv" in result.stderr
+    assert "did not produce a working executable" in result.stderr
     assert "installed:--version" in calls
     assert "installed:pip" not in calls
     assert (install_dir / "uv").is_file()
 
 
-def test_downloader_or_installer_failure_has_clear_error_and_exit_two(tmp_path):
+def test_uv_bootstrap_failure_has_clear_error_and_exit_two(tmp_path):
     result, log, _home, install_dir = _bootstrap_harness(
         tmp_path, downloader="curl", downloader_succeeds=False
     )
     assert result.returncode == 2
-    assert "Failed to download or run Astral's uv installer with curl" in result.stderr
-    assert "curl:" in log.read_text(encoding="utf-8")
+    assert "checksum-verified uv bootstrap failed" in result.stderr
+    assert "bootstrap:" in log.read_text(encoding="utf-8")
     assert not (install_dir / "uv").exists()
 
 
-def test_uncreatable_uv_install_directory_exits_two_before_download(tmp_path):
+def test_uncreatable_uv_bootstrap_directory_exits_two_before_download(tmp_path):
     install_dir = tmp_path / "blocked"
     result, log, _home, _resolved = _bootstrap_harness(
         tmp_path,
@@ -651,8 +1114,8 @@ def test_uncreatable_uv_install_directory_exits_two_before_download(tmp_path):
         block_install_dir=True,
     )
     assert result.returncode == 2
-    assert "Cannot create the uv install directory" in result.stderr
-    assert "curl:" not in log.read_text(encoding="utf-8")
+    assert "uv bootstrap directory has a non-directory path component" in result.stderr
+    assert "bootstrap:" not in log.read_text(encoding="utf-8")
 
 
 def test_installer_configures_the_detected_shell_startup_path(tmp_path):
@@ -691,7 +1154,7 @@ def test_installer_does_not_duplicate_shell_startup_path(tmp_path):
         path.read_text(encoding="utf-8") for path in startup_files if path.exists()
     ]
     assert all(
-        text.count("Added by Proof Assistant installer") == 1 for text in configured
+        text.count("Added by Proof Assistant installer") == 2 for text in configured
     )
 
 
@@ -715,8 +1178,8 @@ def test_installer_preserves_existing_bash_profile_and_bashrc(tmp_path):
     assert installed_profile.count("EXISTING_LOGIN_SETTING") == 1
     assert installed_profile.count('. "$HOME/.bashrc"') == 1
     assert installed_bashrc.count("existing_alias") == 1
-    assert installed_profile.count("Added by Proof Assistant installer") == 1
-    assert installed_bashrc.count("Added by Proof Assistant installer") == 1
+    assert installed_profile.count("Added by Proof Assistant installer") == 2
+    assert installed_bashrc.count("Added by Proof Assistant installer") == 2
 
 
 def test_installer_recognizes_previous_guard_without_appending(tmp_path):
@@ -736,12 +1199,16 @@ def test_installer_recognizes_previous_guard_without_appending(tmp_path):
     )
 
     assert result.returncode == 0, result.stderr
-    assert (home / ".bash_profile").read_text(encoding="utf-8") == (
-        "export LOGIN_SENTINEL=1\n" + previous_guard
-    )
-    assert (home / ".bashrc").read_text(encoding="utf-8") == (
-        "export BASHRC_SENTINEL=1\n" + previous_guard
-    )
+    installed_profile = (home / ".bash_profile").read_text(encoding="utf-8")
+    installed_bashrc = (home / ".bashrc").read_text(encoding="utf-8")
+    assert installed_profile.startswith("export LOGIN_SENTINEL=1\n" + previous_guard)
+    assert installed_bashrc.startswith("export BASHRC_SENTINEL=1\n" + previous_guard)
+    assert installed_profile.count(str(path_dir)) == 2
+    assert installed_bashrc.count(str(path_dir)) == 2
+    assert installed_profile.count("Added by Proof Assistant installer") == 2
+    assert installed_bashrc.count("Added by Proof Assistant installer") == 2
+    assert ".elan/bin" in installed_profile
+    assert ".elan/bin" in installed_bashrc
 
 
 def test_installer_uses_profile_without_creating_higher_priority_bash_file(
@@ -759,7 +1226,7 @@ def test_installer_uses_profile_without_creating_higher_priority_bash_file(
     installed = (home / ".profile").read_text(encoding="utf-8")
     assert installed.startswith(profile)
     assert installed.count("PROFILE_ONLY_SETTING") == 1
-    assert installed.count("Added by Proof Assistant installer") == 1
+    assert installed.count("Added by Proof Assistant installer") == 2
 
 
 def test_installer_respects_existing_bash_login_precedence(tmp_path):
@@ -773,9 +1240,9 @@ def test_installer_respects_existing_bash_login_precedence(tmp_path):
 
     assert result.returncode == 0, result.stderr
     assert not (home / ".bash_profile").exists()
-    assert "Added by Proof Assistant installer" in (
-        home / ".bash_login"
-    ).read_text(encoding="utf-8")
+    assert "Added by Proof Assistant installer" in (home / ".bash_login").read_text(
+        encoding="utf-8"
+    )
     assert (home / ".profile").read_text(encoding="utf-8") == (
         "export PROFILE_SENTINEL=1\n"
     )
@@ -798,8 +1265,8 @@ def test_installer_preserves_existing_zsh_profiles(tmp_path):
     assert installed_zshrc.startswith(zshrc)
     assert installed_zprofile.count("ZPROFILE_SENTINEL") == 1
     assert installed_zshrc.count("ZSHRC_SENTINEL") == 1
-    assert installed_zprofile.count("Added by Proof Assistant installer") == 1
-    assert installed_zshrc.count("Added by Proof Assistant installer") == 1
+    assert installed_zprofile.count("Added by Proof Assistant installer") == 2
+    assert installed_zshrc.count("Added by Proof Assistant installer") == 2
 
 
 def test_installer_migrates_only_legacy_owned_bash_profile(tmp_path):
@@ -822,7 +1289,7 @@ def test_installer_migrates_only_legacy_owned_bash_profile(tmp_path):
     ) == legacy
     installed = (home / ".profile").read_text(encoding="utf-8")
     assert installed.startswith(profile)
-    assert installed.count("Added by Proof Assistant installer") == 1
+    assert installed.count("Added by Proof Assistant installer") == 2
 
 
 def test_installer_transfers_other_managed_path_before_migration(tmp_path):
@@ -873,7 +1340,7 @@ def test_installer_skips_broken_bash_login_candidate(tmp_path):
     assert not (home / "missing-profile").exists()
     installed = (home / ".profile").read_text(encoding="utf-8")
     assert installed.startswith(profile)
-    assert installed.count("Added by Proof Assistant installer") == 1
+    assert installed.count("Added by Proof Assistant installer") == 2
 
 
 def test_installer_honors_zdotdir(tmp_path):
@@ -903,6 +1370,6 @@ def test_installer_honors_fish_xdg_config_home(tmp_path):
     assert result.returncode == 0, result.stderr
     fish_config = config_home / "fish" / "config.fish"
     installed = fish_config.read_text(encoding="utf-8")
-    assert installed.count("Added by Proof Assistant installer") == 1
+    assert installed.count("Added by Proof Assistant installer") == 2
     assert "fish_add_path --path" in installed
     assert not (home / ".config" / "fish" / "config.fish").exists()

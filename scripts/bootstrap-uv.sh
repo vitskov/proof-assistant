@@ -29,6 +29,7 @@ snapshot_profiles "${profile_snapshot}"
 
 case "$(uname -s):$(uname -m)" in
   Linux:x86_64) uv_target="x86_64-unknown-linux-gnu" ;;
+  Linux:aarch64|Linux:arm64) uv_target="aarch64-unknown-linux-gnu" ;;
   Darwin:arm64) uv_target="aarch64-apple-darwin" ;;
   Darwin:x86_64) uv_target="x86_64-apple-darwin" ;;
   *)
@@ -42,6 +43,7 @@ readonly uv_asset="uv-${uv_target}.tar.gz"
 readonly uv_release="https://github.com/astral-sh/uv/releases/download/${uv_version}"
 readonly archive="${destination}/${uv_asset}"
 readonly extracted_uv="${destination}/uv-${uv_target}/uv"
+readonly installed_uv="${destination}/uv"
 
 expected_sha="$(awk -v asset="${uv_asset}" '$2 == asset { print $1 }' "${checksum_file}")"
 if [[ -z "${expected_sha}" ]]; then
@@ -66,6 +68,12 @@ if [[ "$("${extracted_uv}" --version)" != "uv ${uv_version}"* ]]; then
   echo "ERROR: bootstrapped uv does not report version ${uv_version}" >&2
   exit 2
 fi
+cp "${extracted_uv}" "${installed_uv}"
+chmod 0755 "${installed_uv}"
+if [[ "$("${installed_uv}" --version)" != "uv ${uv_version}"* ]]; then
+  echo "ERROR: installed uv does not report version ${uv_version}" >&2
+  exit 2
+fi
 
 snapshot_profiles "${profile_snapshot}.after"
 if ! cmp -s "${profile_snapshot}" "${profile_snapshot}.after"; then
@@ -73,4 +81,4 @@ if ! cmp -s "${profile_snapshot}" "${profile_snapshot}.after"; then
   exit 2
 fi
 
-printf '%s\n' "${extracted_uv}"
+printf '%s\n' "${installed_uv}"
