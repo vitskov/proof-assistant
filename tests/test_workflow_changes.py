@@ -13,6 +13,7 @@ from proof_assistant.incremental.orchestration import (
 )
 from proof_assistant.incremental.session import IncrementalSession
 from proof_assistant.incremental.store import StateStore
+from proof_assistant.presentation.clarifications import ClarificationPresenter
 from proof_assistant.workflow.contracts import (
     ClaimChangeKind,
     NewProjectRequest,
@@ -322,7 +323,7 @@ class BadNarrator:
         return {"headline": "tries to omit the strict fields"}
 
 
-def test_resume_question_uses_exact_multifile_location_and_fallback(tmp_path):
+def test_resume_question_uses_exact_multifile_location_without_narrator(tmp_path):
     source, project, _workflow = setup_project(tmp_path)
     section = source / "sections"
     section.mkdir()
@@ -372,7 +373,7 @@ def test_resume_question_uses_exact_multifile_location_and_fallback(tmp_path):
     presentation = resumed.clarifications[0]
     assert presentation.location.relative_path == "sections/results.tex"
     assert presentation.location.absolute_path == moved.resolve()
-    assert presentation.generated_by == "deterministic-fallback"
+    assert presentation.generated_by == "deterministic"
     assert presentation.location.start_line <= presentation.location.end_line
     persisted = json.loads(
         (project / ".repoprover/presentations/clarifications.json").read_text(
@@ -380,6 +381,79 @@ def test_resume_question_uses_exact_multifile_location_and_fallback(tmp_path):
         )
     )
     assert persisted["clarifications"][0]["provenance_sha256"]
+
+
+class CountingNarrator:
+    name = "counting-test-narrator"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def narrate(self, _facts):
+        self.calls += 1
+        return {
+            "headline": "Clarify the quantifier",
+            "explanation": "The quantifier is not explicit.",
+            "requested_actions": ["State the quantifier explicitly."],
+        }
+
+
+def test_resume_reuses_persisted_clarification_without_narrating(tmp_path):
+    source, project, _workflow = setup_project(tmp_path)
+    prepared = IncrementalSession(project).prepare_pass()
+    with StateStore(IncrementalSession(project).database_path) as store:
+        version = store.claim_version(prepared.snapshot.commit, "lem:zero-add")
+        store.create_question(
+            claim_id="lem:zero-add",
+            snapshot=prepared.snapshot.commit,
+            category="ambiguous_statement",
+            passage=str(version["statement_text"]).strip(),
+            problem="Clarify the quantifier.",
+            possible_resolutions=("State the quantifier explicitly.",),
+            blocking_claims=("thm:add-zero",),
+            run_id=prepared.run_id,
+        )
+        store.set_claim_state(
+            "lem:zero-add",
+            ClaimState.NEEDS_CLARIFICATION,
+            run_id=prepared.run_id,
+            action="test_question",
+            reason="test",
+        )
+        store.finish_run(
+            prepared.run_id,
+            status="COMPLETE",
+            outcome="clarification_required",
+            completed_at="2026-08-23T00:00:00+00:00",
+            detail="test",
+        )
+
+    narrator = CountingNarrator()
+    generated = ClarificationPresenter(narrator).present_all(project, source)
+    assert narrator.calls == 1
+
+    workflow = ProofAssistantWorkflow(
+        catalog_root=tmp_path / "catalog-two",
+        clarification_narrator=narrator,
+        use_codex_clarification=False,
+    )
+    resumed = workflow.resume_project(project)
+    assert resumed.state == WorkflowState.AWAITING_CLARIFICATION
+    assert resumed.clarifications == generated
+    assert narrator.calls == 1
+
+    presentation_path = (
+        project / ".repoprover" / "presentations" / "clarifications.json"
+    )
+    stale = json.loads(presentation_path.read_text(encoding="utf-8"))
+    stale["clarifications"][0]["question_id"] = "stale-question"
+    presentation_path.write_text(json.dumps(stale), encoding="utf-8")
+
+    recovered = workflow.resume_project(project)
+    assert recovered.state == WorkflowState.AWAITING_CLARIFICATION
+    assert recovered.clarifications[0].question_id == "Q0001"
+    assert recovered.clarifications[0].generated_by == "deterministic"
+    assert narrator.calls == 1
 
 
 def test_open_question_with_new_source_returns_to_change_review(tmp_path):

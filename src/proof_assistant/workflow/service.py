@@ -1688,7 +1688,7 @@ class ProofAssistantWorkflow:
             return WorkflowSnapshot(state, self._summary(project), pending_plan=plan)
         if status["open_questions"]:
             state = WorkflowState.AWAITING_CLARIFICATION
-            clarifications = self._presenter(project).present_all(
+            clarifications = ClarificationPresenter().load_or_present_all(
                 project, summary.source_path
             )
             self._record_workflow_state(project, state)

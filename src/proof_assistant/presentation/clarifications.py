@@ -154,6 +154,24 @@ class ClarificationPresenter:
     def __init__(self, narrator: ClarificationNarrator | None = None) -> None:
         self.narrator = narrator
 
+    @staticmethod
+    def _presentation_path(project: Path) -> Path:
+        return project / ".repoprover" / "presentations" / "clarifications.json"
+
+    @staticmethod
+    def _write_presentations(
+        project: Path, presentations: Sequence[ClarificationPresentation]
+    ) -> None:
+        atomic_write_json(
+            ClarificationPresenter._presentation_path(project),
+            {
+                "schema_version": 1,
+                "clarifications": [
+                    contract_dict(presentation) for presentation in presentations
+                ],
+            },
+        )
+
     def present_all(
         self, project: Path, source_root: Path
     ) -> tuple[ClarificationPresentation, ...]:
@@ -163,33 +181,198 @@ class ClarificationPresenter:
                 self._present(project, source_root, store, dict(question))
                 for question in store.open_questions()
             )
-        atomic_write_json(
-            project / ".repoprover" / "presentations" / "clarifications.json",
-            {
-                "schema_version": 1,
-                "clarifications": [
-                    contract_dict(presentation) for presentation in presentations
-                ],
-            },
-        )
+        self._write_presentations(project, presentations)
         return presentations
 
-    def _present(
+    def load_or_present_all(
+        self, project: Path, source_root: Path
+    ) -> tuple[ClarificationPresentation, ...]:
+        """Load durable presentations, rebuilding locally when they are stale.
+
+        Reopening a project must never make an external AI request. Narration is
+        generated at the verification-result boundary and persisted there; a
+        missing or stale cache is reconstructed with the deterministic presenter.
+        """
+
+        database = project / ".repoprover" / "state.sqlite3"
+        with StateStore(database) as store:
+            questions = tuple(dict(question) for question in store.open_questions())
+            persisted = self._load_presentations(
+                project, source_root, store, questions
+            )
+        if persisted is not None:
+            return persisted
+        return ClarificationPresenter().present_all(project, source_root)
+
+    def _load_presentations(
         self,
         project: Path,
         source_root: Path,
         store: StateStore,
+        questions: Sequence[Mapping[str, Any]],
+    ) -> tuple[ClarificationPresentation, ...] | None:
+        try:
+            payload = json.loads(
+                self._presentation_path(project).read_text(encoding="utf-8")
+            )
+            if (
+                not isinstance(payload, dict)
+                or payload.get("schema_version") != 1
+                or set(payload) != {"schema_version", "clarifications"}
+            ):
+                return None
+            raw_presentations = payload.get("clarifications")
+            if (
+                not isinstance(raw_presentations, list)
+                or len(raw_presentations) != len(questions)
+            ):
+                return None
+            presentations = tuple(
+                self._decode_presentation(item) for item in raw_presentations
+            )
+            for question, presentation in zip(questions, presentations, strict=True):
+                resolutions, blocked, location, facts = self._presentation_inputs(
+                    project, source_root, store, question
+                )
+                if (
+                    presentation.question_id != str(question["question_id"])
+                    or presentation.claim_id != str(question["claim_id"])
+                    or presentation.category != str(question["category"])
+                    or presentation.possible_resolutions != resolutions
+                    or presentation.blocked_claims != blocked
+                    or presentation.location != location
+                    or presentation.provenance_sha256
+                    != canonical_hash(
+                        {
+                            "facts": facts,
+                            "generated_by": presentation.generated_by,
+                            "location": location.excerpt,
+                        }
+                    )
+                ):
+                    return None
+        except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
+            return None
+        return presentations
+
+    @staticmethod
+    def _decode_presentation(payload: object) -> ClarificationPresentation:
+        if not isinstance(payload, dict) or set(payload) != {
+            "question_id",
+            "claim_id",
+            "category",
+            "headline",
+            "explanation",
+            "requested_actions",
+            "possible_resolutions",
+            "location",
+            "blocked_claims",
+            "generated_by",
+            "provenance_sha256",
+        }:
+            raise ValueError("Invalid persisted clarification presentation")
+
+        def text(key: str) -> str:
+            value = payload[key]
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"Invalid persisted clarification field: {key}")
+            return value
+
+        def strings(key: str) -> tuple[str, ...]:
+            value = payload[key]
+            if not isinstance(value, list) or not all(
+                isinstance(item, str) for item in value
+            ):
+                raise ValueError(f"Invalid persisted clarification field: {key}")
+            return tuple(value)
+
+        location_payload = payload["location"]
+        if not isinstance(location_payload, dict) or set(location_payload) != {
+            "relative_path",
+            "absolute_path",
+            "start_line",
+            "end_line",
+            "start_column",
+            "end_column",
+            "context_start_line",
+            "context_end_line",
+            "excerpt",
+            "highlighted_lines",
+            "snapshot_commit",
+        }:
+            raise ValueError("Invalid persisted clarification source location")
+
+        def location_text(key: str) -> str:
+            value = location_payload[key]
+            if not isinstance(value, str):
+                raise ValueError(f"Invalid persisted source-location field: {key}")
+            return value
+
+        def location_integer(key: str) -> int:
+            value = location_payload[key]
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError(f"Invalid persisted source-location field: {key}")
+            return int(value)
+
+        highlighted = location_payload["highlighted_lines"]
+        if not isinstance(highlighted, list) or not all(
+            isinstance(line, int) and not isinstance(line, bool) for line in highlighted
+        ):
+            raise ValueError("Invalid persisted highlighted source lines")
+        location = SourceLocation(
+            relative_path=location_text("relative_path"),
+            absolute_path=Path(location_text("absolute_path")),
+            start_line=location_integer("start_line"),
+            end_line=location_integer("end_line"),
+            start_column=location_integer("start_column"),
+            end_column=location_integer("end_column"),
+            context_start_line=location_integer("context_start_line"),
+            context_end_line=location_integer("context_end_line"),
+            excerpt=location_text("excerpt"),
+            highlighted_lines=tuple(highlighted),
+            snapshot_commit=location_text("snapshot_commit"),
+        )
+        headline, explanation, requested_actions = (
+            ClarificationPresenter._validate_narration(
+                {
+                    "headline": text("headline"),
+                    "explanation": text("explanation"),
+                    "requested_actions": strings("requested_actions"),
+                }
+            )
+        )
+        return ClarificationPresentation(
+            question_id=text("question_id"),
+            claim_id=text("claim_id"),
+            category=text("category"),
+            headline=headline,
+            explanation=explanation,
+            requested_actions=requested_actions,
+            possible_resolutions=strings("possible_resolutions"),
+            location=location,
+            blocked_claims=strings("blocked_claims"),
+            generated_by=text("generated_by"),
+            provenance_sha256=text("provenance_sha256"),
+        )
+
+    @staticmethod
+    def _presentation_inputs(
+        project: Path,
+        source_root: Path,
+        store: StateStore,
         question: Mapping[str, Any],
-    ) -> ClarificationPresentation:
+    ) -> tuple[tuple[str, ...], tuple[str, ...], SourceLocation, dict[str, object]]:
         resolutions = tuple(json.loads(str(question["resolutions_json"])))
         blocked = tuple(json.loads(str(question["blocking_claims_json"])))
+        if not all(isinstance(item, str) for item in (*resolutions, *blocked)):
+            raise ValueError("Clarification resolutions and blockers must be strings")
         location = _source_location(
             project=project,
             source_root=source_root,
             store=store,
             question=question,
         )
-        facts = {
+        facts: dict[str, object] = {
             "question_id": str(question["question_id"]),
             "claim_id": str(question["claim_id"]),
             "category": str(question["category"]),
@@ -201,6 +384,18 @@ class ClarificationPresenter:
             "start_line": location.start_line,
             "end_line": location.end_line,
         }
+        return resolutions, blocked, location, facts
+
+    def _present(
+        self,
+        project: Path,
+        source_root: Path,
+        store: StateStore,
+        question: Mapping[str, Any],
+    ) -> ClarificationPresentation:
+        resolutions, blocked, location, facts = self._presentation_inputs(
+            project, source_root, store, question
+        )
         headline = f"Clarification needed for {facts['claim_id']}"
         explanation = str(question["problem"])
         requested_actions: tuple[str, ...] = (
