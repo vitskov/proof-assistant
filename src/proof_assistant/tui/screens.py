@@ -5,7 +5,7 @@ from __future__ import annotations
 import shlex
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar
 
 from rich.syntax import Syntax
 from rich.text import Text
@@ -95,6 +95,9 @@ from proof_assistant.workflow.contracts import (
 if TYPE_CHECKING:
     from proof_assistant.tui.app import ProofAssistantApp
     from proof_assistant.workflow.contracts import LatexSourceCandidate
+
+
+ActionPayloadT = TypeVar("ActionPayloadT")
 
 
 def _dropbox_warning(project: ProjectSummary | ChangeImpactPlan) -> str:
@@ -285,6 +288,7 @@ class WelcomeScreen(NoticeScreen):
 
     BINDINGS = [
         NEW_PROJECT.binding(),
+        OPEN.binding(),
         REFRESH.binding(),
         SETTINGS.binding(),
     ]
@@ -317,7 +321,9 @@ class WelcomeScreen(NoticeScreen):
         yield Header()
         with ResponsivePage(id="page"):
             with PageHeader():
-                yield CopyableText("Proof Assistant", classes="title")
+                yield CopyableText(
+                    "Proof Assistant", id="landing-title", classes="title"
+                )
                 yield CopyableText(
                     self._ai_status_text(),
                     id="landing-ai-provider-status",
@@ -382,8 +388,51 @@ class WelcomeScreen(NoticeScreen):
     def action_refresh(self) -> None:
         self.load_projects()
 
+    def action_open(self) -> None:
+        """Open the project associated with focus, or the first resumable one."""
+
+        focused = self.app.focused
+        if focused is not None and focused.parent is not None:
+            row_buttons = focused.parent.query(_ProjectActionButton).nodes
+            for button in row_buttons:
+                if (button.id or "").startswith("resume-"):
+                    self._resume_from_button(button)
+                    return
+        for button in self.query(_ProjectActionButton).nodes:
+            if (button.id or "").startswith("resume-"):
+                self._resume_from_button(button)
+                return
+        self.show_notice(
+            "No resumable project is available. Refresh the project list or create "
+            "a new project.",
+            error=True,
+        )
+
     def action_settings(self) -> None:
         self.proof_app.show_settings(return_to_project=False)
+
+    def _action_payload(
+        self,
+        button: Button,
+        expected_type: type[ActionPayloadT],
+        *,
+        action: str,
+    ) -> ActionPayloadT | None:
+        if isinstance(button, _ProjectActionButton) and isinstance(
+            button.payload, expected_type
+        ):
+            return button.payload
+        self.show_notice(
+            f"Could not {action}: this project action is stale or invalid. "
+            "Refresh the project list and try again.",
+            error=True,
+        )
+        return None
+
+    def _resume_from_button(self, button: Button) -> None:
+        project = self._action_payload(button, ProjectSummary, action="open project")
+        if project is not None:
+            self.proof_app.resume_project(project)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         button_id = event.button.id or ""
@@ -396,37 +445,31 @@ class WelcomeScreen(NoticeScreen):
         elif button_id == "landing-ai-providers":
             self.proof_app.show_ai_provider_settings(self.ai_setup)
         elif button_id.startswith("resume-"):
-            project = (
-                event.button.payload
-                if isinstance(event.button, _ProjectActionButton)
-                else None
-            )
-            if isinstance(project, ProjectSummary):
-                self.proof_app.resume_project(project)
+            self._resume_from_button(event.button)
         elif button_id.startswith("select-existing-main-"):
-            entry = (
-                event.button.payload
-                if isinstance(event.button, _ProjectActionButton)
-                else None
+            entry = self._action_payload(
+                event.button,
+                ProjectCatalogEntry,
+                action="select the main file",
             )
-            if isinstance(entry, ProjectCatalogEntry):
+            if entry is not None:
                 self.proof_app.show_existing_project_main_selection(entry)
         elif button_id.startswith("delete-project-"):
-            project = (
-                event.button.payload
-                if isinstance(event.button, _ProjectActionButton)
-                else None
+            project = self._action_payload(
+                event.button,
+                ProjectSummary,
+                action="inspect project deletion",
             )
-            if isinstance(project, ProjectSummary):
+            if project is not None:
                 self.proof_app.request_project_deletion(project)
         elif button_id.startswith("open-catalog-"):
-            project = (
-                event.button.payload
-                if isinstance(event.button, _ProjectActionButton)
-                else None
+            project_path = self._action_payload(
+                event.button,
+                Path,
+                action="open the project folder",
             )
-            if isinstance(project, Path):
-                self.proof_app.open_location(project)
+            if project_path is not None:
+                self.proof_app.open_location(project_path)
 
     def record_ai_setup(self, snapshot: ProviderSetupSnapshot) -> None:
         """Refresh the landing card from a sanitized backend DTO."""
@@ -475,7 +518,15 @@ class WelcomeScreen(NoticeScreen):
 
     async def _render_projects(self, projects: tuple[ProjectCatalogEntry, ...]) -> None:
         container = self.query_one("#project-list", Vertical)
+        focused_before_render = self.app.focused
+        should_focus_project = (
+            focused_before_render is None
+            or focused_before_render.id == "landing-title"
+            or isinstance(focused_before_render, _ProjectActionButton)
+        )
         await container.remove_children()
+        first_action: _ProjectActionButton | None = None
+        first_resume: _ProjectActionButton | None = None
         if not projects:
             await container.mount(
                 CopyableText("No projects yet. Choose New project to begin.")
@@ -494,7 +545,7 @@ class WelcomeScreen(NoticeScreen):
             if entry.issue:
                 lines.append(f"Issue: {entry.issue}")
             detail = CopyableText("\n".join(lines), classes="project-summary")
-            controls: list[Button] = []
+            controls: list[_ProjectActionButton] = []
             if entry.resumable:
                 button = _ProjectActionButton(
                     "Resume / open",
@@ -503,6 +554,8 @@ class WelcomeScreen(NoticeScreen):
                     payload=project,
                 )
                 controls.append(button)
+                if first_resume is None:
+                    first_resume = button
                 delete_button = _ProjectActionButton(
                     "Delete project",
                     id=f"delete-project-{index}",
@@ -527,8 +580,19 @@ class WelcomeScreen(NoticeScreen):
                     payload=entry.project_path,
                 )
                 controls.append(button)
+            if first_action is None and controls:
+                first_action = controls[0]
             await container.mount(Horizontal(detail, *controls, classes="project-row"))
         self.show_notice(f"{len(projects)} project(s) available.")
+        preferred_action = first_resume or first_action
+        if should_focus_project and preferred_action is not None:
+            self.call_after_refresh(self._focus_project_action, preferred_action)
+
+    def _focus_project_action(self, button: _ProjectActionButton) -> None:
+        """Focus the primary catalog action only after its row has layout."""
+
+        if self.app.screen is self and button.is_mounted and button.is_attached:
+            button.focus()
 
 
 class ProjectDeletionConfirmationScreen(ModalScreen[bool]):

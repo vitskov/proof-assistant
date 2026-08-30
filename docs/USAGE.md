@@ -47,6 +47,11 @@ as **N** for New, **R** for Refresh/Retry, **S** for Settings, **V** for Verify,
 and **O** for Open. The F1 reference documents navigation and less frequent
 contextual commands as well.
 
+On the welcome screen, the first resumable project receives focus after the
+catalog loads, so **Enter** opens it directly. **O** opens the project in the
+focused row, or the most recently active resumable project when focus is
+elsewhere.
+
 F2/F3 are cancel-first on a modal dialog: the first press dismisses the dialog
 without accepting it, and a second press performs the navigation. Settings is
 an overlay, so closing it restores the exact prior screen. Leaving a progress

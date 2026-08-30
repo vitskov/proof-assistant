@@ -219,8 +219,12 @@ class ProofAssistantApp(App[None]):
         margin-bottom: 1;
     }
     TextArea:focus { border: round $proof-focus; }
-    .copyable-info, .copyable-info:focus {
+    .copyable-info {
         border: none; padding: 0; margin: 0; background: transparent;
+    }
+    .copyable-info:focus {
+        border: none; padding: 0; margin: 0;
+        background: $proof-info-background;
     }
     .warning, .warning:focus {
         color: $proof-warning-text;

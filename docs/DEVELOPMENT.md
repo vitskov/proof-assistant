@@ -188,7 +188,10 @@ Test the Textual app with its pilot/headless driver. Cover:
 17. all eight AI role rows at 120×40, explicit machine/project scope,
     provider-default and one-level Undo behavior, selection preservation, and
     removal of secret input values from the DOM when leaving the connection
-    view.
+    view; and
+18. deterministic welcome-screen focus after asynchronous catalog rendering,
+    Enter/O/mouse project activation, and visible feedback for stale action
+    payloads.
 
 Backend source tests must cover rapid editor-style replace sequences,
 simultaneous changes to several `\input` files, adds/deletes/renames, and staged

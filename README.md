@@ -97,6 +97,11 @@ backend verification is active, and moves only the managed project to a
 recoverable location. The authoritative manuscript source is never moved or
 changed.
 
+After the project list loads, its first resumable project is focused: press
+**Enter** to open it. Press **O** from anywhere on the welcome screen to open
+the focused project, with the most recently active resumable project as the
+fallback.
+
 Select an existing folder containing the LaTeX source, then choose **Continue:
 inspect source**. **Browse folders** opens an SSH-safe terminal picker with
 copyable paths and explicit **Up**, **Home**, **Select**, and **Cancel**

@@ -2312,6 +2312,124 @@ async def test_cooperative_cancellation_waits_for_backend_report() -> None:
 
 
 @async_test
+async def test_welcome_focuses_first_resumable_project_after_catalog_load() -> None:
+    service = FakeWorkflowService()
+    app = ProofAssistantApp(service)
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        await wait_for(pilot, lambda: button_is_ready(app, "#resume-0"))
+        button = app.screen.query_one("#resume-0", Button)
+        await wait_for(pilot, lambda: app.focused is button)
+
+        assert app.focused is button
+
+
+@async_test
+async def test_welcome_catalog_refresh_preserves_deliberate_focus() -> None:
+    service = FakeWorkflowService()
+    app = ProofAssistantApp(service)
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        await wait_for(pilot, lambda: button_is_ready(app, "#resume-0"))
+        resume = app.screen.query_one("#resume-0", Button)
+        await wait_for(pilot, lambda: app.focused is resume)
+        settings = app.screen.query_one("#settings", Button)
+        settings.focus()
+        await wait_for(pilot, lambda: app.focused is settings)
+
+        app.screen.action_refresh()
+        await wait_for(
+            pilot,
+            lambda: app.screen.query_one("#status-line", TextArea).text
+            == "1 project(s) available.",
+        )
+        await pilot.pause()
+
+        assert app.focused is settings
+
+
+@async_test
+async def test_welcome_enter_opens_initially_focused_project() -> None:
+    service = FakeWorkflowService()
+    app = ProofAssistantApp(service)
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        await wait_for(pilot, lambda: button_is_ready(app, "#resume-0"))
+        button = app.screen.query_one("#resume-0", Button)
+        await wait_for(pilot, lambda: app.focused is button)
+        await pilot.press("enter")
+        await wait_for(pilot, lambda: isinstance(app.screen, DashboardScreen))
+
+        assert service.resumed == [service.project.project_path]
+
+
+@async_test
+async def test_welcome_open_shortcut_uses_the_focused_project_row() -> None:
+    service = FakeWorkflowService()
+    second = replace(
+        service.project,
+        project_id="project-two",
+        name="paper-two",
+        project_path=Path("/tmp/proof-assistant/paper-two"),
+    )
+    service.projects = (catalog_entry(service.project), catalog_entry(second))
+    app = ProofAssistantApp(service)
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        await wait_for(pilot, lambda: button_is_ready(app, "#resume-1"))
+        first_button = app.screen.query_one("#resume-0", Button)
+        await wait_for(pilot, lambda: app.focused is first_button)
+        second_button = app.screen.query_one("#resume-1", Button)
+        second_button.focus()
+        await wait_for(pilot, lambda: app.focused is second_button)
+        await pilot.press("o")
+        await wait_for(pilot, lambda: isinstance(app.screen, DashboardScreen))
+
+        assert service.resumed == [second.project_path]
+
+
+@async_test
+async def test_welcome_mouse_click_opens_project() -> None:
+    service = FakeWorkflowService()
+    app = ProofAssistantApp(service)
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        await wait_for(pilot, lambda: button_is_ready(app, "#resume-0"))
+        await pilot.click("#resume-0")
+        await wait_for(pilot, lambda: isinstance(app.screen, DashboardScreen))
+
+        assert service.resumed == [service.project.project_path]
+
+
+@async_test
+async def test_welcome_reports_invalid_project_action_payload() -> None:
+    service = FakeWorkflowService()
+    app = ProofAssistantApp(service)
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        await wait_for(pilot, lambda: button_is_ready(app, "#resume-0"))
+        button = app.screen.query_one("#resume-0", tui_screens._ProjectActionButton)
+        button.payload = object()
+        button.press()
+        await wait_for(
+            pilot,
+            lambda: "stale or invalid"
+            in app.screen.query_one("#status-line", TextArea).text,
+        )
+
+        status = app.screen.query_one("#status-line", TextArea)
+        assert isinstance(app.screen, WelcomeScreen)
+        assert status.has_class("error")
+        assert service.resumed == []
+
+
+@async_test
 async def test_resume_clarification_exact_source_and_no_change() -> None:
     service = FakeWorkflowService()
     waiting_project = ProjectSummary(

@@ -310,7 +310,13 @@ VERIFY = CommandSpec("v", "V", "verify", "Verify", "Start a verification iterati
 CHECK_CHANGES = CommandSpec(
     "c", "C", "check_changes", "Changes", "Check the manuscript for changes."
 )
-OPEN = CommandSpec("o", "O", "open", "Open", "Open the relevant file or folder.")
+OPEN = CommandSpec(
+    "o",
+    "O",
+    "open",
+    "Open",
+    "Open the focused project, source file, or folder.",
+)
 REPORT = CommandSpec(
     "r", "R", "report", "Report", "Open the terminal verification report."
 )
