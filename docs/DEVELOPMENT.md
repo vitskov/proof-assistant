@@ -150,7 +150,9 @@ python -m textual_dev diagnose
 ```
 
 The snapshot gate covers Proof Ink and Proof Paper at 80×24, 120×40, and
-140×48. Review SVG changes rather than updating them blindly:
+140×48. Its explicit snapshot fixture removes ambient `NO_COLOR` so a
+developer's terminal policy cannot silently turn reviewed color baselines into
+grayscale output. Review SVG changes rather than updating them blindly:
 
 ```bash
 python -m pytest -q tests/test_tui_layout.py tests/test_tui_snapshots.py

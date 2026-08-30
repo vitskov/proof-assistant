@@ -860,7 +860,9 @@ screen-local exceptions:
    results wait behind the overlay and appear only after it closes.
 10. Release quality gates are Ruff, the typing-policy check, strict mypy, the
     complete pytest and snapshot suites, textual-dev diagnostics/smoke, locked
-    dependency immutability, and Linux/macOS CI.
+    dependency immutability, and Linux/macOS CI. Snapshot capture removes the
+    ambient `NO_COLOR` variable so local shell preferences cannot contaminate
+    the portable SVG baseline.
 11. Local deployment uses the same reviewed lock without syncing away the
     editable RepoProver install, followed by `uv pip check`, compiler, import,
     executable, and Settings smoke checks. Shell startup files must remain

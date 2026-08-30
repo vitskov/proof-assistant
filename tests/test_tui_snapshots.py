@@ -14,6 +14,7 @@ from tests.textual_dev_app import ResponsiveFoundationApp
 @pytest.mark.parametrize("theme", (PROOF_DARK_THEME.name, PROOF_LIGHT_THEME.name))
 def test_responsive_foundation_matches_reviewed_snapshot(
     snap_compare: Callable[..., bool],
+    deterministic_color_snapshots: None,
     terminal_size: tuple[int, int],
     theme: str,
 ) -> None:
