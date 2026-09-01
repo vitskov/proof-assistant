@@ -221,12 +221,16 @@ def _bootstrap_harness(
         tmp_path,
         available_editors=available_editors,
     )
-    if simulated_os == "Darwin":
+    if simulated_os is not None:
         (commands / "uname").unlink()
         _write_executable(
             commands / "uname",
-            _UNAME_STUB.format(os_name="Darwin", os_release="24.6.0"),
+            _UNAME_STUB.format(
+                os_name=simulated_os,
+                os_release="24.6.0" if simulated_os == "Darwin" else "6.8.0",
+            ),
         )
+    if simulated_os == "Darwin":
         if (commands / "sysctl").exists() or (commands / "sysctl").is_symlink():
             (commands / "sysctl").unlink()
         _write_executable(
@@ -410,11 +414,11 @@ def test_installer_prefers_pico_to_micro_when_nano_is_unavailable(
 @pytest.mark.parametrize(
     ("manager", "simulated_os", "command_prefix"),
     (
-        ("apt-get", None, "install -y"),
-        ("dnf", None, "install -y"),
-        ("yum", None, "install -y"),
-        ("pacman", None, "--noconfirm --needed -S"),
-        ("zypper", None, "--non-interactive install"),
+        ("apt-get", "Linux", "install -y"),
+        ("dnf", "Linux", "install -y"),
+        ("yum", "Linux", "install -y"),
+        ("pacman", "Linux", "--noconfirm --needed -S"),
+        ("zypper", "Linux", "--non-interactive install"),
         ("brew", "Darwin", "install"),
         ("port", "Darwin", "-N install"),
     ),
@@ -463,6 +467,7 @@ def test_installer_continues_from_failed_nano_to_successful_pico(
         available_editors=(),
         editor_package_manager="apt-get",
         editor_install_succeeds_for="pico",
+        simulated_os="Linux",
     )
 
     assert result.returncode == 0, result.stderr
@@ -486,6 +491,7 @@ def test_privilege_failure_stops_editor_installation_after_one_attempt(
         available_editors=(),
         editor_package_manager="apt-get",
         editor_privilege=privilege,
+        simulated_os="Linux",
     )
 
     assert result.returncode == 2
