@@ -32,8 +32,8 @@ def _clean_install_environment() -> dict[str, str]:
 
 def _relax_hardware_gate(env: dict[str, str]) -> dict[str, str]:
     """Disable the CPU/RAM floor for tests unrelated to the hardware gate."""
-    env["PROOF_ASSISTANT_MIN_CPU_CORES"] = "1"
-    env["PROOF_ASSISTANT_MIN_MEMORY_GIB"] = "1"
+    env["PROOF_ASSISTANT_MIN_CPU_CORES"] = "0"
+    env["PROOF_ASSISTANT_MIN_MEMORY_GIB"] = "0"
     return env
 
 
