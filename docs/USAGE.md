@@ -232,8 +232,8 @@ tree presentation.
 
 Copyability is a TUI-wide rule. Paths, candidate main files, commands,
 progress values, findings, warnings, errors, and source excerpts appear in
-read-only selectable panes. When Rich or Markdown rendering is useful, an exact
-selectable source twin is provided.
+read-only selectable panes. Rich syntax and Markdown views remain selectable
+without duplicating the same content in a second pane.
 
 ## When clarification is needed
 
@@ -252,15 +252,13 @@ claim, diagnostics, and affected graph. An isolated AI presentation pass may
 make the wording clearer, but cannot change those facts. Invalid presentation
 output falls back to a deterministic explanation.
 
-Choose **Edit exact file** to temporarily hand the terminal to the first
-available supported editor in this order: `nano`, `pico`, then `micro`. The
-editor opens at the persisted source line (and column where supported). Exit it
-normally—`Ctrl+X` in nano/pico or `Ctrl+Q` in micro—to return to the same
-clarification and focus **Check all files for changes**. **Esc** returns from the
-clarification to the project menu. **Open source folder** remains available for
-desktop workflows. For manuscripts with `\input` or `\include`, edit the exact
-file shown, not necessarily the root `main.tex`. Proof Assistant never rewrites
-the manuscript itself.
+The exact affected segment stays on the clarification screen as read-only,
+line-numbered, syntax-highlighted LaTeX, with the relevant lines emphasized.
+Edit it with your normal tools, then choose **Check all files for changes**.
+**Esc** returns to the project menu. **Open source folder** remains available
+for desktop workflows. For manuscripts with `\input` or `\include`, edit the
+exact file shown, not necessarily the root `main.tex`. Proof Assistant never
+rewrites the manuscript itself.
 
 ## Detecting and approving author changes
 

@@ -29,7 +29,8 @@ background worker lifecycles. It may call workflow interfaces and render typed
 results. It must not write SQLite, copy manuscript trees, calculate graph
 closure, invoke an AI provider directly, or decide certification state.
 Informational values are rendered through selectable read-only surfaces;
-nonselectable syntax/Markdown renderers require an exact copyable source twin.
+syntax and Markdown views must preserve selection without duplicating their
+content in a second pane.
 
 ### `proof_assistant.workflow`
 

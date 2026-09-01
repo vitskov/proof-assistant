@@ -365,7 +365,6 @@ async def test_production_clarification_actions_fit_every_supported_size() -> No
             assert_regions_do_not_overlap(workspace, actions)
 
             for selector in (
-                "#open-file",
                 "#open-folder",
                 "#check-changes",
                 "#previous",
@@ -374,6 +373,8 @@ async def test_production_clarification_actions_fit_every_supported_size() -> No
                 button = screen.query_one(selector, Button)
                 assert_inside_viewport(app, button)
                 assert actions.region.contains_region(button.region)
+            assert not screen.query("#open-file")
+            assert visible(screen.query_one("#source-excerpt"))
 
             if size in compact_sizes:
                 assert visible(view_switcher)

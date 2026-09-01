@@ -2104,7 +2104,6 @@ class ClarificationScreen(NoticeScreen):
         PREVIOUS.binding(),
         NEXT.binding(),
         CHECK_CHANGES.binding(),
-        OPEN.binding(),
         BACK.binding(),
     ]
 
@@ -2172,12 +2171,6 @@ class ClarificationScreen(NoticeScreen):
                             id="source-location",
                         )
                         yield Static(self._syntax(question), id="source-excerpt")
-                        yield CopyableText(
-                            location.excerpt,
-                            id="source-excerpt-copy",
-                            soft_wrap=True,
-                            max_lines=10,
-                        )
                     with Vertical(
                         id="clarification-resolution-panel",
                         classes="clarification-panel",
@@ -2190,12 +2183,11 @@ class ClarificationScreen(NoticeScreen):
                         )
             with ActionBar(id="clarification-actions"):
                 with Horizontal(id="clarification-primary-actions"):
-                    yield Button("Edit exact file", id="open-file", variant="primary")
                     yield Button("Open source folder", id="open-folder")
                     yield Button(
                         "Check all files for changes",
                         id="check-changes",
-                        variant="success",
+                        variant="primary",
                     )
                 with Horizontal(id="clarification-navigation-actions"):
                     yield Button("Previous", id="previous", disabled=self.index == 0)
@@ -2248,8 +2240,6 @@ class ClarificationScreen(NoticeScreen):
             self.query_one("#show-clarification-source", Button).variant = "default"
             self.query_one("#show-clarification-resolution", Button).variant = "primary"
             self.query_one(PageWorkspace).scroll_home(animate=False)
-        elif event.button.id == "open-file":
-            self.action_open()
         elif event.button.id == "open-folder":
             self.proof_app.open_location(self.question.location.absolute_path.parent)
         elif event.button.id == "check-changes":
@@ -2282,9 +2272,6 @@ class ClarificationScreen(NoticeScreen):
 
     def action_check_changes(self) -> None:
         self.proof_app.check_for_changes(self.snapshot.project)
-
-    def action_open(self) -> None:
-        self.proof_app.edit_source(self.question.location)
 
     def action_back(self) -> None:
         self.proof_app.show_welcome()

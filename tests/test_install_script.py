@@ -37,11 +37,7 @@ def _relax_hardware_gate(env: dict[str, str]) -> dict[str, str]:
     return env
 
 
-def _fake_command_path(
-    root: Path,
-    *,
-    available_editors: tuple[str, ...] = ("nano",),
-) -> Path:
+def _fake_command_path(root: Path) -> Path:
     commands = root / "commands"
     commands.mkdir()
     required = (
@@ -54,7 +50,6 @@ def _fake_command_path(
         "getconf",
         "grep",
         "git",
-        "id",
         "mkdir",
         "mv",
         "sh",
@@ -71,8 +66,6 @@ def _fake_command_path(
         target = shutil.which(name)
         if target is not None:
             (commands / name).symlink_to(target)
-    for editor in available_editors:
-        _write_executable(commands / editor, "#!/bin/sh\nexit 0\n")
     return commands
 
 
@@ -152,16 +145,6 @@ def _fake_repoprover_checkout(tmp_path: Path) -> tuple[Path, str]:
     return checkout, revision
 
 
-def _editor_package(manager: str, editor: str) -> str:
-    if editor == "nano":
-        return "nano"
-    if editor == "pico":
-        return "alpine-pico" if manager == "apt-get" else "alpine"
-    if editor == "micro":
-        return "micro-editor" if manager == "zypper" else "micro"
-    raise AssertionError(f"Unsupported editor: {editor}")
-
-
 def _bootstrap_harness(
     tmp_path: Path,
     *,
@@ -180,11 +163,6 @@ def _bootstrap_harness(
     environment: dict[str, str] | None = None,
     runs: int = 1,
     managed_repoprover: bool = False,
-    available_editors: tuple[str, ...] = ("nano",),
-    editor_package_manager: str | None = None,
-    editor_install_succeeds_for: str | None = "nano",
-    editor_privilege: str = "allowed",
-    simulated_os: str | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], Path, Path, Path]:
     home = tmp_path / "home"
     home.mkdir()
@@ -217,59 +195,7 @@ def _bootstrap_harness(
         _fake_venv(home, log)
     else:
         log.touch()
-    commands = _fake_command_path(
-        tmp_path,
-        available_editors=available_editors,
-    )
-    if simulated_os is not None:
-        (commands / "uname").unlink()
-        _write_executable(
-            commands / "uname",
-            _UNAME_STUB.format(
-                os_name=simulated_os,
-                os_release="24.6.0" if simulated_os == "Darwin" else "6.8.0",
-            ),
-        )
-    if simulated_os == "Darwin":
-        if (commands / "sysctl").exists() or (commands / "sysctl").is_symlink():
-            (commands / "sysctl").unlink()
-        _write_executable(
-            commands / "sysctl",
-            _SYSCTL_STUB.format(cores=8, mem_bytes=32 * 1024**3),
-        )
-    elif simulated_os == "Linux":
-        (commands / "getconf").unlink()
-        _write_executable(
-            commands / "getconf",
-            _GETCONF_STUB.format(glibc="2.39"),
-        )
-    if editor_package_manager is not None:
-        manager = editor_package_manager
-        package_script = (
-            "#!/bin/sh\n"
-            f'printf \'package:{manager}:%s\\n\' "$*" >> "$FAKE_LOG"\n'
-            'package=""\n'
-            'for argument in "$@"; do package="$argument"; done\n'
-            'if [ -n "${FAKE_EDITOR_SUCCESS_PACKAGE:-}" ] '
-            '&& [ "$package" = "$FAKE_EDITOR_SUCCESS_PACKAGE" ]; then\n'
-            "  printf '#!/bin/sh\\nexit 0\\n' "
-            '> "$FAKE_COMMAND_DIR/$FAKE_EDITOR_SUCCESS_EDITOR"\n'
-            '  chmod +x "$FAKE_COMMAND_DIR/$FAKE_EDITOR_SUCCESS_EDITOR"\n'
-            "fi\n"
-            "exit 0\n"
-        )
-        _write_executable(commands / manager, package_script)
-        if manager != "brew" and editor_privilege != "missing":
-            sudo_status = 0 if editor_privilege == "allowed" else 1
-            _write_executable(
-                commands / "sudo",
-                "#!/bin/sh\n"
-                'printf \'sudo:%s\\n\' "$*" >> "$FAKE_LOG"\n'
-                'if [ "${1:-}" = "-n" ]; then shift; fi\n'
-                f'if [ "${{1:-}}" = "true" ]; then exit {sudo_status}; fi\n'
-                f'if [ "${{1:-}}" = "-v" ]; then exit {sudo_status}; fi\n'
-                'exec "$@"\n',
-            )
+    commands = _fake_command_path(tmp_path)
     if existing_uv != "missing":
         if existing_uv == "install_dir":
             install_dir.mkdir(parents=True)
@@ -341,14 +267,6 @@ def _bootstrap_harness(
             "FAKE_PROOF_TEMPLATE": str(proof_template),
             "FAKE_PYTHON_TEMPLATE": str(python_template),
             "FAKE_UV_TEMPLATE": str(installed_template),
-            "FAKE_COMMAND_DIR": str(commands),
-            "FAKE_EDITOR_SUCCESS_EDITOR": editor_install_succeeds_for or "",
-            "FAKE_EDITOR_SUCCESS_PACKAGE": (
-                _editor_package(editor_package_manager, editor_install_succeeds_for)
-                if editor_package_manager is not None
-                and editor_install_succeeds_for is not None
-                else ""
-            ),
             "PROOF_ASSISTANT_VENV": str(home / ".venvs/proof-assistant"),
             "PROOF_ASSISTANT_CACHE_HOME": str(home / ".cache/repoprover-codex"),
             "PROOF_ASSISTANT_UV_HOME": str(install_dir),
@@ -400,124 +318,20 @@ def test_installer_always_checks_compiler_before_tests():
     )
 
 
-def test_installer_prefers_pico_to_micro_when_nano_is_unavailable(
-    tmp_path: Path,
-) -> None:
-    result, _log, _home, _install_dir = _bootstrap_harness(
-        tmp_path,
-        existing_uv="working",
-        available_editors=("micro", "pico"),
-    )
+def test_installer_does_not_require_or_provision_a_terminal_editor() -> None:
+    text = INSTALLER.read_text(encoding="utf-8")
 
-    assert result.returncode == 0, result.stderr
-    assert "Using terminal editor:" in result.stdout
-    assert result.stdout.split("Using terminal editor: ", 1)[1].splitlines()[0].endswith(
-        "/pico"
-    )
-
-
-@pytest.mark.parametrize("editor", ("nano", "pico", "micro"))
-@pytest.mark.parametrize(
-    ("manager", "simulated_os", "command_prefix"),
-    (
-        ("apt-get", "Linux", "install -y"),
-        ("dnf", "Linux", "install -y"),
-        ("yum", "Linux", "install -y"),
-        ("pacman", "Linux", "--noconfirm --needed -S"),
-        ("zypper", "Linux", "--non-interactive install"),
-        ("brew", "Darwin", "install"),
-        ("port", "Darwin", "-N install"),
-    ),
-)
-def test_installer_package_manager_commands_and_editor_mappings(
-    tmp_path: Path,
-    editor: str,
-    manager: str,
-    simulated_os: str | None,
-    command_prefix: str,
-) -> None:
-    result, log, _home, _install_dir = _bootstrap_harness(
-        tmp_path,
-        existing_uv="working",
-        available_editors=(),
-        editor_package_manager=manager,
-        editor_install_succeeds_for=editor,
-        simulated_os=simulated_os,
-    )
-
-    assert result.returncode == 0, result.stderr
-    assert "No supported terminal editor was found" in result.stdout
-    attempted_editors = ("nano", "pico", "micro")
-    attempts = attempted_editors[: attempted_editors.index(editor) + 1]
-    package_calls = [
-        line
-        for line in log.read_text(encoding="utf-8").splitlines()
-        if line.startswith(f"package:{manager}:")
-    ]
-    assert package_calls == [
-        f"package:{manager}:{command_prefix} {_editor_package(manager, attempt)}"
-        for attempt in attempts
-    ]
-    assert "Installed terminal editor:" in result.stdout
-    assert result.stdout.split("Installed terminal editor: ", 1)[1].splitlines()[
-        0
-    ].endswith(f"/{editor}")
-
-
-def test_installer_continues_from_failed_nano_to_successful_pico(
-    tmp_path: Path,
-) -> None:
-    result, log, _home, _install_dir = _bootstrap_harness(
-        tmp_path,
-        existing_uv="working",
-        available_editors=(),
-        editor_package_manager="apt-get",
-        editor_install_succeeds_for="pico",
-        simulated_os="Linux",
-    )
-
-    assert result.returncode == 0, result.stderr
-    assert "Trying to install nano (nano) with apt-get." in result.stdout
-    assert "Trying to install pico (alpine-pico) with apt-get." in result.stdout
-    assert "nano installation did not produce a usable editor" in result.stderr
-    assert "package:apt-get:install -y nano" in log.read_text(encoding="utf-8")
-    assert "package:apt-get:install -y alpine-pico" in log.read_text(
-        encoding="utf-8"
-    )
-
-
-@pytest.mark.parametrize("privilege", ("missing", "denied"))
-def test_privilege_failure_stops_editor_installation_after_one_attempt(
-    tmp_path: Path,
-    privilege: str,
-) -> None:
-    result, log, _home, _install_dir = _bootstrap_harness(
-        tmp_path,
-        existing_uv="working",
-        available_editors=(),
-        editor_package_manager="apt-get",
-        editor_privilege=privilege,
-        simulated_os="Linux",
-    )
-
-    assert result.returncode == 2
-    assert result.stdout.count("Trying to install") == 1
-    assert "required administrative access" in result.stderr
-    assert "package:apt-get:" not in log.read_text(encoding="utf-8")
-
-
-def test_installer_fails_clearly_when_editor_and_package_manager_are_missing(
-    tmp_path: Path,
-) -> None:
-    result, _log, _home, _install_dir = _bootstrap_harness(
-        tmp_path,
-        existing_uv="working",
-        available_editors=(),
-    )
-
-    assert result.returncode == 2
-    assert "nano, pico, and micro are unavailable" in result.stderr
-    assert "Install nano, pico, or micro and rerun install.sh" in result.stderr
+    for forbidden in (
+        "ensure_terminal_editor",
+        "find_terminal_editor",
+        "apt-get install",
+        "dnf install",
+        "yum install",
+        "brew install",
+        "pacman --noconfirm",
+        "zypper --non-interactive",
+    ):
+        assert forbidden not in text
 
 
 def test_root_installer_is_the_single_documented_install_entrypoint() -> None:

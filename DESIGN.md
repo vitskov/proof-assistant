@@ -3,7 +3,7 @@
 ## Source of truth
 
 - Status: Implemented responsive baseline and living design contract
-- Last refreshed: 2026-08-30
+- Last refreshed: 2026-09-01
 - Primary product surfaces: terminal project catalog, project creation, project
   dashboard, live verification, author clarification, findings and failure
   analysis, report viewing, and machine/project settings.
@@ -460,6 +460,8 @@ primary proof; do not expose “Duplicate proof” as a competing display name.
 ### Clarification reference layout
 
 - Persistent context: project, question number/count, affected file and lines.
+- The exact source segment is a single inline, read-only, syntax-highlighted
+  LaTeX view. Clarification never suspends the TUI or launches an editor.
 - Wide: exact source context and requested resolution side by side.
 - Compact: **Source** and **Question / response** peer views; changing questions
   preserves the active view when possible.

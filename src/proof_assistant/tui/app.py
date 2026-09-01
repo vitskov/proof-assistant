@@ -9,23 +9,15 @@ from __future__ import annotations
 import time
 import webbrowser
 from collections.abc import Callable
-from contextlib import AbstractContextManager
 from pathlib import Path
 
-from textual.app import App, ComposeResult, SuspendNotSupported
+from textual.app import App, ComposeResult
 from textual.containers import Vertical
 from textual.events import Resize
 from textual.screen import ModalScreen
 from textual.widgets import Static
 from textual.worker import Worker, get_current_worker
 
-from proof_assistant.source_editor import (
-    EditorResolver,
-    EditorRunner,
-    resolve_terminal_editor,
-    run_terminal_editor,
-    terminal_editor_command,
-)
 from proof_assistant.tui import layout as responsive_layout
 from proof_assistant.tui.commands import GLOBAL_BINDINGS
 from proof_assistant.tui.screens import (
@@ -74,7 +66,6 @@ from proof_assistant.workflow.contracts import (
     ProviderSetupSnapshot,
     ReportDocument,
     SourceInspection,
-    SourceLocation,
     VerificationJobObservation,
     VerificationSettings,
     WorkflowServiceContract,
@@ -83,7 +74,6 @@ from proof_assistant.workflow.contracts import (
 )
 
 LocationOpener = Callable[[Path], None]
-EditorSuspender = Callable[[], AbstractContextManager[None]]
 
 
 def _default_location_opener(path: Path) -> None:
@@ -392,17 +382,10 @@ class ProofAssistantApp(App[None]):
         service: WorkflowServiceContract,
         *,
         location_opener: LocationOpener | None = None,
-        editor_resolver: EditorResolver | None = None,
-        editor_runner: EditorRunner | None = None,
-        editor_suspender: EditorSuspender | None = None,
     ) -> None:
         super().__init__()
         self.service = service
         self.location_opener = location_opener or _default_location_opener
-        self.editor_resolver = editor_resolver or resolve_terminal_editor
-        self.editor_runner = editor_runner or run_terminal_editor
-        self.editor_suspender = editor_suspender
-        self._source_editor_active = False
         self.current_snapshot: WorkflowSnapshot | None = None
         self._settings_overlay_active = False
         self._ai_setup_snapshot: ProviderSetupSnapshot | None = None
@@ -858,95 +841,6 @@ class ProofAssistantApp(App[None]):
             screen = self.screen
             if hasattr(screen, "show_notice"):
                 screen.show_notice(f"Could not open {path}: {exc}", error=True)
-
-    def edit_source(self, location: SourceLocation) -> None:
-        """Temporarily hand the terminal to an editor, then resume this screen."""
-
-        origin = self.screen
-        if self._source_editor_active:
-            if hasattr(origin, "show_notice"):
-                origin.show_notice("A source editor is already active.", error=True)
-            return
-        path = location.absolute_path.resolve()
-        if not path.is_file():
-            if hasattr(origin, "show_notice"):
-                origin.show_notice(f"Source file is unavailable: {path}", error=True)
-            return
-        try:
-            editor = self.editor_resolver()
-        except Exception as exc:
-            if hasattr(origin, "show_notice"):
-                origin.show_notice(f"Could not locate a terminal editor: {exc}", error=True)
-            return
-        if editor is None:
-            if hasattr(origin, "show_notice"):
-                origin.show_notice(
-                    "No supported terminal editor is available. Install nano, "
-                    f"pico, or micro, then edit {path}:{location.start_line}.",
-                    error=True,
-                )
-            return
-        command = terminal_editor_command(
-            editor,
-            path=location.absolute_path,
-            line=location.start_line,
-            column=location.start_column,
-        )
-        self._source_editor_active = True
-        if hasattr(origin, "show_notice"):
-            origin.show_notice(
-                f"Opening {editor.name} at line {location.start_line}. "
-                "Exit the editor to return here."
-            )
-        self.call_after_refresh(
-            self._run_source_editor,
-            origin,
-            editor.name,
-            command,
-        )
-
-    def _run_source_editor(
-        self,
-        origin: object,
-        editor_name: str,
-        command: tuple[str, ...],
-    ) -> None:
-        return_code: int | None = None
-        error: str | None = None
-        try:
-            suspender = self.editor_suspender or self.suspend
-            with suspender():
-                try:
-                    return_code = self.editor_runner(command)
-                except OSError as exc:
-                    error = str(exc)
-        except SuspendNotSupported as exc:
-            error = str(exc)
-        finally:
-            self._source_editor_active = False
-
-        if self.screen is not origin or not hasattr(origin, "show_notice"):
-            return
-        if error is not None:
-            origin.show_notice(
-                f"Could not run {editor_name}; returned to Proof Assistant: {error}",
-                error=True,
-            )
-            return
-        if return_code != 0:
-            origin.show_notice(
-                f"{editor_name} exited with status {return_code}; returned to "
-                "Proof Assistant.",
-                error=True,
-            )
-            return
-        origin.show_notice(
-            f"Returned from {editor_name}. Review the edit, then check all files "
-            "for changes."
-        )
-        check_buttons = origin.query("#check-changes").nodes
-        if check_buttons:
-            check_buttons[0].focus()
 
     def view_report(self, snapshot: WorkflowSnapshot) -> None:
         """Load a report through the backend and render it inside the terminal."""
