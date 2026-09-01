@@ -216,6 +216,7 @@ async def test_resize_keeps_fixed_action_bar_inside_viewport() -> None:
         action_bar = app.query_one("#action-bar", ActionBar)
         for width, height in ((120, 40), (80, 24), (140, 40), (140, 48)):
             await pilot.resize_terminal(width, height)
+            await pilot.pause()
             assert_inside_viewport(app, action_bar)
             assert action_bar.region.bottom == height
 

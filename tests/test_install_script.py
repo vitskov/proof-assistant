@@ -237,6 +237,12 @@ def _bootstrap_harness(
             commands / "sysctl",
             _SYSCTL_STUB.format(cores=8, mem_bytes=32 * 1024**3),
         )
+    elif simulated_os == "Linux":
+        (commands / "getconf").unlink()
+        _write_executable(
+            commands / "getconf",
+            _GETCONF_STUB.format(glibc="2.39"),
+        )
     if editor_package_manager is not None:
         manager = editor_package_manager
         package_script = (
