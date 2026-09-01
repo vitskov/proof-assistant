@@ -357,8 +357,8 @@ def _bootstrap_harness(
             "PROOF_ASSISTANT_ELAN_HOME": str(elan_home),
             # Bootstrap tests exercise uv discovery, not the hardware gate;
             # relax the floor so they pass regardless of the test host's specs.
-            "PROOF_ASSISTANT_MIN_CPU_CORES": "1",
-            "PROOF_ASSISTANT_MIN_MEMORY_GIB": "1",
+            "PROOF_ASSISTANT_MIN_CPU_CORES": "0",
+            "PROOF_ASSISTANT_MIN_MEMORY_GIB": "0",
         }
     )
     if not managed_repoprover:
