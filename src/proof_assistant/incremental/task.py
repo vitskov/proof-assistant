@@ -10,10 +10,12 @@ from ..manuscript import ManuscriptInputError, read_task_file
 from .models import TaskPolicy, TaskSpec
 
 DEFAULT_TASK_INSTRUCTIONS = (
-    "Verify every claimed lemma, proposition, theorem, corollary, and other "
-    "theorem-like statement under its stated assumptions. Preserve distinctions "
-    "between verified, ambiguous, unresolved, and false statements. Do not use "
-    "sorry, admit, or new axioms."
+    "Verify every lemma, proposition, theorem, corollary, and other theorem-like "
+    "statement that has a structurally attached manuscript proof. Always skip "
+    "conjectures and theorem-like assertions without an attached proof. Ask about "
+    "one of those skipped assertions only when a proof-bearing statement depends "
+    "on it. Preserve distinctions between verified, skipped, ambiguous, "
+    "unresolved, and false statements. Do not use sorry, admit, or new axioms."
 )
 
 

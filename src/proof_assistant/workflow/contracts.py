@@ -729,6 +729,7 @@ class FindingSummary:
     unresolved: tuple[str, ...] = ()
     suspect_false: tuple[str, ...] = ()
     counterexamples: tuple[str, ...] = ()
+    skipped_unproved: tuple[str, ...] = ()
     dependency_discrepancies: tuple[Mapping[str, Any], ...] = ()
     report_path: Path | None = None
     project_path: Path | None = None

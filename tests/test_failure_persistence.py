@@ -210,6 +210,7 @@ def test_unrelated_dependency_cycle_does_not_abort_selected_prepare_pass(tmp_pat
 \newtheorem{theorem}{Theorem}
 \begin{document}
 \begin{theorem}\label{target}Target.\end{theorem}
+\begin{proof}Direct.\end{proof}
 \begin{theorem}\label{cycle-a}A uses \ref{cycle-b}.\end{theorem}
 \begin{theorem}\label{cycle-b}B uses \ref{cycle-a}.\end{theorem}
 \end{document}

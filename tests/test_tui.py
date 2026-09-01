@@ -4,6 +4,7 @@ import ast
 import asyncio
 import threading
 from collections.abc import Awaitable, Callable, Sequence
+from contextlib import nullcontext
 from dataclasses import replace
 from functools import wraps
 from pathlib import Path
@@ -24,6 +25,10 @@ from textual.widgets import (
 )
 
 import proof_assistant.tui.screens as tui_screens
+from proof_assistant.source_editor import (
+    resolve_terminal_editor,
+    terminal_editor_command,
+)
 from proof_assistant.tui import ProofAssistantApp
 from proof_assistant.tui.commands import (
     AppHeader,
@@ -2430,11 +2435,16 @@ async def test_welcome_reports_invalid_project_action_payload() -> None:
 
 
 @async_test
-async def test_resume_clarification_exact_source_and_no_change() -> None:
+async def test_resume_clarification_exact_source_and_no_change(tmp_path: Path) -> None:
     service = FakeWorkflowService()
+    source_path = tmp_path / "paper with spaces"
+    exact_file = source_path / "sections/main.tex"
+    exact_file.parent.mkdir(parents=True)
+    exact_file.write_text("manuscript source\n", encoding="utf-8")
     waiting_project = ProjectSummary(
         **{
             **service.project.__dict__,
+            "source_path": source_path,
             "workflow_state": WorkflowState.AWAITING_CLARIFICATION,
         }
     )
@@ -2446,7 +2456,14 @@ async def test_resume_clarification_exact_source_and_no_change() -> None:
         clarifications=(clarification(waiting_project),),
     )
     opened: list[Path] = []
-    app = ProofAssistantApp(service, location_opener=opened.append)
+    editor_commands: list[tuple[str, ...]] = []
+    app = ProofAssistantApp(
+        service,
+        location_opener=opened.append,
+        editor_resolver=lambda: Path("/usr/bin/nano"),
+        editor_runner=lambda command: editor_commands.append(command) or 0,
+        editor_suspender=nullcontext,
+    )
 
     async with app.run_test(size=(140, 55)) as pilot:
         await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
@@ -2472,12 +2489,16 @@ async def test_resume_clarification_exact_source_and_no_change() -> None:
         excerpt_copy.select_all()
         assert "The restriction is positive definite" in excerpt_copy.selected_text
 
+        clarification_screen = app.screen
         await pilot.click("#open-file")
-        await pilot.click("#open-folder")
-        assert opened == [
-            waiting_project.source_path / "sections/main.tex",
-            waiting_project.source_path / "sections",
+        await wait_for(pilot, lambda: bool(editor_commands))
+        assert app.screen is clarification_screen
+        assert editor_commands == [
+            ("/usr/bin/nano", "+42,1", str(exact_file.resolve()))
         ]
+        assert app.focused is app.screen.query_one("#check-changes", Button)
+        await pilot.click("#open-folder")
+        assert opened == [waiting_project.source_path / "sections"]
 
         service.plan_result = None
         await pilot.click("#check-changes")
@@ -2494,6 +2515,101 @@ async def test_resume_clarification_exact_source_and_no_change() -> None:
             app.screen.query_one("#status-line", TextArea).text
         )
         assert service.started_jobs == []
+
+        await pilot.press("escape")
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+
+
+def test_supported_editor_commands_preserve_location_as_one_argument(tmp_path: Path):
+    path = tmp_path / "paper with spaces" / "main.tex"
+    location = replace(
+        clarification(project()).location,
+        absolute_path=path,
+        start_line=17,
+        start_column=9,
+    )
+
+    assert terminal_editor_command(
+        Path("/usr/bin/nano"),
+        path=location.absolute_path,
+        line=location.start_line,
+        column=location.start_column,
+    ) == (
+        "/usr/bin/nano",
+        "+17,9",
+        str(path.resolve()),
+    )
+    assert terminal_editor_command(
+        Path("/usr/bin/pico"),
+        path=location.absolute_path,
+        line=location.start_line,
+        column=location.start_column,
+    ) == (
+        "/usr/bin/pico",
+        "+17",
+        str(path.resolve()),
+    )
+    assert terminal_editor_command(
+        Path("/opt/homebrew/bin/micro"),
+        path=location.absolute_path,
+        line=location.start_line,
+        column=location.start_column,
+    ) == (
+        "/opt/homebrew/bin/micro",
+        "+17:9",
+        str(path.resolve()),
+    )
+
+
+def test_terminal_editor_resolution_uses_contractual_priority(monkeypatch) -> None:
+    checked: list[str] = []
+
+    def which(name: str) -> str | None:
+        checked.append(name)
+        return "/opt/bin/pico" if name == "pico" else None
+
+    monkeypatch.setattr("proof_assistant.source_editor.shutil.which", which)
+
+    assert resolve_terminal_editor() == Path("/opt/bin/pico")
+    assert checked == ["nano", "pico"]
+
+
+@async_test
+async def test_clarification_stays_open_when_no_editor_is_available(
+    tmp_path: Path,
+) -> None:
+    service = FakeWorkflowService()
+    source_path = tmp_path / "paper"
+    exact_file = source_path / "sections/main.tex"
+    exact_file.parent.mkdir(parents=True)
+    exact_file.write_text("manuscript source\n", encoding="utf-8")
+    waiting_project = replace(
+        service.project,
+        source_path=source_path,
+        workflow_state=WorkflowState.AWAITING_CLARIFICATION,
+    )
+    service.project = waiting_project
+    service.projects = (catalog_entry(waiting_project),)
+    service.resume_result = WorkflowSnapshot(
+        WorkflowState.AWAITING_CLARIFICATION,
+        waiting_project,
+        clarifications=(clarification(waiting_project),),
+    )
+    app = ProofAssistantApp(service, editor_resolver=lambda: None)
+
+    async with app.run_test(size=(140, 55)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        await wait_for(pilot, lambda: button_is_ready(app, "#resume-0"))
+        await pilot.click("#resume-0")
+        await wait_for(pilot, lambda: isinstance(app.screen, ClarificationScreen))
+        clarification_screen = app.screen
+
+        await pilot.click("#open-file")
+
+        assert app.screen is clarification_screen
+        status = app.screen.query_one("#status-line", TextArea)
+        assert "No supported terminal editor" in status.text
+        assert status.has_class("error")
 
 
 @async_test

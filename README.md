@@ -12,8 +12,8 @@ attention.
 
 ## What it is for
 
-- Check all theorem-like claims, or customize the project task in a simple text
-  editor.
+- Check all proof-bearing theorem-like claims, while recording conjectures and
+  unproved assertions as skipped unless a proved statement depends on them.
 - Distinguish verified, ambiguous, unresolved, suspected-false, technical
   failure, and kernel-checked counterexample outcomes.
 - Explain an incomplete check with its first deterministic blocking reason and
@@ -48,7 +48,9 @@ proof-assistant
 The installer handles Python, `uv`, elan, Lean/Lake, the tested RepoProver
 checkout, compiler validation, cache initialization, tests, and shell PATH
 setup on both supported operating systems. It preserves existing shell
-configuration and never uses `sudo` or a system package manager. See
+configuration. It uses the first available terminal editor in the order
+`nano`, `pico`, `micro`; only when none is installed does it try the supported
+macOS or Linux package manager to add one. See
 [Installation](docs/INSTALLATION.md) for requirements, locations, and the few
 supported overrides.
 

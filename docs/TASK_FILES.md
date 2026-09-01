@@ -13,8 +13,9 @@ users do not need to write YAML.
 
 ## Default task
 
-The default requests verification of every indexed theorem-like claim under
-its stated assumptions. Its semantic content is equivalent to:
+The default requests verification of every indexed theorem-like assertion that
+has a structurally attached manuscript proof. Its semantic content is
+equivalent to:
 
 ```yaml
 schema: 1
@@ -26,16 +27,25 @@ policy:
   counterexample_search: true
   require_statement_correspondence_review: false
 instructions: >
-  Verify every claimed lemma, proposition, theorem, corollary, and other
-  theorem-like statement under its stated assumptions. Preserve distinctions
-  between verified, ambiguous, unresolved, and false statements. Do not use
-  sorry, admit, or new axioms.
+  Verify every lemma, proposition, theorem, corollary, and other theorem-like
+  statement that has a structurally attached manuscript proof. Always skip
+  conjectures and theorem-like assertions without an attached proof. Ask about
+  one of those skipped assertions only when a proof-bearing statement depends
+  on it. Preserve distinctions between verified, skipped, ambiguous,
+  unresolved, and false statements. Do not use sorry, admit, or new axioms.
 ```
 
-An empty `targets` list means all theorem-like claims indexed from the project's
-persisted main file and its recursive input closure. It does not include an
-alternate root or orphaned LaTeX draft in the same source folder, and it is
-different from “verify nothing.”
+An empty `targets` list means all proof-bearing theorem-like assertions indexed
+from the project's persisted main file and its recursive input closure. It does
+not include an alternate root or orphaned LaTeX draft in the same source
+folder, and it is different from “verify nothing.”
+
+Conjectures and theorem-like assertions without an attached `proof`
+environment are never proof targets, including when their IDs appear in the
+explicit `targets` list. They are recorded as skipped. Proof Assistant creates
+a clarification question for one of these assertions only when at least one
+selected proof-bearing assertion depends on it; the question names those
+dependents rather than treating the skipped assertion as blocking itself.
 
 ## Custom instructions
 
@@ -76,7 +86,7 @@ Policy meanings:
 The project commits task changes to its own Git history. The backend analyzes
 task impact separately from manuscript impact:
 
-- selecting more targets schedules their dependency closure;
+- selecting more proof-bearing targets schedules their dependency closure;
 - selecting fewer targets changes current scope without deleting certificates;
 - switching to argument-audit mode schedules required written-proof checks;
 - changing instructions produces a reviewable task-impact plan; and

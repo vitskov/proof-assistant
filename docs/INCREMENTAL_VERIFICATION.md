@@ -139,6 +139,18 @@ performed first. Questions are structured records; at most one can be open for
 a claim. Dependents become `BLOCKED_DEPENDENCY`, while independent certificates
 remain usable.
 
+Conjectures and theorem-like assertions without a structurally attached
+manuscript proof are not proof obligations. The host records them as
+`SKIPPED_UNPROVED` and never schedules them for an AI proof batch. It creates a
+deterministic clarification only if a selected proof-bearing assertion depends
+on one; the question's blocking set contains those proof-bearing dependents and
+never the unsupported assertion itself. A project containing only skipped
+assertions completes with `no_proof_obligations`. Opening an older project also
+reconciles and supersedes legacy self-blocking conjecture questions.
+Agent-discovered semantic edges are tied to the current source argument: an
+edit to their dependent assertion retires those edges and schedules fresh
+dependency discovery, so removing a reliance also clears its policy question.
+
 Edit the authoritative manuscript. The workflow service creates a complete
 `ChangeImpactPlan` and the TUI shows the file changes, changed claims, and
 dependent closure. Only explicit confirmation permits the next iteration. A
@@ -156,7 +168,8 @@ cannot change those facts.
 Important states include `DISCOVERED`, `PROVING`, `CERTIFIED`, `DIRTY_SOURCE`,
 `INVALIDATED`, `NEEDS_CLARIFICATION`, `BLOCKED_DEPENDENCY`,
 `FAILED_TECHNICAL`, `FAILED_FORMALIZATION`, `UNRESOLVED`, `SUSPECT_FALSE`, and
-`COUNTEREXAMPLE_FOUND`.
+`COUNTEREXAMPLE_FOUND`. `SKIPPED_UNPROVED` is a terminal, non-failing state for
+a conjecture or theorem-like assertion without an attached manuscript proof.
 
 Only Lean can create a certificate. A certificate records source snapshot and
 statement hash, Lean declaration/type/value hashes, manuscript and Lean

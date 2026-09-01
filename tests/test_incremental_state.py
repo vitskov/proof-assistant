@@ -45,6 +45,44 @@ def initialize(
     return source, session
 
 
+def initialize_document(
+    tmp_path: Path,
+    document: str,
+    *,
+    targets: tuple[str, ...] = (),
+) -> tuple[Path, IncrementalSession]:
+    source = tmp_path / "paper"
+    source.mkdir(parents=True)
+    (source / "main.tex").write_text(document, encoding="utf-8")
+    target_lines = "\n".join(f"  - {target}" for target in targets)
+    targets_yaml = f"targets:\n{target_lines}" if targets else "targets: []"
+    task = source / "VERIFY.yaml"
+    task.write_text(
+        "\n".join(
+            (
+                "schema: 1",
+                "mode: theorem",
+                targets_yaml,
+                "policy:",
+                "  pause_on_ambiguity: true",
+                "  preserve_certified: true",
+                "  counterexample_search: true",
+                "  require_statement_correspondence_review: false",
+                "instructions: Test the proof-obligation policy.",
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+    session = IncrementalSession.initialize(
+        manuscript=source,
+        task_file=task,
+        project=tmp_path / "verification",
+        main_file="main.tex",
+    )
+    return source, session
+
+
 def finish_prepared(session: IncrementalSession, run_id: int) -> None:
     with StateStore(session.database_path) as store:
         store.finish_run(
@@ -111,6 +149,212 @@ def test_project_initialization_creates_clean_persistent_layout(tmp_path):
     assert len(manifest["manuscript_graph_sha256"]) == 64
     assert manifest["lean_graph_sha256"] is None
     assert len(manifest["combined_graph_sha256"]) == 64
+
+
+def test_unproved_assertions_are_always_skipped_even_when_explicitly_targeted(
+    tmp_path,
+):
+    _source, session = initialize_document(
+        tmp_path,
+        r"""
+\documentclass{article}
+\usepackage{amsthm}
+\newtheorem{conjecture}{Conjecture}
+\newtheorem{theorem}{Theorem}
+\begin{document}
+\begin{conjecture}\label{conj:standalone}A conjectural assertion.\end{conjecture}
+\begin{theorem}\label{thm:unproved}An assertion with no proof.\end{theorem}
+\end{document}
+""",
+        targets=("conj:standalone", "thm:unproved"),
+    )
+
+    prepared = session.prepare_pass()
+    try:
+        assert prepared.targets == frozenset()
+        assert prepared.selected == frozenset()
+        assert prepared.skipped_unproved == frozenset(
+            {"conj:standalone", "thm:unproved"}
+        )
+        with StateStore(session.database_path) as store:
+            assert store.open_questions() == []
+            assert {
+                str(store.claim_row(claim_id)["status"])
+                for claim_id in prepared.skipped_unproved
+            } == {str(ClaimState.SKIPPED_UNPROVED)}
+    finally:
+        finish_prepared(session, prepared.run_id)
+
+
+def test_unproved_dependency_asks_only_for_proof_bearing_dependents(tmp_path):
+    _source, session = initialize_document(
+        tmp_path,
+        r"""
+\documentclass{article}
+\usepackage{amsthm}
+\newtheorem{conjecture}{Conjecture}
+\newtheorem{theorem}{Theorem}
+\begin{document}
+\begin{conjecture}\label{conj:needed}A needed conjecture.\end{conjecture}
+\begin{theorem}\label{thm:dependent}The proved result.\end{theorem}
+\begin{proof}Apply \cref{conj:needed}.\end{proof}
+\end{document}
+""",
+        targets=("thm:dependent",),
+    )
+
+    prepared = session.prepare_pass()
+    try:
+        assert prepared.targets == frozenset({"thm:dependent"})
+        assert prepared.selected == frozenset({"conj:needed", "thm:dependent"})
+        with StateStore(session.database_path) as store:
+            questions = store.open_questions()
+            assert len(questions) == 1
+            assert questions[0]["claim_id"] == "conj:needed"
+            assert questions[0]["category"] == "conjectural_dependency"
+            assert json.loads(str(questions[0]["blocking_claims_json"])) == [
+                "thm:dependent"
+            ]
+            assert json.loads(str(questions[0]["resolutions_json"]))[0].startswith(
+                "Reclassify this conjecture"
+            )
+            assert store.claim_row("conj:needed")["status"] == str(
+                ClaimState.NEEDS_CLARIFICATION
+            )
+    finally:
+        finish_prepared(session, prepared.run_id)
+
+
+def test_legacy_standalone_conjecture_question_is_superseded(tmp_path):
+    _source, session = initialize_document(
+        tmp_path,
+        r"""
+\documentclass{article}
+\usepackage{amsthm}
+\newtheorem{conjecture}{Conjecture}
+\begin{document}
+\begin{conjecture}\label{conj:legacy}A standalone conjecture.\end{conjecture}
+\end{document}
+""",
+    )
+    with StateStore(session.database_path) as store:
+        latest = store.latest_run()
+        assert latest is not None
+        run_id = int(latest["run_id"])
+        snapshot = str(latest["snapshot_commit"])
+        store.create_question(
+            claim_id="conj:legacy",
+            snapshot=snapshot,
+            category="missing_assumption",
+            passage="A standalone conjecture.",
+            problem="Legacy verifier asked for a proof.",
+            possible_resolutions=("Supply a proof.",),
+            blocking_claims=("conj:legacy",),
+            run_id=run_id,
+        )
+        store.set_claim_state(
+            "conj:legacy",
+            ClaimState.NEEDS_CLARIFICATION,
+            run_id=run_id,
+            action="legacy_question",
+            reason="Legacy self-blocking clarification",
+        )
+
+    assert session.reconcile_conjectural_policy() is True
+    assert session.reconcile_conjectural_policy() is False
+    with StateStore(session.database_path) as store:
+        assert store.open_questions() == []
+        assert store.claim_row("conj:legacy")["status"] == str(
+            ClaimState.SKIPPED_UNPROVED
+        )
+        assert store.question_row("Q0001")["status"] == "SUPERSEDED"
+
+
+def test_resume_preserves_an_intentionally_empty_proof_target_scope(tmp_path):
+    _source, session = initialize_document(
+        tmp_path,
+        r"""
+\documentclass{article}
+\usepackage{amsthm}
+\newtheorem{conjecture}{Conjecture}
+\newtheorem{theorem}{Theorem}
+\begin{document}
+\begin{conjecture}\label{conj:only-target}An unsupported premise.\end{conjecture}
+\begin{theorem}\label{thm:not-targeted}An unselected proved result.\end{theorem}
+\begin{proof}Apply \cref{conj:only-target}.\end{proof}
+\end{document}
+""",
+        targets=("conj:only-target",),
+    )
+    prepared = session.prepare_pass()
+    try:
+        assert prepared.targets == frozenset()
+        assert prepared.selected == frozenset()
+        with StateStore(session.database_path) as store:
+            assert store.open_questions() == []
+    finally:
+        finish_prepared(session, prepared.run_id)
+
+    assert session.reconcile_conjectural_policy() is False
+    with StateStore(session.database_path) as store:
+        assert store.open_questions() == []
+        assert store.claim_row("conj:only-target")["status"] == str(
+            ClaimState.SKIPPED_UNPROVED
+        )
+
+
+def test_adding_proof_promotes_unproved_dependency_and_supersedes_question(tmp_path):
+    source, session = initialize_document(
+        tmp_path,
+        r"""
+\documentclass{article}
+\usepackage{amsthm}
+\newtheorem{lemma}{Lemma}
+\newtheorem{theorem}{Theorem}
+\begin{document}
+\begin{lemma}\label{lem:promoted}An initially unsupported lemma.\end{lemma}
+\begin{theorem}\label{thm:uses-promoted}A proved result.\end{theorem}
+\begin{proof}Apply \cref{lem:promoted}.\end{proof}
+\end{document}
+""",
+        targets=("thm:uses-promoted",),
+    )
+    first = session.prepare_pass()
+    try:
+        with StateStore(session.database_path) as store:
+            assert len(store.open_questions()) == 1
+            assert store.claim_row("lem:promoted")["status"] == str(
+                ClaimState.NEEDS_CLARIFICATION
+            )
+    finally:
+        finish_prepared(session, first.run_id)
+
+    tex = source / "main.tex"
+    tex.write_text(
+        tex.read_text(encoding="utf-8").replace(
+            "\\begin{lemma}\\label{lem:promoted}An initially unsupported lemma."
+            "\\end{lemma}",
+            "\\begin{lemma}\\label{lem:promoted}An initially unsupported lemma."
+            "\\end{lemma}\n\\begin{proof}A newly supplied proof.\\end{proof}",
+        ),
+        encoding="utf-8",
+    )
+
+    second = session.prepare_pass()
+    try:
+        assert second.targets == frozenset({"thm:uses-promoted"})
+        assert second.selected == frozenset(
+            {"lem:promoted", "thm:uses-promoted"}
+        )
+        assert "lem:promoted" in second.directly_changed
+        with StateStore(session.database_path) as store:
+            assert store.open_questions() == []
+            assert store.claim_row("lem:promoted")["status"] == str(
+                ClaimState.DIRTY_SOURCE
+            )
+            assert store.question_row("Q0001")["status"] == "SUPERSEDED"
+    finally:
+        finish_prepared(session, second.run_id)
 
 
 def test_prepare_pass_emits_real_source_pipeline_boundaries(tmp_path):
@@ -293,6 +537,113 @@ def test_agent_dependency_tool_rejects_cycles_and_out_of_batch_mutation(tmp_path
                 "reason": "Would reverse the explicit edge.",
             }
         )
+
+
+def test_agent_discovered_dependency_on_unproved_claim_creates_question(tmp_path):
+    _source, session = initialize_document(
+        tmp_path,
+        r"""
+\documentclass{article}
+\usepackage{amsthm}
+\newtheorem{conjecture}{Conjecture}
+\newtheorem{theorem}{Theorem}
+\begin{document}
+\begin{conjecture}\label{conj:semantic}An unsupported premise.\end{conjecture}
+\begin{theorem}\label{thm:semantic}A proved conclusion.\end{theorem}
+\begin{proof}The dependency is implicit in the prose.\end{proof}
+\end{document}
+""",
+        targets=("thm:semantic",),
+    )
+    prepared = session.prepare_pass()
+    context = IncrementalAgentContext(
+        project=session.project,
+        workspace=session.project,
+        run_id=prepared.run_id,
+        snapshot=prepared.snapshot.commit,
+        previous_snapshot=prepared.snapshot.previous_commit,
+        allowed_claims=frozenset({"thm:semantic"}),
+    )
+
+    try:
+        context.claim_propose_dependency(
+            {
+                "claim_id": "thm:semantic",
+                "depends_on": "conj:semantic",
+                "kind": "semantic",
+                "reason": "The written proof uses the unsupported premise.",
+            }
+        )
+        with StateStore(session.database_path) as store:
+            questions = store.open_questions()
+            assert len(questions) == 1
+            assert questions[0]["claim_id"] == "conj:semantic"
+            assert json.loads(str(questions[0]["blocking_claims_json"])) == [
+                "thm:semantic"
+            ]
+            assert store.claim_row("conj:semantic")["status"] == str(
+                ClaimState.NEEDS_CLARIFICATION
+            )
+    finally:
+        finish_prepared(session, prepared.run_id)
+
+
+def test_editing_proof_retires_agent_discovered_dependency_and_question(tmp_path):
+    source, session = initialize_document(
+        tmp_path,
+        r"""
+\documentclass{article}
+\usepackage{amsthm}
+\newtheorem{conjecture}{Conjecture}
+\newtheorem{theorem}{Theorem}
+\begin{document}
+\begin{conjecture}\label{conj:retired}An unsupported premise.\end{conjecture}
+\begin{theorem}\label{thm:revised}A proved conclusion.\end{theorem}
+\begin{proof}The dependency is implicit in the prose.\end{proof}
+\end{document}
+""",
+        targets=("thm:revised",),
+    )
+    first = session.prepare_pass()
+    context = IncrementalAgentContext(
+        project=session.project,
+        workspace=session.project,
+        run_id=first.run_id,
+        snapshot=first.snapshot.commit,
+        previous_snapshot=first.snapshot.previous_commit,
+        allowed_claims=frozenset({"thm:revised"}),
+    )
+    context.claim_propose_dependency(
+        {
+            "claim_id": "thm:revised",
+            "depends_on": "conj:retired",
+            "kind": "semantic",
+            "reason": "The current proof uses the unsupported premise.",
+        }
+    )
+    finish_prepared(session, first.run_id)
+
+    tex = source / "main.tex"
+    tex.write_text(
+        tex.read_text(encoding="utf-8").replace(
+            "The dependency is implicit in the prose.",
+            "This revised proof is self-contained.",
+        ),
+        encoding="utf-8",
+    )
+    second = session.prepare_pass()
+    try:
+        assert second.proof_only_changed == frozenset({"thm:revised"})
+        assert second.selected == frozenset({"thm:revised"})
+        with StateStore(session.database_path) as store:
+            assert store.open_questions() == []
+            assert store.manuscript_edges() == []
+            assert store.claim_row("conj:retired")["status"] == str(
+                ClaimState.SKIPPED_UNPROVED
+            )
+            assert store.question_row("Q0001")["status"] == "SUPERSEDED"
+    finally:
+        finish_prepared(session, second.run_id)
 
 
 def test_correspondence_review_policy_records_unapproved_draft(tmp_path):

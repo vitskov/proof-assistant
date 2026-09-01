@@ -32,6 +32,10 @@ the compiler toolchain supplied by the distribution. At least one supported AI
 provider is required before verification: Codex, Claude Code, or Copilot CLI,
 or an OpenAI, Anthropic, or Gemini API credential.
 
+The application opens source locations in a terminal editor. The installer
+uses the first available editor in this order: `nano`, `pico`, `micro`. If none
+is available, it attempts to install one in that same order.
+
 Python, `uv`, elan, Lean, Lake, Proof Assistant, and the tested RepoProver
 checkout are installed or updated by `install.sh`.
 
@@ -41,17 +45,26 @@ The single installer:
 
 1. checks the operating system, hardware floor, and safe local paths before
    downloading anything;
-2. installs the Proof Assistant source and pinned RepoProver checkout under
+2. installs the Proof Assistant source under `~/.local/share/proof-assistant`;
+3. checks for `nano`, `pico`, then `micro`, and installs the first available
+   package when all three are missing;
+4. installs the pinned RepoProver checkout under
    `~/.local/share/proof-assistant`;
-3. bootstraps elan, the repository's pinned Lean toolchain, Python 3.13, and
+5. bootstraps elan, the repository's pinned Lean toolchain, Python 3.13, and
    checksum-verified `uv` when necessary;
-4. installs the Python environment at `~/.venvs/proof-assistant`;
-5. compiles and runs native and Lean-header probes, initializes the shared
+6. installs the Python environment at `~/.venvs/proof-assistant`;
+7. compiles and runs native and Lean-header probes, initializes the shared
    cache, and runs the test suite; and
-6. adds only guarded PATH entries for elan and Proof Assistant to the startup
+8. adds only guarded PATH entries for elan and Proof Assistant to the startup
    files selected by the user's shell.
 
-It never uses `sudo`, Homebrew, apt, or another system package manager.
+Editor provisioning supports Homebrew or MacPorts on macOS and apt, dnf, yum,
+pacman, or zypper on Linux. It does not bootstrap a package manager and never
+runs package-index updates or system upgrades. Homebrew runs as the current
+user; other supported managers use existing root access or `sudo`. Package
+manager access is used only when all supported editors are absent. If no editor
+can be installed, the installer stops with a command-line explanation rather
+than leaving the source-view action unusable.
 
 ## Shell and data safety
 

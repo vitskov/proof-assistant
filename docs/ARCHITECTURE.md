@@ -81,6 +81,12 @@ Owns immutable source snapshots, the LaTeX object index, manuscript/Lean graphs,
 state transitions, invalidation, scheduling, verification worktrees,
 clarifications, certificates, and reports. It has no Textual dependency.
 
+Proof-obligation classification is host-owned and shared by initial indexing,
+change planning, scheduling, findings, and legacy-project reconciliation.
+Conjectures and theorem-like objects without a structurally attached proof are
+terminal skipped objects, not proof targets. Reverse graph reachability creates
+a clarification only when a selected proof-bearing object relies on one.
+
 ## Strict boundary contracts
 
 The interfaces exchange validated, serializable data rather than paths with

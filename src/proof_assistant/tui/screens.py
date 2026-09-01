@@ -1915,7 +1915,7 @@ class ProgressScreen(NoticeScreen):
             self.record_progress(event)
         if observation.job.attached_legacy and not self._lines:
             self.query_one("#progress-log", TextArea).text = (
-                "Legacy backend activity is running. Durable per-stage events are "
+                "Legacy backend activity is running; durable per-stage events are "
                 "not available; this client is polling coarse lifecycle state."
             )
         self.query_one("#status-line", TextArea).text = self._observer_status()
@@ -2105,6 +2105,7 @@ class ClarificationScreen(NoticeScreen):
         NEXT.binding(),
         CHECK_CHANGES.binding(),
         OPEN.binding(),
+        BACK.binding(),
     ]
 
     def on_mount(self) -> None:
@@ -2189,7 +2190,7 @@ class ClarificationScreen(NoticeScreen):
                         )
             with ActionBar(id="clarification-actions"):
                 with Horizontal(id="clarification-primary-actions"):
-                    yield Button("Open exact file", id="open-file", variant="primary")
+                    yield Button("Edit exact file", id="open-file", variant="primary")
                     yield Button("Open source folder", id="open-folder")
                     yield Button(
                         "Check all files for changes",
@@ -2283,7 +2284,10 @@ class ClarificationScreen(NoticeScreen):
         self.proof_app.check_for_changes(self.snapshot.project)
 
     def action_open(self) -> None:
-        self.proof_app.open_location(self.question.location.absolute_path)
+        self.proof_app.edit_source(self.question.location)
+
+    def action_back(self) -> None:
+        self.proof_app.show_welcome()
 
 
 class ChangeReviewScreen(NoticeScreen):
@@ -2430,6 +2434,7 @@ class FindingsScreen(NoticeScreen):
                 )
                 yield CopyableText(
                     f"{len(self.findings.verified)} verified · "
+                    f"{len(self.findings.skipped_unproved)} skipped · "
                     f"{len(self.findings.unresolved)} unresolved · "
                     f"{len(self.findings.counterexamples)} counterexample(s)",
                     classes="muted",
@@ -2466,6 +2471,7 @@ class FindingsScreen(NoticeScreen):
             ("Verified", finding.verified),
             ("Certificates reused", finding.reused),
             ("Statements reconciled", finding.reconciled),
+            ("Skipped — no attached manuscript proof", finding.skipped_unproved),
             ("Unresolved", finding.unresolved),
             ("Suspected false", finding.suspect_false),
             ("Kernel-checked counterexamples", finding.counterexamples),
@@ -2563,6 +2569,8 @@ def _failure_status(
         return "BLOCKED", "bold yellow"
     if normalized == "CERTIFIED":
         return "OK", "bold green"
+    if normalized == "SKIPPED_UNPROVED":
+        return "SKIP", "dim cyan"
     return "BLOCKED", "bold yellow"
 
 

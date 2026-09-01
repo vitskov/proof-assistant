@@ -92,7 +92,7 @@ def test_task_change_is_separate_from_external_file_changes(tmp_path):
     task = project / "VERIFY.yaml"
     task.write_text(
         task.read_text(encoding="utf-8").replace(
-            "Verify every claimed", "Pay special attention and verify every claimed"
+            "Verify every lemma", "Pay special attention and verify every lemma"
         ),
         encoding="utf-8",
     )

@@ -131,8 +131,8 @@ selected in step 1.
 
 Choose one of:
 
-- **Use default task** — verify every indexed theorem-like claim under its
-  stated assumptions; or
+- **Use default task** — verify every indexed proof-bearing theorem-like
+  assertion under its stated assumptions; or
 - **Customize task** — edit the seeded instructions in the TUI's multiline
   text editor.
 
@@ -194,6 +194,7 @@ The findings screen groups human-readable outcomes such as:
 - verified and newly certified;
 - verified using a reusable certificate;
 - formal statement reconciled;
+- skipped conjecture or assertion with no attached manuscript proof;
 - unresolved without evidence of falsity;
 - suspected false;
 - kernel-checked counterexample;
@@ -251,9 +252,15 @@ claim, diagnostics, and affected graph. An isolated AI presentation pass may
 make the wording clearer, but cannot change those facts. Invalid presentation
 output falls back to a deterministic explanation.
 
-Use the open-file/folder action or your normal editor and edit the external
-source. For manuscripts with `\input` or `\include`, edit the exact file shown,
-not necessarily the root `main.tex`.
+Choose **Edit exact file** to temporarily hand the terminal to the first
+available supported editor in this order: `nano`, `pico`, then `micro`. The
+editor opens at the persisted source line (and column where supported). Exit it
+normally—`Ctrl+X` in nano/pico or `Ctrl+Q` in micro—to return to the same
+clarification and focus **Check all files for changes**. **Esc** returns from the
+clarification to the project menu. **Open source folder** remains available for
+desktop workflows. For manuscripts with `\input` or `\include`, edit the exact
+file shown, not necessarily the root `main.tex`. Proof Assistant never rewrites
+the manuscript itself.
 
 ## Detecting and approving author changes
 

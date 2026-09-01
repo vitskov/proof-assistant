@@ -94,6 +94,7 @@ from ..incremental.models import (
     SourceObject,
     TaskPolicy,
     TaskSpec,
+    proof_target_ids,
 )
 from ..incremental.orchestration import (
     VerificationCancelled,
@@ -319,18 +320,7 @@ def _task_from_dict(payload: JSONObject) -> TaskSpec:
 
 
 def _target_set(task: TaskSpec, objects: tuple[SourceObject, ...]) -> set[str]:
-    if task.targets:
-        return set(task.targets)
-    theorem_kinds = {
-        "claim",
-        "conjecture",
-        "corollary",
-        "lemma",
-        "observation",
-        "proposition",
-        "theorem",
-    }
-    return {item.claim_id for item in objects if item.kind in theorem_kinds}
+    return proof_target_ids(task, objects)
 
 
 class ProofAssistantWorkflow:
@@ -1686,6 +1676,15 @@ class ProofAssistantWorkflow:
             state = WorkflowState.CHANGE_REVIEW
             self._record_workflow_state(project, state)
             return WorkflowSnapshot(state, self._summary(project), pending_plan=plan)
+        try:
+            session.reconcile_conjectural_policy()
+            status = session.status()
+        except Exception as exc:
+            return WorkflowSnapshot(
+                WorkflowState.FAILED,
+                self._summary(project),
+                error=f"Could not reconcile conjectural claim policy: {exc}",
+            )
         if status["open_questions"]:
             state = WorkflowState.AWAITING_CLARIFICATION
             clarifications = ClarificationPresenter().load_or_present_all(
@@ -1711,6 +1710,7 @@ class ProofAssistantWorkflow:
             state = WorkflowState.FAILED
         elif latest.get("outcome") in {
             "verified",
+            "no_proof_obligations",
             "partial_unresolved",
             "counterexample_found",
         }:
@@ -2490,6 +2490,7 @@ class ProofAssistantWorkflow:
             reused=result.reused,
             reconciled=result.reconciled,
             counterexamples=result.counterexamples,
+            skipped_unproved=result.skipped_unproved,
             report_path=project / "VERIFICATION_REPORT.md",
             project_path=project,
             failure_report=self.load_failure_report(project, result.run_id),
@@ -2674,6 +2675,9 @@ class ProofAssistantWorkflow:
             suspect_false=tuple(sorted(states.get(str(ClaimState.SUSPECT_FALSE), []))),
             counterexamples=tuple(
                 sorted(states.get(str(ClaimState.COUNTEREXAMPLE_FOUND), []))
+            ),
+            skipped_unproved=tuple(
+                sorted(states.get(str(ClaimState.SKIPPED_UNPROVED), []))
             ),
             report_path=project / "VERIFICATION_REPORT.md",
             project_path=project,

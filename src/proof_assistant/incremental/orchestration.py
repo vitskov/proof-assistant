@@ -158,6 +158,7 @@ class VerificationResult:
     reconciled: tuple[str, ...]
     questions: tuple[str, ...]
     counterexamples: tuple[str, ...]
+    skipped_unproved: tuple[str, ...] = ()
 
 
 class VerificationCancelled(RuntimeError):
@@ -1564,6 +1565,16 @@ def verify_project(
                             "Author clarification is required; certified work was preserved",
                             10,
                         )
+                    elif not target_states:
+                        outcome, detail, exit_code = (
+                            "no_proof_obligations",
+                            (
+                                "No proof-bearing manuscript assertions required "
+                                "verification; conjectural and unproved assertions "
+                                "were skipped"
+                            ),
+                            0,
+                        )
                     elif target_states and all(
                         state == ClaimState.CERTIFIED
                         for state in target_states.values()
@@ -1627,6 +1638,7 @@ def verify_project(
                     "reconciled": sorted(all_reconciled),
                     "counterexamples": sorted(all_counterexamples),
                     "questions": list(questions),
+                    "skipped_unproved": sorted(prepared.skipped_unproved),
                     "concurrency": {
                         **final_concurrency,
                         "telemetry": concurrency_monitor.provenance(),
@@ -1649,6 +1661,7 @@ def verify_project(
                     reconciled=tuple(sorted(all_reconciled)),
                     questions=questions,
                     counterexamples=tuple(sorted(all_counterexamples)),
+                    skipped_unproved=tuple(sorted(prepared.skipped_unproved)),
                 )
         except Exception as exc:
             if prepared is not None:

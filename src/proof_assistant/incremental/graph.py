@@ -6,7 +6,14 @@ from typing import Any
 import networkx as nx
 
 from .io import canonical_hash
-from .models import ClaimState, ManuscriptEdge, SourceObject
+from .models import (
+    ClaimState,
+    ManuscriptEdge,
+    SourceObject,
+    is_conjectural_assertion,
+    is_conjectural_assertion_shape,
+    is_proof_bearing_assertion,
+)
 
 
 class DependencyCycleError(RuntimeError):
@@ -115,6 +122,38 @@ def blocked_descendants(
     return result & selected
 
 
+def conjectural_dependency_blockers(
+    objects: Sequence[SourceObject],
+    *,
+    selected: set[str],
+    edges: Iterable[ManuscriptEdge],
+) -> dict[str, tuple[str, ...]]:
+    """Map unsupported assertions to selected proof-bearing dependents.
+
+    Edges point from a dependent claim to its dependency. The reverse graph
+    therefore identifies every direct or transitive proof-bearing statement
+    whose verification would rely on an unsupported assertion.
+    """
+
+    by_id = {item.claim_id: item for item in objects}
+    graph = build_graph(by_id, edges).reverse(copy=False)
+    result: dict[str, tuple[str, ...]] = {}
+    for item in objects:
+        if not is_conjectural_assertion(item):
+            continue
+        dependents = nx.descendants(graph, item.claim_id)
+        blockers = tuple(
+            sorted(
+                claim_id
+                for claim_id in dependents & selected
+                if claim_id in by_id and is_proof_bearing_assertion(by_id[claim_id])
+            )
+        )
+        if blockers:
+            result[item.claim_id] = blockers
+    return result
+
+
 def source_changes(
     previous: dict[str, Any],
     current: Sequence[SourceObject],
@@ -130,6 +169,14 @@ def source_changes(
         if old is None:
             statement_changes.add(claim_id)
         elif old["normalized_statement_hash"] != item.normalized_statement_hash:
+            statement_changes.add(claim_id)
+        elif is_conjectural_assertion_shape(
+            str(old["kind"]),
+            int(old["proof_start"]) if old["proof_start"] is not None else None,
+        ) != is_conjectural_assertion(item):
+            # Gaining or losing proof-obligation status must reschedule in every
+            # task mode even though ordinary proof-prose edits are ignored in
+            # theorem mode.
             statement_changes.add(claim_id)
         elif old["proof_hash"] != item.proof_hash and mode == "argument-audit":
             proof_changes.add(claim_id)

@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 from collections.abc import Callable, Sequence
@@ -28,6 +29,7 @@ from .graph import (
     affected_claims,
     build_graph,
     canonical_cycles,
+    conjectural_dependency_blockers,
     dependency_closure,
     manuscript_graph_export,
     source_changes,
@@ -41,7 +43,15 @@ from .latex import (
 )
 from .lean import install_dependency_extractor
 from .locking import ProjectLockedError, project_lock
-from .models import ClaimState, ManuscriptEdge, Snapshot, SourceObject, TaskSpec
+from .models import (
+    ClaimState,
+    ManuscriptEdge,
+    Snapshot,
+    SourceObject,
+    TaskSpec,
+    is_conjectural_assertion,
+    proof_target_ids,
+)
 from .snapshot import SnapshotRepository, sync_project_manuscript
 from .store import StateStore
 from .task import parse_task_file, parse_task_text, task_document
@@ -84,6 +94,7 @@ class PreparedPass:
     edges: tuple[ManuscriptEdge, ...]
     targets: frozenset[str]
     selected: frozenset[str]
+    skipped_unproved: frozenset[str]
     directly_changed: frozenset[str]
     proof_only_changed: frozenset[str]
     affected: frozenset[str]
@@ -98,6 +109,147 @@ class PreparedPass:
 
 def utc_now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _source_object_from_version(row: sqlite3.Row) -> SourceObject:
+    payload = dict(row)
+    references = json.loads(str(payload["references_json"]))
+    if not isinstance(references, list) or not all(
+        isinstance(item, str) for item in references
+    ):
+        raise IncrementalProjectError("Persisted claim references are malformed")
+    return SourceObject(
+        claim_id=str(payload["claim_id"]),
+        kind=str(payload["kind"]),
+        source_file=str(payload["source_file"]),
+        environment=str(payload["environment"]),
+        label=(str(payload["label"]) if payload["label"] is not None else None),
+        ordinal=int(payload["ordinal"]),
+        statement_start=int(payload["statement_start"]),
+        statement_end=int(payload["statement_end"]),
+        statement_byte_start=int(payload["statement_byte_start"]),
+        statement_byte_end=int(payload["statement_byte_end"]),
+        proof_start=(
+            int(payload["proof_start"])
+            if payload["proof_start"] is not None
+            else None
+        ),
+        proof_end=(
+            int(payload["proof_end"]) if payload["proof_end"] is not None else None
+        ),
+        proof_byte_start=(
+            int(payload["proof_byte_start"])
+            if payload["proof_byte_start"] is not None
+            else None
+        ),
+        proof_byte_end=(
+            int(payload["proof_byte_end"])
+            if payload["proof_byte_end"] is not None
+            else None
+        ),
+        statement_hash=str(payload["statement_hash"]),
+        proof_hash=str(payload["proof_hash"]),
+        normalized_statement_hash=str(payload["normalized_statement_hash"]),
+        statement_text=str(payload["statement_text"]),
+        proof_text=str(payload["proof_text"]),
+        references=tuple(references),
+    )
+
+
+def _reconcile_conjectural_policy(
+    store: StateStore,
+    *,
+    snapshot: str,
+    objects: tuple[SourceObject, ...],
+    edges: tuple[ManuscriptEdge, ...],
+    selected: set[str],
+    run_id: int,
+) -> frozenset[str]:
+    """Apply the non-negotiable host policy for unsupported assertions."""
+
+    skipped = frozenset(
+        item.claim_id for item in objects if is_conjectural_assertion(item)
+    )
+    blockers = conjectural_dependency_blockers(
+        objects, selected=selected, edges=edges
+    )
+    open_by_claim: dict[str, list[sqlite3.Row]] = {}
+    for question in store.open_questions():
+        open_by_claim.setdefault(str(question["claim_id"]), []).append(question)
+
+    by_id = {item.claim_id: item for item in objects}
+    for claim_id in sorted(skipped):
+        blocked_claims = blockers.get(claim_id, ())
+        if blocked_claims:
+            item = by_id[claim_id]
+            category = "conjectural_dependency"
+            passage = item.statement_text.strip()
+            problem = (
+                "This conjectural or unproved assertion is not a proof obligation, "
+                "but proof-bearing manuscript statements rely on it: "
+                + ", ".join(blocked_claims)
+            )
+            possible_resolutions = (
+                (
+                    "Reclassify this conjecture as a theorem-like assertion and "
+                    "attach its manuscript proof."
+                    if item.kind == "conjecture"
+                    else "Add a manuscript proof for this assertion."
+                ),
+                "Remove the dependency from the proof-bearing statements.",
+            )
+            question_id = store.create_question(
+                claim_id=claim_id,
+                snapshot=snapshot,
+                category=category,
+                passage=passage,
+                problem=problem,
+                possible_resolutions=possible_resolutions,
+                blocking_claims=blocked_claims,
+                run_id=run_id,
+            )
+            store.refresh_open_question(
+                claim_id,
+                snapshot=snapshot,
+                category=category,
+                passage=passage,
+                problem=problem,
+                possible_resolutions=possible_resolutions,
+                blocking_claims=blocked_claims,
+            )
+            store.set_claim_state(
+                claim_id,
+                ClaimState.NEEDS_CLARIFICATION,
+                run_id=run_id,
+                action="conjectural_dependency",
+                reason=(
+                    f"{question_id}: unsupported assertion blocks "
+                    + ", ".join(blocked_claims)
+                ),
+            )
+            continue
+
+        for question in open_by_claim.get(claim_id, []):
+            store.resolve_question(
+                str(question["question_id"]),
+                run_id=run_id,
+                status="SUPERSEDED",
+                resolution=(
+                    "Conjectural and unproved assertions are skipped unless a "
+                    "proof-bearing manuscript statement depends on them"
+                ),
+            )
+        store.set_claim_state(
+            claim_id,
+            ClaimState.SKIPPED_UNPROVED,
+            run_id=run_id,
+            action="skip_unproved",
+            reason=(
+                "Host policy skips conjectures and theorem-like assertions "
+                "without an attached manuscript proof"
+            ),
+        )
+    return skipped
 
 
 def _is_within(path: Path, parent: Path) -> bool:
@@ -240,7 +392,12 @@ class IncrementalSession:
                     objects,
                     run_id=run_id,
                     state_updates={
-                        item.claim_id: ClaimState.DISCOVERED for item in objects
+                        item.claim_id: (
+                            ClaimState.SKIPPED_UNPROVED
+                            if is_conjectural_assertion(item)
+                            else ClaimState.DISCOVERED
+                        )
+                        for item in objects
                     },
                 )
                 store.replace_manuscript_edges(snapshot.commit, edges)
@@ -479,12 +636,33 @@ class IncrementalSession:
                     )
                     explicit_edges, unresolved = explicit_reference_graph(objects)
                     current_ids = {item.claim_id for item in objects}
+                    current_by_id = {item.claim_id: item for item in objects}
+                    rediscover_semantic_sources = {
+                        claim_id
+                        for claim_id, item in current_by_id.items()
+                        if (old := previous_versions.get(claim_id)) is not None
+                        and (
+                            old["normalized_statement_hash"]
+                            != item.normalized_statement_hash
+                            or old["proof_hash"] != item.proof_hash
+                        )
+                    }
+                    invalidated_semantic_sources = {
+                        edge.src
+                        for edge in old_edges
+                        if edge.provenance == "formalization_discovered"
+                        and edge.src in rediscover_semantic_sources
+                    }
                     persistent_edges = tuple(
                         edge
                         for edge in old_edges
                         if edge.kind != "explicit_ref"
                         and edge.src in current_ids
                         and edge.dst in current_ids
+                        and not (
+                            edge.provenance == "formalization_discovered"
+                            and edge.src in rediscover_semantic_sources
+                        )
                     )
                     edge_map = {
                         (edge.src, edge.dst, edge.kind): edge
@@ -495,6 +673,11 @@ class IncrementalSession:
                     statement_changed, proof_changed, deleted = source_changes(
                         previous_versions, objects, mode=task.mode
                     )
+                    # Agent-discovered semantic edges describe the current
+                    # manuscript argument. Any edit to their source assertion
+                    # retires those edges and schedules the source for fresh
+                    # dependency discovery, including in theorem mode.
+                    proof_changed.update(invalidated_semantic_sources)
                     union_ids = current_ids | set(previous_versions)
                     union_edge_map = {
                         (edge.src, edge.dst, edge.kind): edge
@@ -552,22 +735,7 @@ class IncrementalSession:
                                 "Task targets are not indexed manuscript IDs: "
                                 + ", ".join(unknown_targets)
                             )
-                        targets = set(task.targets)
-                    else:
-                        targets = {
-                            item.claim_id
-                            for item in objects
-                            if item.kind
-                            in {
-                                "claim",
-                                "conjecture",
-                                "corollary",
-                                "lemma",
-                                "observation",
-                                "proposition",
-                                "theorem",
-                            }
-                        }
+                    targets = proof_target_ids(task, objects)
                     selected = dependency_closure(
                         targets,
                         claim_ids=current_ids,
@@ -575,6 +743,14 @@ class IncrementalSession:
                     )
                     if not selected:
                         selected = set(targets)
+                    skipped_unproved = _reconcile_conjectural_policy(
+                        store,
+                        snapshot=snapshot.commit,
+                        objects=objects,
+                        edges=edges,
+                        selected=selected,
+                        run_id=run_id,
+                    )
                     store.record_run_scope(
                         run_id,
                         targets=tuple(targets),
@@ -680,6 +856,7 @@ class IncrementalSession:
                         edges=edges,
                         targets=frozenset(targets),
                         selected=frozenset(selected),
+                        skipped_unproved=skipped_unproved,
                         directly_changed=frozenset(statement_changed),
                         proof_only_changed=frozenset(proof_changed),
                         affected=frozenset(affected),
@@ -886,3 +1063,98 @@ class IncrementalSession:
         finally:
             if lock_context is not None:
                 lock_context.__exit__(None, None, None)
+
+    def reconcile_conjectural_policy(self) -> bool:
+        """Migrate persisted claim/question state to the unproved-skip contract."""
+
+        changed = False
+        config = self._load_config()
+        _task_path, _task_text, _task_sha256, task = parse_task_file(
+            self._task_path_from_config(config)
+        )
+        with project_lock(self.project, exclusive=True):
+            with StateStore(self.database_path) as store:
+                snapshot = store.previous_snapshot()
+                latest = store.latest_run()
+                if snapshot is None or latest is None:
+                    return False
+                objects = tuple(
+                    _source_object_from_version(row)
+                    for row in store.claim_versions(snapshot)
+                )
+                edges = tuple(
+                    ManuscriptEdge(
+                        str(row["src"]),
+                        str(row["dst"]),
+                        str(row["edge_kind"]),
+                        str(row["provenance"]),
+                        bool(row["approved"]),
+                    )
+                    for row in store.manuscript_edges()
+                )
+                targets = proof_target_ids(task, objects)
+                selected = dependency_closure(
+                    targets,
+                    claim_ids={item.claim_id for item in objects},
+                    edges=edges,
+                )
+                if not selected:
+                    selected = set(targets)
+                conjectural = {
+                    item.claim_id
+                    for item in objects
+                    if is_conjectural_assertion(item)
+                }
+                before_states = {
+                    claim_id: str(row["status"])
+                    for claim_id in conjectural
+                    if (row := store.claim_row(claim_id)) is not None
+                }
+                before_questions = tuple(
+                    (
+                        str(row["question_id"]),
+                        str(row["snapshot_commit"]),
+                        str(row["category"]),
+                        str(row["passage"]),
+                        str(row["problem"]),
+                        str(row["resolutions_json"]),
+                        str(row["blocking_claims_json"]),
+                    )
+                    for row in store.open_questions()
+                    if str(row["claim_id"]) in conjectural
+                )
+                _reconcile_conjectural_policy(
+                    store,
+                    snapshot=snapshot,
+                    objects=objects,
+                    edges=edges,
+                    selected=selected,
+                    run_id=int(latest["run_id"]),
+                )
+                after_states = {
+                    claim_id: str(row["status"])
+                    for claim_id in conjectural
+                    if (row := store.claim_row(claim_id)) is not None
+                }
+                after_questions = tuple(
+                    (
+                        str(row["question_id"]),
+                        str(row["snapshot_commit"]),
+                        str(row["category"]),
+                        str(row["passage"]),
+                        str(row["problem"]),
+                        str(row["resolutions_json"]),
+                        str(row["blocking_claims_json"]),
+                    )
+                    for row in store.open_questions()
+                    if str(row["claim_id"]) in conjectural
+                )
+                changed = (
+                    before_states != after_states
+                    or before_questions != after_questions
+                )
+                if changed:
+                    self._write_status_files(store=store)
+        if changed:
+            self._commit_host_changes("Reconcile conjectural assertion policy")
+        return changed

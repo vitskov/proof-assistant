@@ -20,7 +20,11 @@ from .diagnostics import (
 from .graph import affected_claims, build_graph, canonical_cycles
 from .io import atomic_write_json
 from .models import ClaimState, ManuscriptEdge
-from .session import claim_module_path
+from .session import (
+    _reconcile_conjectural_policy,
+    _source_object_from_version,
+    claim_module_path,
+)
 from .store import StateStore
 
 LEAN_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_'.]*(?:\.[A-Za-z_][A-Za-z0-9_']*)*$")
@@ -333,6 +337,24 @@ class IncrementalAgentContext:
                 category="semantic_dependency",
                 message=reason,
                 details={"depends_on": dependency, "kind": kind},
+            )
+            selected = {
+                str(row["claim_id"])
+                for row in store.run_scope_rows(self.run_id, "SELECTED")
+            }
+            if not selected:
+                selected = set(self.allowed_claims)
+            objects = tuple(
+                _source_object_from_version(row)
+                for row in store.claim_versions(self.snapshot)
+            )
+            _reconcile_conjectural_policy(
+                store,
+                snapshot=self.snapshot,
+                objects=objects,
+                edges=tuple((*existing_edges, proposed)),
+                selected=selected,
+                run_id=self.run_id,
             )
         return f"Recorded {claim_id} -> {dependency} ({kind})"
 

@@ -255,5 +255,10 @@ environment; run compiler, package-resource, CLI/TUI smoke, cache doctor, and a
 small real Lean acceptance. Audit secrets, credentials, environments, caches,
 artifacts, and temporary files before any authorized publication.
 
+Installer tests must preserve terminal-editor discovery order (`nano`, `pico`,
+`micro`) and exercise package provisioning through simulated Linux and macOS
+command paths. They must never invoke a real package manager or modify shell
+files outside the test home.
+
 Do not publish or create a release without explicit user authorization. Any
 authorized push is to the user-owned Proof Assistant repository only.

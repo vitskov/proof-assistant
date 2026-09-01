@@ -1467,6 +1467,37 @@ class StateStore:
             )
         )
 
+    def refresh_open_question(
+        self,
+        claim_id: str,
+        *,
+        snapshot: str,
+        category: str,
+        passage: str,
+        problem: str,
+        possible_resolutions: Sequence[str],
+        blocking_claims: Sequence[str],
+    ) -> None:
+        """Refresh deterministic facts for an existing policy question."""
+
+        self.connection.execute(
+            """
+            UPDATE clarifications SET
+                snapshot_commit = ?, category = ?, passage = ?, problem = ?,
+                resolutions_json = ?, blocking_claims_json = ?
+            WHERE claim_id = ? AND status = 'OPEN'
+            """,
+            (
+                snapshot,
+                category,
+                passage,
+                problem,
+                self._json(tuple(possible_resolutions)),
+                self._json(tuple(sorted(set(blocking_claims)))),
+                claim_id,
+            ),
+        )
+
     def question_row(self, question_id: str) -> sqlite3.Row | None:
         return _row(
             self.connection.execute(

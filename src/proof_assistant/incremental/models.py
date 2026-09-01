@@ -24,6 +24,7 @@ class ClaimState(StrEnum):
     UNRESOLVED = "UNRESOLVED"
     SUSPECT_FALSE = "SUSPECT_FALSE"
     COUNTEREXAMPLE_FOUND = "COUNTEREXAMPLE_FOUND"
+    SKIPPED_UNPROVED = "SKIPPED_UNPROVED"
 
 
 TERMINAL_CLAIM_STATES = frozenset(
@@ -33,6 +34,20 @@ TERMINAL_CLAIM_STATES = frozenset(
         ClaimState.BLOCKED_DEPENDENCY,
         ClaimState.UNRESOLVED,
         ClaimState.COUNTEREXAMPLE_FOUND,
+        ClaimState.SKIPPED_UNPROVED,
+    }
+)
+
+
+ASSERTION_KINDS = frozenset(
+    {
+        "claim",
+        "conjecture",
+        "corollary",
+        "lemma",
+        "observation",
+        "proposition",
+        "theorem",
     }
 )
 
@@ -99,6 +114,45 @@ class SourceObject:
 
     def export(self) -> JSONObject:
         return json_object(asdict(self))
+
+
+def is_conjectural_assertion_shape(kind: str, proof_start: int | None) -> bool:
+    """Classify the source shape that is never an independent proof target."""
+
+    return kind in ASSERTION_KINDS and (kind == "conjecture" or proof_start is None)
+
+
+def is_conjectural_assertion(item: SourceObject) -> bool:
+    """Return whether host policy must skip this unsupported assertion.
+
+    A conjecture is never a proof obligation. Other theorem-like assertions
+    become proof obligations only when the manuscript structurally attaches a
+    proof environment. Assumptions, definitions, notation, and equations are
+    supporting objects and are intentionally outside this classification.
+    """
+
+    return is_conjectural_assertion_shape(item.kind, item.proof_start)
+
+
+def is_proof_bearing_assertion(item: SourceObject) -> bool:
+    """Return whether the manuscript presents an assertion with a proof."""
+
+    return item.kind in ASSERTION_KINDS and not is_conjectural_assertion(item)
+
+
+def proof_target_ids(task: TaskSpec, objects: tuple[SourceObject, ...]) -> set[str]:
+    """Resolve proof targets while always excluding conjectural assertions."""
+
+    requested = (
+        set(task.targets)
+        if task.targets
+        else {item.claim_id for item in objects if item.kind in ASSERTION_KINDS}
+    )
+    return {
+        item.claim_id
+        for item in objects
+        if item.claim_id in requested and is_proof_bearing_assertion(item)
+    }
 
 
 @dataclass(frozen=True, slots=True)
