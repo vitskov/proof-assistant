@@ -223,6 +223,11 @@ source location, path from the verification target, and artifact/log paths.
 The **Copyable full outline** tab contains the same information as selectable
 plain text for SSH sessions and issue reports.
 
+When the backend marks an infrastructure incident retryable, the failure screen
+enables **Retry verification** and starts a new durable run while retaining the
+failed run's evidence. Formalization failures that require manuscript or proof
+changes do not enable blind retry.
+
 Several claims may share one prerequisite. The tree marks a repeated occurrence
 as a shared reference and does not expand it indefinitely. If the manuscript
 contains an actual dependency cycle, the map automatically changes to a finite

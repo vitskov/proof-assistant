@@ -681,6 +681,10 @@ the compact sequential composition rather than squeezing the richer layout.
   in the workspace.
 - Error: identify the affected object/row, keep valid state visible, and move
   focus to the remediable item.
+- Retryable verification failure: keep exact failure evidence visible and show
+  **Retry verification** as the primary action only when the backend marks at
+  least one incident retryable. Non-retryable proof failures keep it disabled
+  and identify `Retryable: no` in the exact-reason view.
 - Success: update the authoritative current-value display and show a concise
   status message without navigating unexpectedly.
 - Disabled: retain the control only when it teaches availability; pair it with

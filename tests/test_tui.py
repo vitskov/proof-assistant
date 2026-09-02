@@ -303,6 +303,7 @@ def failure_dependency_report(
     *,
     cycles: bool = False,
     synthetic_root: bool = False,
+    retryable: bool = False,
 ) -> FailureDependencyReport:
     artifact = FailureArtifact(
         path=p.project_path / ".repoprover" / "runs" / "41" / "lean-build.log",
@@ -327,7 +328,7 @@ def failure_dependency_report(
         provenance="lean-build",
         claim_ids=() if synthetic_root else ("lem:broken",),
         batch_index=2,
-        retryable=False,
+        retryable=retryable,
         artifacts=(artifact,),
     )
     extra_nodes = tuple(
@@ -1539,6 +1540,8 @@ async def test_acyclic_failure_report_uses_tree_with_copyable_exact_evidence() -
         await wait_for(pilot, lambda: isinstance(app.screen, FailureDependencyScreen))
         await settle_screen(pilot)
 
+        assert app.screen.query_one("#failure-retry", Button).disabled
+        assert not app.screen.check_action("retry", ())
         tree = app.screen.query_one("#failure-tree", FailureTree)
         assert not app.screen.query("#failure-components").nodes
         assert tree.size.height >= 6
@@ -1625,6 +1628,38 @@ async def test_synthetic_global_failure_root_opens_exact_incident() -> None:
         assert "Verifier state: not available" not in detail.text
         meta = app.screen.query_one("#failure-report-meta", TextArea)
         assert "Incidents: 41" in meta.text
+
+
+@async_test
+async def test_retryable_failure_can_start_a_new_verification_run() -> None:
+    service = FakeWorkflowService()
+    service.verification_release = threading.Event()
+    report = failure_dependency_report(
+        service.project,
+        synthetic_root=True,
+        retryable=True,
+    )
+    snapshot = failed_snapshot(service.project, report)
+    app = ProofAssistantApp(service)
+
+    async with app.run_test(size=(100, 32)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        app.show_snapshot(snapshot)
+        await wait_for(pilot, lambda: isinstance(app.screen, FailureDependencyScreen))
+        await settle_screen(pilot)
+
+        retry = app.screen.query_one("#failure-retry", Button)
+        assert not retry.disabled
+        assert app.screen.check_action("retry", ())
+        retry.press()
+
+        await wait_for(pilot, lambda: bool(service.started_jobs))
+        assert service.started_jobs[0][0] == service.project.project_path
+        assert service.started_jobs[0][1] is None
+        assert isinstance(app.screen, ProgressScreen)
+
+        service.verification_release.set()
+        await wait_for(pilot, lambda: isinstance(app.screen, FindingsScreen))
 
 
 @async_test

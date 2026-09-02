@@ -257,9 +257,10 @@ artifacts, and temporary files before any authorized publication.
 
 Clarification-screen tests must verify that the exact segment is rendered
 inline as read-only, line-numbered, syntax-highlighted LaTeX at every supported
-terminal size. The TUI must not launch an editor or require one during
-installation. Installer tests must never invoke a real package manager or
-modify shell files outside the test home.
+terminal size. The TUI must not launch an editor. Installer tests must preserve
+terminal-editor discovery and installation order (`nano`, `pico`, `micro`) on
+simulated Linux and macOS paths; they must never invoke a real package manager
+or modify shell files outside the test home.
 
 Do not publish or create a release without explicit user authorization. Any
 authorized push is to the user-owned Proof Assistant repository only.

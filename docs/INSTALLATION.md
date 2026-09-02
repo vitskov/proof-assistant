@@ -32,6 +32,11 @@ the compiler toolchain supplied by the distribution. At least one supported AI
 provider is required before verification: Codex, Claude Code, or Copilot CLI,
 or an OpenAI, Anthropic, or Gemini API credential.
 
+The installer also ensures that a basic terminal editor is available. It checks
+for `nano`, `pico`, and `micro`, in that order. If none is present, it attempts
+to install them in the same order. Proof Assistant does not launch this editor
+from the TUI; clarification source remains inline and read-only.
+
 Python, `uv`, elan, Lean, Lake, Proof Assistant, and the tested RepoProver
 checkout are installed or updated by `install.sh`.
 
@@ -42,15 +47,22 @@ The single installer:
 1. checks the operating system, hardware floor, and safe local paths before
    downloading anything;
 2. installs the Proof Assistant source under `~/.local/share/proof-assistant`;
-3. installs the pinned RepoProver checkout under
+3. checks for `nano`, `pico`, then `micro`, and attempts installation in that
+   order only when all three are absent;
+4. installs the pinned RepoProver checkout under
    `~/.local/share/proof-assistant`;
-4. bootstraps elan, the repository's pinned Lean toolchain, Python 3.13, and
+5. bootstraps elan, the repository's pinned Lean toolchain, Python 3.13, and
    checksum-verified `uv` when necessary;
-5. installs the Python environment at `~/.venvs/proof-assistant`;
-6. compiles and runs native and Lean-header probes, initializes the shared
+6. installs the Python environment at `~/.venvs/proof-assistant`;
+7. compiles and runs native and Lean-header probes, initializes the shared
    cache, and runs the test suite; and
-7. adds only guarded PATH entries for elan and Proof Assistant to the startup
+8. adds only guarded PATH entries for elan and Proof Assistant to the startup
    files selected by the user's shell.
+
+Editor provisioning supports Homebrew or MacPorts on macOS and apt, dnf, yum,
+pacman, or zypper on Linux. It never bootstraps a package manager or performs a
+package-index update or system upgrade. If installation needs administrative
+access that is unavailable, the installer exits with a direct explanation.
 
 ## Shell and data safety
 

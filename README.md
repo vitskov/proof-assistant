@@ -48,7 +48,9 @@ proof-assistant
 The installer handles Python, `uv`, elan, Lean/Lake, the tested RepoProver
 checkout, compiler validation, cache initialization, tests, and shell PATH
 setup on both supported operating systems. It preserves existing shell
-configuration. See
+configuration. It also ensures that one basic terminal editor is available,
+checking `nano`, `pico`, then `micro` and attempting installation in that order
+only when all three are absent. See
 [Installation](docs/INSTALLATION.md) for requirements, locations, and the few
 supported overrides.
 

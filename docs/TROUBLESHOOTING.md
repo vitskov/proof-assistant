@@ -136,6 +136,13 @@ env -u LEAN_CC proof-assistant cache init
 proof-assistant cache prepare --project "$PROJECT"
 ```
 
+If an older run reports `Lean extractor returned invalid value_expr`, update or
+reinstall Proof Assistant and reopen the project. That message came from an
+older parser rejecting the extractor's structured JSON expression format; it
+does not indicate a malformed manuscript. The current parser accepts the
+format, and retryable infrastructure reports provide **Retry verification**
+without deleting the failed run's evidence.
+
 Schema-1 and schema-2 cache configurations migrate automatically. A deliberate
 external compiler remains supported through `--lean-cc /absolute/path/to/cc`.
 Select an exact model/difficulty advertised for the chosen driver. A

@@ -6,7 +6,7 @@ from collections.abc import Mapping, Sequence
 from importlib.resources import files
 from pathlib import Path
 
-from ..json_types import JSONObject, json_object, load_json
+from ..json_types import JSONObject, JSONValue, json_object, load_json
 from .io import atomic_write_bytes, atomic_write_json, canonical_hash, sha256_path
 from .models import LeanDeclaration
 
@@ -27,6 +27,13 @@ def install_dependency_extractor(project: Path) -> Path:
 def _required_string(payload: JSONObject, key: str) -> str:
     value = payload.get(key)
     if not isinstance(value, str):
+        raise LeanExtractionError(f"Lean extractor returned invalid {key}")
+    return value
+
+
+def _required_expression(payload: JSONObject, key: str) -> list[JSONValue]:
+    value = payload.get(key)
+    if not isinstance(value, list) or not value:
         raise LeanExtractionError(f"Lean extractor returned invalid {key}")
     return value
 
@@ -55,13 +62,16 @@ def _declaration_from_payload(payload: JSONObject) -> LeanDeclaration:
         isinstance(item, str) for item in axioms
     ):
         raise LeanExtractionError("Lean extractor returned invalid axioms")
+    type_expr = _required_expression(payload, "type_expr")
     value_expr = payload["value_expr"]
-    if value_expr is not None and not isinstance(value_expr, str):
+    if value_expr is not None and (
+        not isinstance(value_expr, list) or not value_expr
+    ):
         raise LeanExtractionError("Lean extractor returned invalid value_expr")
     return LeanDeclaration(
         name=_required_string(payload, "name"),
         kind=_required_string(payload, "kind"),
-        type_hash=canonical_hash(_required_string(payload, "type_expr")),
+        type_hash=canonical_hash(type_expr),
         value_hash=None if value_expr is None else canonical_hash(value_expr),
         direct_dependencies=tuple(sorted(set(dependencies))),
         axioms=tuple(sorted(set(axioms))),

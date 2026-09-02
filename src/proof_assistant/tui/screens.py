@@ -2575,7 +2575,7 @@ def _status_label(
 class FailureDependencyScreen(NoticeScreen):
     """Interactive terminal explanation of one backend-owned failure report."""
 
-    BINDINGS = [BACK.binding(), CLOSE.binding(), REPORT.binding()]
+    BINDINGS = [RETRY.binding(), BACK.binding(), CLOSE.binding(), REPORT.binding()]
 
     def __init__(
         self,
@@ -2662,7 +2662,13 @@ class FailureDependencyScreen(NoticeScreen):
                                 expand=True,
                             )
             with ActionBar():
-                yield Button("Back", id="failure-back", variant="primary")
+                yield Button(
+                    "Retry verification",
+                    id="failure-retry",
+                    variant="primary",
+                    disabled=not self._retryable,
+                )
+                yield Button("Back", id="failure-back")
                 yield Button(
                     "View verification report",
                     id="failure-open-report",
@@ -2725,6 +2731,13 @@ class FailureDependencyScreen(NoticeScreen):
                 (node, child, depth + 1) for child in reversed(item.children)
             )
         return tree
+
+    @property
+    def _retryable(self) -> bool:
+        return bool(
+            self.report
+            and any(incident.retryable for incident in self.report.incidents)
+        )
 
     def _make_component_table(self) -> DataTable[str | Text]:
         assert self.report is not None
@@ -3083,14 +3096,30 @@ class FailureDependencyScreen(NoticeScreen):
         else:
             self.proof_app.switch_screen(RecoveryScreen(self.snapshot))
 
+    def action_retry(self) -> None:
+        if self._retryable:
+            self.proof_app.start_verification(self.snapshot.project, None)
+
     def action_close(self) -> None:
         self.proof_app.show_welcome()
 
     def action_report(self) -> None:
         self.proof_app.view_report(self.snapshot)
 
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if action == "retry":
+            return self._retryable
+        if action == "report":
+            return bool(
+                self.snapshot.findings
+                and self.snapshot.findings.report_path is not None
+            )
+        return True
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "failure-back":
+        if event.button.id == "failure-retry":
+            self.action_retry()
+        elif event.button.id == "failure-back":
             self.action_back()
         elif event.button.id == "failure-open-report":
             self.action_report()
