@@ -7,7 +7,11 @@ import pytest
 
 from proof_assistant.incremental.models import ClaimState, SourceObject
 from proof_assistant.incremental.orchestration import _preflight_proof_batches
-from proof_assistant.incremental.session import IncrementalSession, utc_now
+from proof_assistant.incremental.session import (
+    IncrementalSession,
+    _source_object_from_version,
+    utc_now,
+)
 from proof_assistant.incremental.store import StateStore
 
 
@@ -63,7 +67,11 @@ def test_schema_one_database_migrates_to_current_failure_and_run_schema(tmp_path
     connection.close()
 
     with StateStore(database) as store:
-        assert store.get_metadata("schema_version") == "3"
+        assert store.get_metadata("schema_version") == "4"
+        claim_version_columns = {
+            str(row[1])
+            for row in store.connection.execute("PRAGMA table_info(claim_versions)")
+        }
         tables = {
             str(row[0])
             for row in store.connection.execute(
@@ -80,6 +88,59 @@ def test_schema_one_database_migrates_to_current_failure_and_run_schema(tmp_path
         "failure_artifacts",
         "run_concurrency",
     } <= tables
+    assert {"assistant_context", "assistant_references_json"} <= (
+        claim_version_columns
+    )
+
+
+def test_schema_three_populated_claim_version_gets_empty_assistant_defaults(tmp_path):
+    database = tmp_path / "legacy-populated.sqlite3"
+    connection = sqlite3.connect(database)
+    connection.executescript(
+        """
+        CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        INSERT INTO metadata(key, value) VALUES ('schema_version', '3');
+        CREATE TABLE claim_versions (
+            snapshot_commit TEXT NOT NULL,
+            claim_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            source_file TEXT NOT NULL,
+            environment TEXT NOT NULL,
+            label TEXT,
+            ordinal INTEGER NOT NULL,
+            statement_start INTEGER NOT NULL,
+            statement_end INTEGER NOT NULL,
+            statement_byte_start INTEGER NOT NULL,
+            statement_byte_end INTEGER NOT NULL,
+            proof_start INTEGER,
+            proof_end INTEGER,
+            proof_byte_start INTEGER,
+            proof_byte_end INTEGER,
+            statement_hash TEXT NOT NULL,
+            proof_hash TEXT NOT NULL,
+            normalized_statement_hash TEXT NOT NULL,
+            statement_text TEXT NOT NULL,
+            proof_text TEXT NOT NULL,
+            references_json TEXT NOT NULL,
+            PRIMARY KEY (snapshot_commit, claim_id)
+        );
+        INSERT INTO claim_versions VALUES (
+            'snapshot', 'T', 'theorem', 'main.tex', 'theorem', 'T', 1,
+            0, 9, 0, 9, NULL, NULL, NULL, NULL,
+            'statement', 'proof', 'normalized', 'Claim T', '', '[]'
+        );
+        """
+    )
+    connection.close()
+
+    with StateStore(database) as store:
+        row = store.claim_version("snapshot", "T")
+        assert row is not None
+        assert row["assistant_context"] == ""
+        assert json.loads(row["assistant_references_json"]) == []
+        restored = _source_object_from_version(row)
+    assert restored.assistant_context == ""
+    assert restored.assistant_references == ()
 
 
 def test_run_concurrency_provenance_records_initial_and_final_state(tmp_path):
@@ -196,7 +257,7 @@ def test_failure_claim_attribution_must_stay_inside_run_scope(tmp_path):
 def test_contract_schema_version_is_persisted_as_integer(tmp_path):
     store, _run_id = _run_with_claim(tmp_path, ClaimState.INVALIDATED)
     try:
-        assert json.loads(store.get_metadata("schema_version") or "0") == 3
+        assert json.loads(store.get_metadata("schema_version") or "0") == 4
     finally:
         store.close()
 

@@ -119,6 +119,78 @@ def test_certification_requires_dependencies_then_records_kernel_provenance(tmp_
         store.close()
 
 
+def test_certification_uses_guided_anchor_without_certifying_unproved_claim(tmp_path):
+    store = StateStore(tmp_path / "state.sqlite3")
+    run_id = store.begin_run(command="verify", started_at="now")
+    objects = tuple(source_object(claim_id) for claim_id in ("D", "U", "F"))
+    edges = (
+        ManuscriptEdge("D", "U", "explicit_ref", "latex_ref"),
+        ManuscriptEdge(
+            "U", "F", "assistant_context", "assistant_annotation"
+        ),
+    )
+    store.replace_current_claims(
+        "snapshot",
+        objects,
+        run_id=run_id,
+        state_updates={
+            "D": ClaimState.PROVING,
+            "U": ClaimState.SKIPPED_UNPROVED,
+            "F": ClaimState.PROVING,
+        },
+    )
+    store.replace_manuscript_edges("snapshot", edges)
+    store.set_correspondence("D", "ManuscriptVerification.D", run_id=run_id)
+    store.set_correspondence("F", "ManuscriptVerification.F", run_id=run_id)
+    declarations = (
+        declaration(
+            "ManuscriptVerification.D",
+            dependencies=("ManuscriptVerification.F",),
+        ),
+        declaration("ManuscriptVerification.F"),
+    )
+    try:
+        first = certify_current_correspondence(
+            store,
+            run_id=run_id,
+            snapshot="snapshot",
+            objects=objects,
+            edges=edges,
+            declarations=declarations,
+            environment_hash="environment",
+            lean_version="4.28.0",
+            mathlib_revision="mathlib",
+            baseline_project_axioms=set(),
+        )
+        assert first.certified == ("F",)
+        assert store.certificate("D") is None
+        assert store.certificate("U") is None
+        assert store.claim_row("U")["status"] == str(ClaimState.SKIPPED_UNPROVED)
+
+        second = certify_current_correspondence(
+            store,
+            run_id=run_id,
+            snapshot="snapshot",
+            objects=objects,
+            edges=edges,
+            declarations=declarations,
+            environment_hash="environment",
+            lean_version="4.28.0",
+            mathlib_revision="mathlib",
+            baseline_project_axioms=set(),
+        )
+        assert "D" in second.certified
+        certificate = store.certificate("D")
+        assert json.loads(certificate["dependencies_json"]) == ["U"]
+        assert json.loads(certificate["lean_dependencies_json"]) == [
+            "ManuscriptVerification.F"
+        ]
+        assert store.certificate("U") is None
+        assert store.claim_row("U")["status"] == str(ClaimState.SKIPPED_UNPROVED)
+    finally:
+        store.close()
+
+
 def test_certification_rejects_sorry_new_axioms_direct_axioms_and_missing_values(
     tmp_path,
 ):

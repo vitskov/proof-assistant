@@ -111,6 +111,8 @@ class SourceObject:
     statement_text: str
     proof_text: str
     references: tuple[str, ...]
+    assistant_context: str = ""
+    assistant_references: tuple[str, ...] = ()
 
     def export(self) -> JSONObject:
         return json_object(asdict(self))

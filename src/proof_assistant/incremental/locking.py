@@ -58,6 +58,20 @@ def project_session_active(project: Path) -> bool:
 
 
 @contextmanager
+def graph_mutation_lock(project: Path) -> Iterator[None]:
+    """Serialize proof-worker dependency proposals across batch processes."""
+
+    lock_path = project / ".repoprover" / "graph-mutation.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+b") as stream:
+        fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
 def project_lock(
     project: Path, *, exclusive: bool, wait: bool = False
 ) -> Iterator[None]:

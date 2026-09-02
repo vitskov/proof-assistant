@@ -1877,7 +1877,7 @@ class ProofAssistantWorkflow:
         persistent_edges = tuple(
             edge
             for edge in old_edges
-            if edge.kind != "explicit_ref"
+            if edge.kind not in {"explicit_ref", "assistant_context"}
             and edge.src in current_ids
             and edge.dst in current_ids
         )
@@ -1886,7 +1886,7 @@ class ProofAssistantWorkflow:
             for edge in (*explicit_edges, *persistent_edges)
         }
         edges = tuple(edge_map[key] for key in sorted(edge_map))
-        statement, proof, deleted = source_changes(
+        statement, assistant_context, proof, deleted = source_changes(
             previous_rows, objects, mode=task.mode
         )
         added = {claim_id for claim_id in statement if claim_id not in previous_rows}
@@ -1903,7 +1903,12 @@ class ProofAssistantWorkflow:
             (edge.src, edge.dst, edge.kind): edge for edge in (*old_edges, *edges)
         }
         affected = affected_claims(
-            statement | added | proof | deleted | dependency_changed,
+            statement
+            | assistant_context
+            | added
+            | proof
+            | deleted
+            | dependency_changed,
             claim_ids=union_ids,
             edges=union_edges.values(),
         )
@@ -1942,6 +1947,14 @@ class ProofAssistantWorkflow:
         direct.extend(
             ClaimImpact(claim_id, ClaimChangeKind.STATEMENT, object_files.get(claim_id))
             for claim_id in sorted(statement)
+        )
+        direct.extend(
+            ClaimImpact(
+                claim_id,
+                ClaimChangeKind.ASSISTANT_CONTEXT,
+                object_files.get(claim_id),
+            )
+            for claim_id in sorted(assistant_context)
         )
         direct.extend(
             ClaimImpact(
@@ -1991,7 +2004,8 @@ class ProofAssistantWorkflow:
             sorted(
                 str(question["question_id"])
                 for question in open_questions
-                if str(question["claim_id"]) in statement | added | proof | deleted
+                if str(question["claim_id"])
+                in statement | assistant_context | added | proof | deleted
             )
         )
         identity = {

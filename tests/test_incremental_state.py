@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import shutil
+from concurrent.futures import ProcessPoolExecutor
+from multiprocessing import Manager
 from pathlib import Path
 
 import pytest
@@ -10,8 +12,13 @@ from proof_assistant.incremental.agent import (
     IncrementalAgentContext,
     write_batch_context,
 )
+from proof_assistant.incremental.graph import (
+    build_graph,
+    canonical_cycles,
+    ready_frontier,
+)
 from proof_assistant.incremental.locking import project_lock
-from proof_assistant.incremental.models import ClaimState
+from proof_assistant.incremental.models import ClaimState, ManuscriptEdge
 from proof_assistant.incremental.session import IncrementalSession, utc_now
 from proof_assistant.incremental.store import StateStore
 
@@ -92,6 +99,37 @@ def finish_prepared(session: IncrementalSession, run_id: int) -> None:
             completed_at=utc_now(),
             detail="test finalized",
         )
+
+
+def _propose_dependency_in_process(
+    project: str,
+    run_id: int,
+    snapshot: str,
+    claim_id: str,
+    dependency: str,
+    start_event,
+) -> tuple[str, str]:
+    start_event.wait(timeout=10)
+    context = IncrementalAgentContext(
+        project=Path(project),
+        workspace=Path(project),
+        run_id=run_id,
+        snapshot=snapshot,
+        previous_snapshot=None,
+        allowed_claims=frozenset({claim_id}),
+    )
+    try:
+        result = context.claim_propose_dependency(
+            {
+                "claim_id": claim_id,
+                "depends_on": dependency,
+                "kind": "semantic",
+                "reason": f"Concurrent test proposal {claim_id} -> {dependency}",
+            }
+        )
+    except ValueError as exc:
+        return "error", str(exc)
+    return "ok", result
 
 
 def test_batch_context_records_effective_resource_admission_contract(tmp_path):
@@ -221,6 +259,54 @@ def test_unproved_dependency_asks_only_for_proof_bearing_dependents(tmp_path):
             assert store.claim_row("conj:needed")["status"] == str(
                 ClaimState.NEEDS_CLARIFICATION
             )
+    finally:
+        finish_prepared(session, prepared.run_id)
+
+
+def test_assistant_guided_deferred_theorem_uses_later_proved_anchor_without_question(
+    tmp_path,
+):
+    _source, session = initialize_document(
+        tmp_path,
+        r"""
+\documentclass{article}
+\usepackage{amsthm}
+\newtheorem{theorem}{Theorem}
+\newtheorem{corollary}{Corollary}
+\begin{document}
+%% assistant: The abridged result is a corollary of the stronger proved
+%% \Cref{thm:full}; verify that relationship rather than using this note as proof.
+\begin{theorem}\label{thm:abridged}The abridged result.\end{theorem}
+\begin{corollary}\label{cor:dependent}A dependent result.\end{corollary}
+\begin{proof}Apply \cref{thm:abridged}.\end{proof}
+\begin{theorem}\label{thm:full}The stronger result.\end{theorem}
+\begin{proof}A complete manuscript proof.\end{proof}
+\end{document}
+""",
+        targets=("cor:dependent",),
+    )
+
+    prepared = session.prepare_pass()
+    try:
+        assert prepared.selected == frozenset(
+            {"thm:abridged", "thm:full", "cor:dependent"}
+        )
+        with StateStore(session.database_path) as store:
+            assert store.open_questions() == []
+            assert store.claim_row("thm:abridged")["status"] == str(
+                ClaimState.SKIPPED_UNPROVED
+            )
+            context = IncrementalAgentContext(
+                project=session.project,
+                workspace=session.project,
+                run_id=prepared.run_id,
+                snapshot=prepared.snapshot.commit,
+                previous_snapshot=prepared.snapshot.previous_commit,
+                allowed_claims=frozenset({"cor:dependent", "thm:full"}),
+            )
+            claim = json.loads(context.claim_get({"claim_id": "thm:abridged"}))
+            assert claim["assistant_references"] == ["thm:full"]
+            assert "corollary of the stronger proved" in claim["assistant_context"]
     finally:
         finish_prepared(session, prepared.run_id)
 
@@ -584,6 +670,186 @@ def test_agent_discovered_dependency_on_unproved_claim_creates_question(tmp_path
             assert store.claim_row("conj:semantic")["status"] == str(
                 ClaimState.NEEDS_CLARIFICATION
             )
+    finally:
+        finish_prepared(session, prepared.run_id)
+
+
+def test_agent_dependency_expands_scope_through_assistant_guided_anchor(tmp_path):
+    _source, session = initialize_document(
+        tmp_path,
+        r"""
+\documentclass{article}
+\usepackage{amsthm}
+\newtheorem{theorem}{Theorem}
+\begin{document}
+\begin{theorem}\label{D}A proved target.\end{theorem}
+\begin{proof}The dependency is implicit.\end{proof}
+%% assistant: This abridged claim follows from the stronger proved \Cref{F}.
+\begin{theorem}\label{U}An abridged deferred claim.\end{theorem}
+\begin{theorem}\label{F}The full result.\end{theorem}
+\begin{proof}A complete proof.\end{proof}
+\end{document}
+""",
+        targets=("D",),
+    )
+    prepared = session.prepare_pass()
+    context = IncrementalAgentContext(
+        project=session.project,
+        workspace=session.project,
+        run_id=prepared.run_id,
+        snapshot=prepared.snapshot.commit,
+        previous_snapshot=prepared.snapshot.previous_commit,
+        allowed_claims=frozenset({"D"}),
+    )
+    try:
+        assert prepared.selected == frozenset({"D"})
+        context.claim_propose_dependency(
+            {
+                "claim_id": "D",
+                "depends_on": "U",
+                "kind": "semantic",
+                "reason": "The target proof uses the abridged result.",
+            }
+        )
+        with StateStore(session.database_path) as store:
+            selected = {
+                str(row["claim_id"])
+                for row in store.run_scope_rows(prepared.run_id, "SELECTED")
+            }
+            assert selected == {"D", "U", "F"}
+            assert store.open_questions() == []
+            edges = tuple(
+                ManuscriptEdge(
+                    str(row["src"]),
+                    str(row["dst"]),
+                    str(row["edge_kind"]),
+                    str(row["provenance"]),
+                    bool(row["approved"]),
+                )
+                for row in store.manuscript_edges()
+            )
+            states = {
+                str(row["claim_id"]): ClaimState(str(row["status"]))
+                for row in store.current_claim_rows()
+            }
+            assert ready_frontier(states, selected=selected, edges=edges) == ("F",)
+            store.set_claim_state(
+                "F",
+                ClaimState.CERTIFIED,
+                run_id=prepared.run_id,
+                action="test",
+                reason="Test anchor certificate",
+            )
+            states["F"] = ClaimState.CERTIFIED
+            assert ready_frontier(states, selected=selected, edges=edges) == ("D",)
+    finally:
+        finish_prepared(session, prepared.run_id)
+
+
+def test_concurrent_dependency_proposals_union_scope_and_reject_combined_cycle(
+    tmp_path,
+):
+    _source, session = initialize_document(
+        tmp_path,
+        r"""
+\documentclass{article}
+\usepackage{amsthm}
+\newtheorem{theorem}{Theorem}
+\begin{document}
+\begin{theorem}\label{D1}Target one.\end{theorem}
+\begin{proof}Implicit dependency one.\end{proof}
+\begin{theorem}\label{D2}Target two.\end{theorem}
+\begin{proof}Implicit dependency two.\end{proof}
+\begin{theorem}\label{A}Cycle candidate A.\end{theorem}
+\begin{proof}Proof A.\end{proof}
+\begin{theorem}\label{B}Cycle candidate B.\end{theorem}
+\begin{proof}Proof B.\end{proof}
+%% assistant: Deferred U1 follows from \Cref{F1}.
+\begin{theorem}\label{U1}Deferred one.\end{theorem}
+\begin{theorem}\label{F1}Full one.\end{theorem}
+\begin{proof}Full proof one.\end{proof}
+%% assistant: Deferred U2 follows from \Cref{F2}.
+\begin{theorem}\label{U2}Deferred two.\end{theorem}
+\begin{theorem}\label{F2}Full two.\end{theorem}
+\begin{proof}Full proof two.\end{proof}
+\end{document}
+""",
+        targets=("D1", "D2", "A", "B"),
+    )
+    prepared = session.prepare_pass()
+    try:
+        with Manager() as manager:
+            start = manager.Event()
+            with ProcessPoolExecutor(max_workers=2) as executor:
+                futures = (
+                    executor.submit(
+                        _propose_dependency_in_process,
+                        str(session.project),
+                        prepared.run_id,
+                        prepared.snapshot.commit,
+                        claim_id,
+                        dependency,
+                        start,
+                    )
+                    for claim_id, dependency in (("D1", "U1"), ("D2", "U2"))
+                )
+                futures = tuple(futures)
+                start.set()
+                results = tuple(future.result(timeout=20) for future in futures)
+            assert {status for status, _detail in results} == {"ok"}
+
+            with StateStore(session.database_path) as store:
+                selected = {
+                    str(row["claim_id"])
+                    for row in store.run_scope_rows(prepared.run_id, "SELECTED")
+                }
+                assert {"D1", "U1", "F1", "D2", "U2", "F2"} <= selected
+                semantic_edges = {
+                    (str(row["src"]), str(row["dst"]))
+                    for row in store.manuscript_edges()
+                    if row["provenance"] == "formalization_discovered"
+                }
+                assert {("D1", "U1"), ("D2", "U2")} <= semantic_edges
+
+            start = manager.Event()
+            with ProcessPoolExecutor(max_workers=2) as executor:
+                futures = tuple(
+                    executor.submit(
+                        _propose_dependency_in_process,
+                        str(session.project),
+                        prepared.run_id,
+                        prepared.snapshot.commit,
+                        claim_id,
+                        dependency,
+                        start,
+                    )
+                    for claim_id, dependency in (("A", "B"), ("B", "A"))
+                )
+                start.set()
+                cycle_results = tuple(
+                    future.result(timeout=20) for future in futures
+                )
+            assert sorted(status for status, _detail in cycle_results) == [
+                "error",
+                "ok",
+            ]
+            assert any(
+                "create a cycle" in detail
+                for status, detail in cycle_results
+                if status == "error"
+            )
+        with StateStore(session.database_path) as store:
+            edges = tuple(
+                ManuscriptEdge(
+                    str(row["src"]),
+                    str(row["dst"]),
+                    str(row["edge_kind"]),
+                    str(row["provenance"]),
+                    bool(row["approved"]),
+                )
+                for row in store.manuscript_edges()
+            )
+        assert canonical_cycles(build_graph({"A", "B"}, edges)) == ()
     finally:
         finish_prepared(session, prepared.run_id)
 

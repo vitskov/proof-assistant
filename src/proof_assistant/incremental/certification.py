@@ -4,6 +4,7 @@ import json
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from .graph import unsatisfied_dependencies
 from .lean import reject_forbidden_axioms
 from .models import ClaimState, LeanDeclaration, ManuscriptEdge, SourceObject
 from .store import StateStore
@@ -65,14 +66,13 @@ def certify_current_correspondence(
         if declaration.value_hash is None:
             rejected.append((claim_id, "Lean declaration has no proof/value body"))
             continue
-        uncertified_dependencies: list[str] = []
-        for dependency in dependencies.get(claim_id, []):
-            dependency_row = store.claim_row(dependency)
-            if (
-                dependency_row is None
-                or dependency_row["status"] != ClaimState.CERTIFIED
-            ):
-                uncertified_dependencies.append(dependency)
+        states = {
+            str(row["claim_id"]): ClaimState(str(row["status"]))
+            for row in store.current_claim_rows()
+        }
+        uncertified_dependencies = unsatisfied_dependencies(
+            claim_id, states=states, edges=edges
+        )
         if (
             uncertified_dependencies
             and str(correspondence["status"]) != "counterexample"

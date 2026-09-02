@@ -87,6 +87,26 @@ def test_change_plan_is_nonmutating_and_includes_transitive_impact(tmp_path):
         assert int(store.latest_run()["run_id"]) == before_runs
 
 
+def test_change_plan_labels_assistant_context_separately_from_statement(tmp_path):
+    source, project, workflow = setup_project(tmp_path)
+    path = source / "main.tex"
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(
+            r"\begin{lemma}\label{lem:zero-add}",
+            "%% assistant: Use the natural-number induction context.\n"
+            r"\begin{lemma}\label{lem:zero-add}",
+        ),
+        encoding="utf-8",
+    )
+    plan = workflow.plan_changes(project)
+    assert plan is not None
+    impacts = {
+        (item.claim_id, item.kind) for item in plan.direct_claim_changes
+    }
+    assert ("lem:zero-add", ClaimChangeKind.ASSISTANT_CONTEXT) in impacts
+    assert ("lem:zero-add", ClaimChangeKind.STATEMENT) not in impacts
+
+
 def test_task_change_is_separate_from_external_file_changes(tmp_path):
     _source, project, workflow = setup_project(tmp_path)
     task = project / "VERIFY.yaml"

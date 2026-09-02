@@ -94,6 +94,7 @@ class FileChangeKind(StrEnum):
 class ClaimChangeKind(StrEnum):
     ADDED = "ADDED"
     STATEMENT = "STATEMENT"
+    ASSISTANT_CONTEXT = "ASSISTANT_CONTEXT"
     PROOF_ONLY = "PROOF_ONLY"
     DEPENDENCY = "DEPENDENCY"
     DELETED = "DELETED"

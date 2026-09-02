@@ -101,7 +101,9 @@ and records new state rather than overwriting its explanation.
 ## Change detection and invalidation
 
 Every source object has exact statement/proof hashes and a whitespace/comment
-normalized statement hash. A pass distinguishes:
+normalized statement hash. Author-to-assistant context is tracked separately;
+changing it invalidates the attached claim's AI input without pretending that
+the mathematical statement itself changed. A pass distinguishes:
 
 - no relevant change: preserve state;
 - proof-only edit in theorem mode: preserve the theorem certificate;
@@ -150,6 +152,34 @@ reconciles and supersedes legacy self-blocking conjecture questions.
 Agent-discovered semantic edges are tied to the current source argument: an
 edit to their dependent assertion retires those edges and schedules fresh
 dependency discovery, so removing a reliance also clears its policy question.
+
+### Author-to-assistant LaTeX comments
+
+Place an assistant comment block immediately before the mathematical
+environment it describes:
+
+```latex
+%% assistant: This abridged theorem is a corollary of the stronger proved
+%% \Cref{thm:full}; use the full theorem when checking later dependents.
+\begin{theorem}\label{thm:abridged}
+  ...
+\end{theorem}
+```
+
+The exact contract is:
+
+- `%% assistant:` starts the block;
+- immediately following `%%` lines continue it;
+- the first ordinary LaTeX line ends it; and
+- the block applies only to the indexed object it immediately precedes.
+
+Proof workers receive the block as `assistant_context`. It is advisory author
+context, never a premise, proof, certificate, or source of claim identity. A
+valid `\ref`, `\cref`, or related reference in the block adds an advisory graph
+edge. For an unproved abridged claim, that edge allows the scheduler to certify
+the referenced stronger claim first and then attempt dependents directly from
+kernel-checked facts. The abridged claim remains `SKIPPED_UNPROVED` and is never
+silently certified from the comment.
 
 Edit the authoritative manuscript. The workflow service creates a complete
 `ChangeImpactPlan` and the TUI shows the file changes, changed claims, and

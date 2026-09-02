@@ -100,6 +100,9 @@ internally. Do not reintroduce a user-facing external task-file workflow.
   same host allowlist.
 - RepoProver/host tools remain the mutation control plane.
 - Only an independently built Lean declaration can create a certificate.
+- `%% assistant:` LaTeX blocks are author-supplied advisory context. Expose
+  them through structured claim data, verify any referenced relationship, and
+  never treat the comment itself as a premise, proof, or certificate.
 - Unsuccessful proof search is not evidence of falsity.
 - Clarification presentation may improve wording but cannot change the selected
   source path/span, quotation, diagnostics, claim, or affected proof graph.

@@ -1214,6 +1214,10 @@ def _incremental_objects_and_edges(
                 statement_text=str(row["statement_text"]),
                 proof_text=str(row["proof_text"]),
                 references=tuple(json.loads(row["references_json"])),
+                assistant_context=str(row["assistant_context"]),
+                assistant_references=tuple(
+                    json.loads(row["assistant_references_json"])
+                ),
             )
             for row in store.claim_versions(snapshot)
         )

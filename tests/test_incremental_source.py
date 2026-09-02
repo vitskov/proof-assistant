@@ -8,6 +8,8 @@ from proof_assistant.incremental.graph import (
     canonical_cycles,
     dependency_closure,
     ready_frontier,
+    source_changes,
+    unsatisfied_dependencies,
 )
 from proof_assistant.incremental.latex import (
     LatexIndexError,
@@ -87,6 +89,106 @@ def test_theorem_without_proof_and_unresolved_reference_are_preserved(tmp_path):
     edges, unresolved = explicit_reference_graph(objects)
     assert edges == ()
     assert unresolved == (("t", "missing"),)
+
+
+def test_assistant_comment_block_attaches_only_to_next_object_and_adds_advisory_edge(
+    tmp_path,
+):
+    source = tmp_path / "paper"
+    source.mkdir()
+    (source / "main.tex").write_text(
+        r"""
+%% assistant: The abridged theorem is a corollary of
+%% the stronger proved \Cref{thm:full} below.
+\begin{theorem}\label{thm:abridged}Abridged.\end{theorem}
+Ordinary manuscript prose ends any association.
+%% assistant: This note must not leak.
+Ordinary manuscript prose.
+\begin{theorem}\label{thm:full}Full.\end{theorem}
+\begin{proof}Proof.\end{proof}
+""",
+        encoding="utf-8",
+    )
+    with StateStore(tmp_path / "state.sqlite3") as store:
+        objects = index_manuscript(source, store, main_file="main.tex")
+    by_id = {item.claim_id: item for item in objects}
+    assert by_id["thm:abridged"].assistant_context == (
+        "The abridged theorem is a corollary of\n"
+        "the stronger proved \\Cref{thm:full} below."
+    )
+    assert by_id["thm:abridged"].assistant_references == ("thm:full",)
+    assert by_id["thm:full"].assistant_context == ""
+    edges, unresolved = explicit_reference_graph(objects)
+    assert unresolved == ()
+    assert [
+        (edge.src, edge.dst, edge.kind, edge.provenance) for edge in edges
+    ] == [
+        (
+            "thm:abridged",
+            "thm:full",
+            "assistant_context",
+            "assistant_annotation",
+        )
+    ]
+
+
+def test_assistant_context_change_invalidates_ai_input_not_statement_hash(tmp_path):
+    source = tmp_path / "paper"
+    source.mkdir()
+    tex = source / "main.tex"
+    tex.write_text(
+        "%% assistant: First note.\n"
+        r"\begin{theorem}\label{t}Claim.\end{theorem}",
+        encoding="utf-8",
+    )
+    with StateStore(tmp_path / "state.sqlite3") as store:
+        first = index_manuscript(source, store, main_file="main.tex")
+        store.replace_current_claims(
+            "snapshot-a",
+            first,
+            run_id=1,
+            state_updates={"t": ClaimState.SKIPPED_UNPROVED},
+        )
+        previous = {"t": store.claim_version("snapshot-a", "t")}
+        tex.write_text(
+            "%% assistant: Revised note.\n"
+            r"\begin{theorem}\label{t}Claim.\end{theorem}",
+            encoding="utf-8",
+        )
+        second = index_manuscript(source, store, main_file="main.tex")
+    assert first[0].statement_hash == second[0].statement_hash
+    statement, assistant, proof, deleted = source_changes(
+        previous, second, mode="theorem"
+    )
+    assert statement == set()
+    assert assistant == {"t"}
+    assert proof == set()
+    assert deleted == set()
+
+
+def test_guided_unproved_dependency_is_transparent_only_after_anchor_certified():
+    edges = (
+        ManuscriptEdge("dependent", "abridged", "explicit_ref", "latex_ref"),
+        ManuscriptEdge(
+            "abridged",
+            "full",
+            "assistant_context",
+            "assistant_annotation",
+        ),
+    )
+    selected = {"dependent", "abridged", "full"}
+    states = {
+        "dependent": ClaimState.DISCOVERED,
+        "abridged": ClaimState.SKIPPED_UNPROVED,
+        "full": ClaimState.DISCOVERED,
+    }
+    assert ready_frontier(states, selected=selected, edges=edges) == ("full",)
+    assert unsatisfied_dependencies("dependent", states=states, edges=edges) == (
+        "abridged",
+    )
+    states["full"] = ClaimState.CERTIFIED
+    assert ready_frontier(states, selected=selected, edges=edges) == ("dependent",)
+    assert unsatisfied_dependencies("dependent", states=states, edges=edges) == ()
 
 
 def test_duplicate_labels_fail_closed(tmp_path):

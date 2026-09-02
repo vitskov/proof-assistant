@@ -384,6 +384,11 @@ class ClarificationPresenter:
             "start_line": location.start_line,
             "end_line": location.end_line,
         }
+        version = store.claim_version(
+            str(question["snapshot_commit"]), str(question["claim_id"])
+        )
+        if version is not None and str(version["assistant_context"]).strip():
+            facts["assistant_context"] = str(version["assistant_context"])
         return resolutions, blocked, location, facts
 
     def _present(

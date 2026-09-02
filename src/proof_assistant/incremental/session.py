@@ -118,6 +118,15 @@ def _source_object_from_version(row: sqlite3.Row) -> SourceObject:
         isinstance(item, str) for item in references
     ):
         raise IncrementalProjectError("Persisted claim references are malformed")
+    assistant_references = json.loads(
+        str(payload.get("assistant_references_json", "[]"))
+    )
+    if not isinstance(assistant_references, list) or not all(
+        isinstance(item, str) for item in assistant_references
+    ):
+        raise IncrementalProjectError(
+            "Persisted assistant-context references are malformed"
+        )
     return SourceObject(
         claim_id=str(payload["claim_id"]),
         kind=str(payload["kind"]),
@@ -153,6 +162,8 @@ def _source_object_from_version(row: sqlite3.Row) -> SourceObject:
         statement_text=str(payload["statement_text"]),
         proof_text=str(payload["proof_text"]),
         references=tuple(references),
+        assistant_context=str(payload.get("assistant_context", "")),
+        assistant_references=tuple(assistant_references),
     )
 
 
@@ -173,6 +184,11 @@ def _reconcile_conjectural_policy(
     blockers = conjectural_dependency_blockers(
         objects, selected=selected, edges=edges
     )
+    guided_claims = {
+        edge.src
+        for edge in edges
+        if edge.approved and edge.kind == "assistant_context"
+    }
     open_by_claim: dict[str, list[sqlite3.Row]] = {}
     for question in store.open_questions():
         open_by_claim.setdefault(str(question["claim_id"]), []).append(question)
@@ -180,7 +196,7 @@ def _reconcile_conjectural_policy(
     by_id = {item.claim_id: item for item in objects}
     for claim_id in sorted(skipped):
         blocked_claims = blockers.get(claim_id, ())
-        if blocked_claims:
+        if blocked_claims and claim_id not in guided_claims:
             item = by_id[claim_id]
             category = "conjectural_dependency"
             passage = item.statement_text.strip()
@@ -245,8 +261,16 @@ def _reconcile_conjectural_policy(
             run_id=run_id,
             action="skip_unproved",
             reason=(
-                "Host policy skips conjectures and theorem-like assertions "
-                "without an attached manuscript proof"
+                (
+                    "Author assistant context points to indexed prerequisites; "
+                    "the unproved assertion remains uncertified while dependent "
+                    "proofs may be attempted from those certified prerequisites"
+                )
+                if claim_id in guided_claims
+                else (
+                    "Host policy skips conjectures and theorem-like assertions "
+                    "without an attached manuscript proof"
+                )
             ),
         )
     return skipped
@@ -645,6 +669,8 @@ class IncrementalSession:
                             old["normalized_statement_hash"]
                             != item.normalized_statement_hash
                             or old["proof_hash"] != item.proof_hash
+                            or str(old["assistant_context"])
+                            != item.assistant_context
                         )
                     }
                     invalidated_semantic_sources = {
@@ -656,7 +682,7 @@ class IncrementalSession:
                     persistent_edges = tuple(
                         edge
                         for edge in old_edges
-                        if edge.kind != "explicit_ref"
+                        if edge.kind not in {"explicit_ref", "assistant_context"}
                         and edge.src in current_ids
                         and edge.dst in current_ids
                         and not (
@@ -670,9 +696,12 @@ class IncrementalSession:
                     }
                     edges = tuple(edge_map[key] for key in sorted(edge_map))
                     cycles = canonical_cycles(build_graph(current_ids, edges))
-                    statement_changed, proof_changed, deleted = source_changes(
-                        previous_versions, objects, mode=task.mode
-                    )
+                    (
+                        statement_changed,
+                        assistant_context_changed,
+                        proof_changed,
+                        deleted,
+                    ) = source_changes(previous_versions, objects, mode=task.mode)
                     # Agent-discovered semantic edges describe the current
                     # manuscript argument. Any edit to their source assertion
                     # retires those edges and schedules the source for fresh
@@ -684,13 +713,20 @@ class IncrementalSession:
                         for edge in (*old_edges, *edges)
                     }
                     affected = affected_claims(
-                        statement_changed | proof_changed | deleted,
+                        statement_changed
+                        | assistant_context_changed
+                        | proof_changed
+                        | deleted,
                         claim_ids=union_ids,
                         edges=union_edge_map.values(),
                     )
                     state_updates: dict[str, ClaimState] = {}
                     for claim_id in affected & current_ids:
-                        if claim_id in statement_changed or claim_id in proof_changed:
+                        if claim_id in (
+                            statement_changed
+                            | assistant_context_changed
+                            | proof_changed
+                        ):
                             state_updates[claim_id] = ClaimState.DIRTY_SOURCE
                         else:
                             state_updates[claim_id] = ClaimState.INVALIDATED
@@ -705,6 +741,7 @@ class IncrementalSession:
                         claim_id = str(question["claim_id"])
                         if (
                             claim_id in statement_changed
+                            or claim_id in assistant_context_changed
                             or claim_id in proof_changed
                             or claim_id in deleted
                         ):
@@ -778,7 +815,11 @@ class IncrementalSession:
                     notify(
                         "IMPACT_ANALYSIS",
                         "Computed direct changes, descendants, and proof targets",
-                        directly_changed=len(statement_changed | proof_changed),
+                        directly_changed=len(
+                            statement_changed
+                            | assistant_context_changed
+                            | proof_changed
+                        ),
                         deleted=len(deleted),
                         affected=len(affected),
                         selected=len(selected),
@@ -810,6 +851,9 @@ class IncrementalSession:
                         {
                             "schema_version": 1,
                             "direct_statement_changes": sorted(statement_changed),
+                            "assistant_context_changes": sorted(
+                                assistant_context_changed
+                            ),
                             "proof_only_changes": sorted(proof_changed),
                             "deleted": sorted(deleted),
                             "affected": sorted(affected),
@@ -857,7 +901,9 @@ class IncrementalSession:
                         targets=frozenset(targets),
                         selected=frozenset(selected),
                         skipped_unproved=skipped_unproved,
-                        directly_changed=frozenset(statement_changed),
+                        directly_changed=frozenset(
+                            statement_changed | assistant_context_changed
+                        ),
                         proof_only_changed=frozenset(proof_changed),
                         affected=frozenset(affected),
                         deleted=frozenset(deleted),

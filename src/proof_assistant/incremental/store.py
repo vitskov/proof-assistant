@@ -9,7 +9,7 @@ from typing import Any, cast
 
 from .models import ClaimState, LeanDeclaration, ManuscriptEdge, Snapshot, SourceObject
 
-DATABASE_SCHEMA_VERSION = 3
+DATABASE_SCHEMA_VERSION = 4
 FAILURE_SCOPES = frozenset({"RUN", "BATCH", "CLAIM", "COMPONENT"})
 FAILURE_KINDS = frozenset(
     {
@@ -121,6 +121,8 @@ CREATE TABLE IF NOT EXISTS claim_versions (
     statement_text TEXT NOT NULL,
     proof_text TEXT NOT NULL,
     references_json TEXT NOT NULL,
+    assistant_context TEXT NOT NULL DEFAULT '',
+    assistant_references_json TEXT NOT NULL DEFAULT '[]',
     PRIMARY KEY (snapshot_commit, claim_id)
 );
 
@@ -345,6 +347,20 @@ class StateStore:
         # additive tables introduced by pre-release builds.
         self.connection.executescript(MIGRATION_2_SQL)
         self.connection.executescript(MIGRATION_3_SQL)
+        claim_version_columns = {
+            str(row[1])
+            for row in self.connection.execute("PRAGMA table_info(claim_versions)")
+        }
+        if "assistant_context" not in claim_version_columns:
+            self.connection.execute(
+                "ALTER TABLE claim_versions "
+                "ADD COLUMN assistant_context TEXT NOT NULL DEFAULT ''"
+            )
+        if "assistant_references_json" not in claim_version_columns:
+            self.connection.execute(
+                "ALTER TABLE claim_versions "
+                "ADD COLUMN assistant_references_json TEXT NOT NULL DEFAULT '[]'"
+            )
         if version < DATABASE_SCHEMA_VERSION:
             self.set_metadata("schema_version", str(DATABASE_SCHEMA_VERSION))
 
@@ -1120,8 +1136,9 @@ class StateStore:
                         statement_byte_start, statement_byte_end, proof_start,
                         proof_end, proof_byte_start, proof_byte_end, statement_hash,
                         proof_hash, normalized_statement_hash, statement_text,
-                        proof_text, references_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        proof_text, references_json, assistant_context,
+                        assistant_references_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         snapshot,
@@ -1145,6 +1162,8 @@ class StateStore:
                         item.statement_text,
                         item.proof_text,
                         self._json(item.references),
+                        item.assistant_context,
+                        self._json(item.assistant_references),
                     ),
                 )
             if active_ids:

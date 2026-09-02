@@ -52,6 +52,7 @@ EQUATION_ENVIRONMENTS = frozenset(
 )
 PROOF_ENVIRONMENTS = frozenset({"proof", "proof*"})
 REFERENCE_MACROS = frozenset({"ref", "eqref", "cref", "Cref", "autoref"})
+ASSISTANT_CONTEXT_EDGE_KIND = "assistant_context"
 LATEX_SUFFIXES = frozenset({".tex", ".ltx"})
 _SIMPLE_INCLUDE_MACROS = frozenset({"input", "include", "subfile"})
 _DIRECTORY_INCLUDE_MACROS = frozenset({"import", "subimport"})
@@ -85,6 +86,8 @@ class _ObjectDraft:
     statement_text: str
     proof_text: str
     references: tuple[str, ...]
+    assistant_context: str
+    assistant_references: tuple[str, ...]
     claim_id: str = ""
 
     def finalized(self) -> SourceObject:
@@ -116,6 +119,86 @@ def _strip_comments(text: str) -> str:
             position += 1
         lines.append(line)
     return "\n".join(lines)
+
+
+@dataclass(frozen=True)
+class _AssistantContextBlock:
+    end: int
+    text: str
+
+
+_ASSISTANT_CONTEXT_START = re.compile(
+    r"^[ \t]*%%[ \t]*assistant:[ \t]*(.*?)(?:\r?\n)?$"
+)
+_ASSISTANT_CONTEXT_CONTINUATION = re.compile(
+    r"^[ \t]*%%(?:[ \t]?(.*?))?(?:\r?\n)?$"
+)
+_ASSISTANT_REFERENCE = re.compile(
+    r"\\(?:ref|eqref|cref|Cref|autoref)\s*\{([^{}]+)\}"
+)
+
+
+def _assistant_context_blocks(source: str) -> tuple[_AssistantContextBlock, ...]:
+    """Parse consecutive ``%%`` author-to-assistant comment blocks.
+
+    A block starts with ``%% assistant:`` and continues only across immediately
+    following ``%%`` lines. The first ordinary LaTeX line ends the block. The
+    block is later attached only when it immediately precedes an indexed object,
+    so guidance cannot accidentally leak across manuscript prose.
+    """
+
+    lines = source.splitlines(keepends=True)
+    offsets: list[int] = []
+    offset = 0
+    for line in lines:
+        offsets.append(offset)
+        offset += len(line)
+
+    blocks: list[_AssistantContextBlock] = []
+    index = 0
+    while index < len(lines):
+        start = _ASSISTANT_CONTEXT_START.fullmatch(lines[index])
+        if start is None:
+            index += 1
+            continue
+        content = [start.group(1).rstrip()]
+        index += 1
+        while index < len(lines):
+            if _ASSISTANT_CONTEXT_START.fullmatch(lines[index]) is not None:
+                break
+            continuation = _ASSISTANT_CONTEXT_CONTINUATION.fullmatch(lines[index])
+            if continuation is None:
+                break
+            content.append((continuation.group(1) or "").rstrip())
+            index += 1
+        end = offsets[index] if index < len(lines) else len(source)
+        text = "\n".join(content).strip()
+        if text:
+            blocks.append(_AssistantContextBlock(end=end, text=text))
+    return tuple(blocks)
+
+
+def _assistant_context_for_object(
+    source: str,
+    *,
+    object_start: int,
+    blocks: Sequence[_AssistantContextBlock],
+) -> str:
+    eligible = [
+        block
+        for block in blocks
+        if block.end <= object_start and not source[block.end:object_start].strip()
+    ]
+    return eligible[-1].text if eligible else ""
+
+
+def _assistant_references(context: str) -> tuple[str, ...]:
+    references: set[str] = set()
+    for match in _ASSISTANT_REFERENCE.finditer(context):
+        references.update(
+            item.strip() for item in match.group(1).split(",") if item.strip()
+        )
+    return tuple(sorted(references))
 
 
 def normalize_latex_statement(text: str) -> str:
@@ -476,6 +559,7 @@ def extract_file(
         node for node in all_environments if node.environmentname in PROOF_ENVIRONMENTS
     ]
     byte_offsets = _byte_offsets(source)
+    assistant_blocks = _assistant_context_blocks(source)
     drafts: list[_ObjectDraft] = []
     ordinal = 0
     for node in all_environments:
@@ -504,6 +588,9 @@ def extract_file(
             proof_start = proof_end = None
             proof_text = ""
         normalized = normalize_latex_statement(statement)
+        assistant_context = _assistant_context_for_object(
+            source, object_start=node.pos, blocks=assistant_blocks
+        )
         drafts.append(
             _ObjectDraft(
                 kind=kind,
@@ -529,6 +616,8 @@ def extract_file(
                 statement_text=statement,
                 proof_text=proof_text,
                 references=tuple(sorted(set(references))),
+                assistant_context=assistant_context,
+                assistant_references=_assistant_references(assistant_context),
             )
         )
     return drafts
@@ -637,9 +726,26 @@ def explicit_reference_graph(
                 unresolved.add((item.claim_id, reference))
             elif destination != item.claim_id:
                 edges.add((item.claim_id, destination, "explicit_ref"))
+        for reference in item.assistant_references:
+            destination = labels.get(reference, reference if reference in ids else None)
+            if destination is None:
+                unresolved.add((item.claim_id, reference))
+            elif destination != item.claim_id:
+                edges.add(
+                    (item.claim_id, destination, ASSISTANT_CONTEXT_EDGE_KIND)
+                )
     return (
         tuple(
-            ManuscriptEdge(src, dst, kind, "latex_ref")
+            ManuscriptEdge(
+                src,
+                dst,
+                kind,
+                (
+                    "assistant_annotation"
+                    if kind == ASSISTANT_CONTEXT_EDGE_KIND
+                    else "latex_ref"
+                ),
+            )
             for src, dst, kind in sorted(edges)
         ),
         tuple(sorted(unresolved)),

@@ -15,6 +15,8 @@ from .models import (
     is_proof_bearing_assertion,
 )
 
+ASSISTANT_CONTEXT_EDGE_KIND = "assistant_context"
+
 
 class DependencyCycleError(RuntimeError):
     def __init__(self, cycles: Sequence[Sequence[str]]) -> None:
@@ -83,9 +85,28 @@ def ready_frontier(
     edges: Iterable[ManuscriptEdge],
 ) -> tuple[str, ...]:
     dependencies: dict[str, set[str]] = {claim_id: set() for claim_id in selected}
+    guided_claims: set[str] = set()
     for edge in edges:
         if edge.approved and edge.src in selected and edge.dst in selected:
             dependencies[edge.src].add(edge.dst)
+            if edge.kind == ASSISTANT_CONTEXT_EDGE_KIND:
+                guided_claims.add(edge.src)
+
+    def dependency_is_satisfied(claim_id: str, trail: frozenset[str]) -> bool:
+        state = states.get(claim_id, ClaimState.DISCOVERED)
+        if state == ClaimState.CERTIFIED:
+            return True
+        if (
+            state != ClaimState.SKIPPED_UNPROVED
+            or claim_id not in guided_claims
+            or claim_id in trail
+        ):
+            return False
+        return all(
+            dependency_is_satisfied(dependency, trail | {claim_id})
+            for dependency in dependencies.get(claim_id, ())
+        )
+
     ready_states = {
         ClaimState.DISCOVERED,
         ClaimState.STATEMENT_APPROVED,
@@ -101,9 +122,55 @@ def ready_frontier(
             for claim_id in selected
             if states.get(claim_id, ClaimState.DISCOVERED) in ready_states
             and all(
-                states.get(dependency) == ClaimState.CERTIFIED
+                dependency_is_satisfied(dependency, frozenset())
                 for dependency in dependencies[claim_id]
             )
+        )
+    )
+
+
+def unsatisfied_dependencies(
+    claim_id: str,
+    *,
+    states: dict[str, ClaimState],
+    edges: Iterable[ManuscriptEdge],
+) -> tuple[str, ...]:
+    """Return direct prerequisites not yet safe for certificate validation.
+
+    An unproved assertion with an ``assistant_context`` edge is transparent for
+    scheduling only after every referenced prerequisite is certified. This
+    permits a proof worker to derive a dependent result from a stronger, proved
+    statement without ever certifying the author comment or the abridged claim.
+    """
+
+    approved = tuple(edge for edge in edges if edge.approved)
+    dependencies: dict[str, set[str]] = {}
+    guided_claims: set[str] = set()
+    for edge in approved:
+        dependencies.setdefault(edge.src, set()).add(edge.dst)
+        if edge.kind == ASSISTANT_CONTEXT_EDGE_KIND:
+            guided_claims.add(edge.src)
+
+    def satisfied(dependency: str, trail: frozenset[str]) -> bool:
+        state = states.get(dependency, ClaimState.DISCOVERED)
+        if state == ClaimState.CERTIFIED:
+            return True
+        if (
+            state != ClaimState.SKIPPED_UNPROVED
+            or dependency not in guided_claims
+            or dependency in trail
+        ):
+            return False
+        return all(
+            satisfied(child, trail | {dependency})
+            for child in dependencies.get(dependency, ())
+        )
+
+    return tuple(
+        sorted(
+            dependency
+            for dependency in dependencies.get(claim_id, ())
+            if not satisfied(dependency, frozenset())
         )
     )
 
@@ -159,10 +226,11 @@ def source_changes(
     current: Sequence[SourceObject],
     *,
     mode: str,
-) -> tuple[set[str], set[str], set[str]]:
-    """Return (statement changes, proof-only changes, deleted claims)."""
+) -> tuple[set[str], set[str], set[str], set[str]]:
+    """Return statement, assistant-context, proof-only, and deleted changes."""
     now = {item.claim_id: item for item in current}
     statement_changes: set[str] = set()
+    assistant_context_changes: set[str] = set()
     proof_changes: set[str] = set()
     for claim_id, item in now.items():
         old = previous.get(claim_id)
@@ -170,6 +238,14 @@ def source_changes(
             statement_changes.add(claim_id)
         elif old["normalized_statement_hash"] != item.normalized_statement_hash:
             statement_changes.add(claim_id)
+        elif (
+            "assistant_context" in old.keys()
+            and str(old["assistant_context"]) != item.assistant_context
+        ):
+            # Author-to-assistant context is not part of the mathematical
+            # statement hash, but it changes proof-worker input and therefore
+            # must invalidate the attached claim and downstream certificates.
+            assistant_context_changes.add(claim_id)
         elif is_conjectural_assertion_shape(
             str(old["kind"]),
             int(old["proof_start"]) if old["proof_start"] is not None else None,
@@ -181,7 +257,7 @@ def source_changes(
         elif old["proof_hash"] != item.proof_hash and mode == "argument-audit":
             proof_changes.add(claim_id)
     deleted = set(previous) - set(now)
-    return statement_changes, proof_changes, deleted
+    return statement_changes, assistant_context_changes, proof_changes, deleted
 
 
 def manuscript_graph_export(

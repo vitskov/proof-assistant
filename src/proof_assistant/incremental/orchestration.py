@@ -1132,7 +1132,7 @@ def verify_project(
                     if repoprover_error is not None:
                         technical_errors.append(repoprover_error)
                 round_index = 0
-                while round_index <= len(prepared.selected) + 1:
+                while round_index <= len(prepared.objects) + 1:
                     checkpoint()
                     if technical_errors or provider_errors:
                         break
@@ -1140,14 +1140,20 @@ def verify_project(
                     with StateStore(session.database_path) as store:
                         edges = _edges(store)
                         states = _states(store)
+                        selected = {
+                            str(row["claim_id"])
+                            for row in store.run_scope_rows(
+                                prepared.run_id, "SELECTED"
+                            )
+                        } or set(prepared.selected)
                         blockers = {
                             claim_id
-                            for claim_id in prepared.selected
+                            for claim_id in selected
                             if states.get(claim_id) == ClaimState.NEEDS_CLARIFICATION
                         }
                         for claim_id in blocked_descendants(
                             blockers,
-                            selected=set(prepared.selected),
+                            selected=selected,
                             edges=edges,
                         ):
                             if states.get(claim_id) != ClaimState.CERTIFIED:
@@ -1161,7 +1167,7 @@ def verify_project(
                         states = _states(store)
                         ready = ready_frontier(
                             states,
-                            selected=set(prepared.selected),
+                            selected=selected,
                             edges=edges,
                         )
                         if (
@@ -1172,11 +1178,11 @@ def verify_project(
                                 claim_id: tuple(
                                     edge.dst for edge in edges if edge.src == claim_id
                                 )
-                                for claim_id in prepared.selected
+                                for claim_id in selected
                             }
                             blocked_requested = {
                                 claim_id
-                                for claim_id in prepared.selected
+                                for claim_id in selected
                                 if states.get(claim_id) != ClaimState.CERTIFIED
                             }
                             ready = tuple(
