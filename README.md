@@ -12,8 +12,7 @@ attention.
 
 ## What it is for
 
-- Check all proof-bearing theorem-like claims, while recording conjectures and
-  unproved assertions as skipped unless a proved statement depends on them.
+- Check all proof-bearing theorem-like claims.
 - Distinguish verified, ambiguous, unresolved, suspected-false, technical
   failure, and kernel-checked counterexample outcomes.
 - Explain an incomplete check with its first deterministic blocking reason and
