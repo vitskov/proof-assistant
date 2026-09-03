@@ -75,9 +75,8 @@ subscription or a separately billed API account.
 
 For eligible researchers, Anthropic's limited
 [Claude Team plan for scientists](https://claude.com/programs/team-plan-for-scientists#pricing)
-is an example of a heavily subsidized plan for verified academic and nonprofit
-research groups. Availability, verification, promotional periods, and final
-pricing are determined by Anthropic.
+is an example of a heavily subsidized plan for verified academics and nonprofit
+research groups.  
 
 ## Configure verification AI
 
