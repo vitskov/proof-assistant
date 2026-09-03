@@ -3165,12 +3165,26 @@ async def test_deletion_confirmation_waits_for_settings_overlay() -> None:
 
 @async_test
 async def test_main_menu_discards_queued_settings_completion_result() -> None:
-    service = FakeWorkflowService()
+    catalog_release = threading.Event()
+
+    class DelayedCatalogService(FakeWorkflowService):
+        def __init__(self) -> None:
+            super().__init__()
+            self.catalog_calls = 0
+
+        def list_projects(self) -> Sequence[ProjectCatalogEntry]:
+            self.catalog_calls += 1
+            catalog_release.wait(timeout=5)
+            return super().list_projects()
+
+    service = DelayedCatalogService()
     service.verification_release = threading.Event()
     app = ProofAssistantApp(service)
 
     async with app.run_test(size=(120, 40)) as pilot:
         await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        stale_welcome = app.screen
+        await wait_for(pilot, lambda: service.catalog_calls == 1)
         app.start_verification(service.project, None)
         await wait_for(pilot, lambda: progress_log_contains(app, "INDEXING"))
         app.action_global_settings()
@@ -3180,11 +3194,20 @@ async def test_main_menu_discards_queued_settings_completion_result() -> None:
 
         app.action_main_menu()
         await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        assert app.screen is not stale_welcome
+        assert not stale_welcome.is_attached
+        await wait_for(pilot, lambda: service.catalog_calls == 2)
         assert app._pending_settings_snapshot is None
         app.show_settings(service.machine_settings)
         await wait_for(pilot, lambda: isinstance(app.screen, SettingsHomeScreen))
         app.screen.action_back()
         await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        catalog_release.set()
+        await wait_for(
+            pilot,
+            lambda: "1 project(s) available."
+            in app.screen.query_one("#status-line", TextArea).text,
+        )
         assert not isinstance(app.screen, FindingsScreen)
 
 

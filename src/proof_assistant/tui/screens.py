@@ -538,13 +538,23 @@ class WelcomeScreen(NoticeScreen):
         self.run_worker(load, thread=True, exclusive=True, group="catalog")
 
     def _start_render_projects(self, projects: tuple[ProjectCatalogEntry, ...]) -> None:
+        # A thread-backed catalog read may finish after this landing screen was
+        # replaced. Never start a child render worker for a detached screen.
+        if not self.is_mounted or not self.is_attached:
+            return
+
         async def render() -> None:
             await self._render_projects(projects)
 
         self._render_worker = self.run_worker(render, group="catalog-render")
 
     async def _render_projects(self, projects: tuple[ProjectCatalogEntry, ...]) -> None:
-        container = self.query_one("#project-list", Vertical)
+        if not self.is_mounted or not self.is_attached:
+            return
+        containers = self.query("#project-list").nodes
+        if not containers or not isinstance(containers[0], Vertical):
+            return
+        container = containers[0]
         focused_before_render = self.app.focused
         should_focus_project = (
             focused_before_render is None
