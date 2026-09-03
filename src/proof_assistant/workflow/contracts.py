@@ -54,7 +54,7 @@ from ..ai import (
 )
 from ..ai.contracts import validate_model_identifier as validate_model_identifier
 
-CONTRACT_SCHEMA_VERSION = 10
+CONTRACT_SCHEMA_VERSION = 11
 
 
 class WorkflowState(StrEnum):
@@ -166,6 +166,26 @@ class FailureKind(StrEnum):
     SOURCE_INTEGRITY = "SOURCE_INTEGRITY"
     DEPENDENCY_CYCLE = "DEPENDENCY_CYCLE"
     UNKNOWN = "UNKNOWN"
+
+
+class ClarificationOrigin(StrEnum):
+    """Subsystem that authorized an immutable clarification question."""
+
+    HOST_POLICY = "HOST_POLICY"
+    PROOF_WORKER = "PROOF_WORKER"
+    LEGACY_UNKNOWN = "LEGACY_UNKNOWN"
+
+
+class ClarificationAnalysisStatus(StrEnum):
+    AVAILABLE = "AVAILABLE"
+    UNAVAILABLE = "UNAVAILABLE"
+    FAILED = "FAILED"
+
+
+class ClarificationConfidence(StrEnum):
+    LOW = "LOW"
+    MEDIUM = "MEDIUM"
+    HIGH = "HIGH"
 
 
 class SettingsScopeKind(StrEnum):
@@ -706,6 +726,46 @@ class SourceLocation:
 
 
 @dataclass(frozen=True)
+class ClarificationEvidenceItem:
+    evidence_id: str
+    kind: str
+    content: str
+    sha256: str
+
+
+@dataclass(frozen=True)
+class ClarificationEvidencePacket:
+    question_id: str
+    snapshot_commit: str
+    origin: ClarificationOrigin
+    items: tuple[ClarificationEvidenceItem, ...]
+    evidence_sha256: str
+
+
+@dataclass(frozen=True)
+class ClarificationReasoning:
+    statement: str
+    evidence_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ClarificationAnalysis:
+    status: ClarificationAnalysisStatus
+    evidence_sha256: str
+    origin: ClarificationOrigin
+    hypothesis: str | None = None
+    confidence: ClarificationConfidence | None = None
+    reasoning: tuple[ClarificationReasoning, ...] = ()
+    alternatives: tuple[str, ...] = ()
+    uncertainties: tuple[str, ...] = ()
+    recommended_author_check: str | None = None
+    provider: str | None = None
+    model: str | None = None
+    effort: str | None = None
+    failure_detail: str | None = None
+
+
+@dataclass(frozen=True)
 class ClarificationPresentation:
     question_id: str
     claim_id: str
@@ -718,6 +778,8 @@ class ClarificationPresentation:
     blocked_claims: tuple[str, ...]
     generated_by: str
     provenance_sha256: str
+    analysis: ClarificationAnalysis | None = None
+    observed_problem: str = ""
 
 
 @dataclass(frozen=True)

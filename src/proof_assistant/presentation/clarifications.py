@@ -10,9 +10,17 @@ from ..backend import CodexBackend, CodexConfig
 from ..incremental.io import atomic_write_json, canonical_hash
 from ..incremental.store import StateStore
 from ..workflow.contracts import (
+    ClarificationAnalysis,
+    ClarificationAnalysisStatus,
     ClarificationPresentation,
     SourceLocation,
     contract_dict,
+)
+from .clarification_analysis import (
+    ClarificationAnalyzer,
+    analysis_from_payload,
+    analyze_or_load,
+    build_evidence_packet,
 )
 
 
@@ -151,8 +159,13 @@ def _source_location(
 
 
 class ClarificationPresenter:
-    def __init__(self, narrator: ClarificationNarrator | None = None) -> None:
+    def __init__(
+        self,
+        narrator: ClarificationNarrator | None = None,
+        analyzer: ClarificationAnalyzer | None = None,
+    ) -> None:
         self.narrator = narrator
+        self.analyzer = analyzer
 
     @staticmethod
     def _presentation_path(project: Path) -> Path:
@@ -165,7 +178,7 @@ class ClarificationPresenter:
         atomic_write_json(
             ClarificationPresenter._presentation_path(project),
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "clarifications": [
                     contract_dict(presentation) for presentation in presentations
                 ],
@@ -173,12 +186,22 @@ class ClarificationPresenter:
         )
 
     def present_all(
-        self, project: Path, source_root: Path
+        self,
+        project: Path,
+        source_root: Path,
+        *,
+        persist_analysis: bool = True,
     ) -> tuple[ClarificationPresentation, ...]:
         database = project / ".repoprover" / "state.sqlite3"
         with StateStore(database) as store:
             presentations = tuple(
-                self._present(project, source_root, store, dict(question))
+                self._present(
+                    project,
+                    source_root,
+                    store,
+                    dict(question),
+                    persist_analysis=persist_analysis,
+                )
                 for question in store.open_questions()
             )
         self._write_presentations(project, presentations)
@@ -197,12 +220,12 @@ class ClarificationPresenter:
         database = project / ".repoprover" / "state.sqlite3"
         with StateStore(database) as store:
             questions = tuple(dict(question) for question in store.open_questions())
-            persisted = self._load_presentations(
-                project, source_root, store, questions
-            )
+            persisted = self._load_presentations(project, source_root, store, questions)
         if persisted is not None:
             return persisted
-        return ClarificationPresenter().present_all(project, source_root)
+        return ClarificationPresenter().present_all(
+            project, source_root, persist_analysis=False
+        )
 
     def _load_presentations(
         self,
@@ -217,14 +240,13 @@ class ClarificationPresenter:
             )
             if (
                 not isinstance(payload, dict)
-                or payload.get("schema_version") != 1
+                or payload.get("schema_version") != 2
                 or set(payload) != {"schema_version", "clarifications"}
             ):
                 return None
             raw_presentations = payload.get("clarifications")
-            if (
-                not isinstance(raw_presentations, list)
-                or len(raw_presentations) != len(questions)
+            if not isinstance(raw_presentations, list) or len(raw_presentations) != len(
+                questions
             ):
                 return None
             presentations = tuple(
@@ -234,19 +256,36 @@ class ClarificationPresenter:
                 resolutions, blocked, location, facts = self._presentation_inputs(
                     project, source_root, store, question
                 )
+                packet = build_evidence_packet(
+                    store=store, question=question, location=location
+                )
+                if presentation.analysis is not None:
+                    analysis_from_payload(
+                        contract_dict(presentation.analysis), packet=packet
+                    )
                 if (
                     presentation.question_id != str(question["question_id"])
                     or presentation.claim_id != str(question["claim_id"])
                     or presentation.category != str(question["category"])
+                    or presentation.observed_problem != str(question["problem"])
                     or presentation.possible_resolutions != resolutions
                     or presentation.blocked_claims != blocked
                     or presentation.location != location
+                    or presentation.analysis is None
+                    or presentation.analysis.evidence_sha256 != packet.evidence_sha256
                     or presentation.provenance_sha256
                     != canonical_hash(
                         {
                             "facts": facts,
                             "generated_by": presentation.generated_by,
                             "location": location.excerpt,
+                            "generated_content": {
+                                "headline": presentation.headline,
+                                "explanation": presentation.explanation,
+                                "observed_problem": presentation.observed_problem,
+                                "requested_actions": presentation.requested_actions,
+                                "analysis": contract_dict(presentation.analysis),
+                            },
                         }
                     )
                 ):
@@ -269,6 +308,8 @@ class ClarificationPresenter:
             "blocked_claims",
             "generated_by",
             "provenance_sha256",
+            "analysis",
+            "observed_problem",
         }:
             raise ValueError("Invalid persisted clarification presentation")
 
@@ -341,6 +382,12 @@ class ClarificationPresenter:
                 }
             )
         )
+        analysis_payload = payload["analysis"]
+        analysis = None
+        if analysis_payload is not None:
+            if not isinstance(analysis_payload, dict):
+                raise ValueError("Invalid persisted clarification analysis")
+            analysis = analysis_from_payload(analysis_payload)
         return ClarificationPresentation(
             question_id=text("question_id"),
             claim_id=text("claim_id"),
@@ -353,6 +400,8 @@ class ClarificationPresenter:
             blocked_claims=strings("blocked_claims"),
             generated_by=text("generated_by"),
             provenance_sha256=text("provenance_sha256"),
+            analysis=analysis,
+            observed_problem=text("observed_problem"),
         )
 
     @staticmethod
@@ -397,6 +446,8 @@ class ClarificationPresenter:
         source_root: Path,
         store: StateStore,
         question: Mapping[str, Any],
+        *,
+        persist_analysis: bool,
     ) -> ClarificationPresentation:
         resolutions, blocked, location, facts = self._presentation_inputs(
             project, source_root, store, question
@@ -419,8 +470,57 @@ class ClarificationPresenter:
             except Exception:
                 # Presentation must never become unavailable because prose generation did.
                 generated_by = "deterministic-fallback"
+        packet = build_evidence_packet(
+            store=store, question=question, location=location
+        )
+        if persist_analysis:
+            analysis = analyze_or_load(
+                store=store, packet=packet, analyzer=self.analyzer
+            )
+        else:
+            persisted = store.clarification_analysis(
+                packet.question_id, packet.evidence_sha256
+            )
+            if persisted is not None:
+                try:
+                    raw_analysis = json.loads(str(persisted["analysis_json"]))
+                    if not isinstance(raw_analysis, dict):
+                        raise ValueError("Invalid persisted clarification analysis")
+                    analysis = analysis_from_payload(
+                        raw_analysis,
+                        packet=packet,
+                        expected_status=str(persisted["status"]),
+                    )
+                except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                    analysis = ClarificationAnalysis(
+                        status=ClarificationAnalysisStatus.UNAVAILABLE,
+                        evidence_sha256=packet.evidence_sha256,
+                        origin=packet.origin,
+                        failure_detail=(
+                            "Stored clarification analysis was invalid; "
+                            "a fresh verification can regenerate it."
+                        ),
+                    )
+            else:
+                analysis = ClarificationAnalysis(
+                    status=ClarificationAnalysisStatus.UNAVAILABLE,
+                    evidence_sha256=packet.evidence_sha256,
+                    origin=packet.origin,
+                    failure_detail="Best current guess is not available for this evidence.",
+                )
         provenance = canonical_hash(
-            {"facts": facts, "generated_by": generated_by, "location": location.excerpt}
+            {
+                "facts": facts,
+                "generated_by": generated_by,
+                "location": location.excerpt,
+                "generated_content": {
+                    "headline": headline,
+                    "explanation": explanation,
+                    "observed_problem": str(question["problem"]),
+                    "requested_actions": requested_actions,
+                    "analysis": contract_dict(analysis),
+                },
+            }
         )
         return ClarificationPresentation(
             question_id=str(question["question_id"]),
@@ -434,6 +534,8 @@ class ClarificationPresenter:
             blocked_claims=blocked,
             generated_by=generated_by,
             provenance_sha256=provenance,
+            analysis=analysis,
+            observed_problem=str(question["problem"]),
         )
 
     @staticmethod

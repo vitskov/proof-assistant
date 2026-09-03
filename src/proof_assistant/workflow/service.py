@@ -112,6 +112,7 @@ from ..incremental.task import (
     task_document,
 )
 from ..json_types import JSONObject, json_object, load_json
+from ..presentation.clarification_analysis import IsolatedAIClarificationAnalyzer
 from ..presentation.clarifications import (
     ClarificationNarrator,
     ClarificationPresenter,
@@ -2536,7 +2537,8 @@ class ProofAssistantWorkflow:
         role: VerificationRoleSettings | None = None,
     ) -> ClarificationPresenter:
         narrator = self._provided_narrator
-        if narrator is None and self.use_codex_clarification:
+        analyzer = None
+        if self.use_codex_clarification:
             if role is None:
                 try:
                     role = self.default_verification_settings(project).for_task(
@@ -2564,21 +2566,19 @@ class ProofAssistantWorkflow:
                     driver = policy.driver
                     model = policy.model or self.codex_model
                     difficulty = policy.difficulty
-                narrator = IsolatedAIClarificationNarrator(
-                    AIBackendConfig(
-                        driver=driver,
-                        model=model,
-                        difficulty=difficulty,
-                        executable=(
-                            self.codex if driver is DriverId.CODEX_CLI else None
-                        ),
-                        concurrency=self._concurrency_spec(project=project),
-                        task_kind=TaskKind.CLARIFICATION,
-                        provider_config_path=(self._provider_service.config_store.path),
-                    ),
-                    cwd=project,
+                config = AIBackendConfig(
+                    driver=driver,
+                    model=model,
+                    difficulty=difficulty,
+                    executable=(self.codex if driver is DriverId.CODEX_CLI else None),
+                    concurrency=self._concurrency_spec(project=project),
+                    task_kind=TaskKind.CLARIFICATION,
+                    provider_config_path=(self._provider_service.config_store.path),
                 )
-        return ClarificationPresenter(narrator)
+                if narrator is None:
+                    narrator = IsolatedAIClarificationNarrator(config, cwd=project)
+                analyzer = IsolatedAIClarificationAnalyzer(config, cwd=project)
+        return ClarificationPresenter(narrator, analyzer)
 
     def _summary(self, project: Path) -> ProjectSummary:
         session = IncrementalSession(project)

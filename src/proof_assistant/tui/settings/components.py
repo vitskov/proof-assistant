@@ -15,8 +15,9 @@ from typing import Self
 from textual.containers import Vertical
 from textual.coordinate import Coordinate
 from textual.widget import Widget
-from textual.widgets import DataTable, Select, Static
+from textual.widgets import Select, Static
 
+from proof_assistant.tui.commands import DesktopDataTable as DataTable
 from proof_assistant.workflow.contracts import (
     Difficulty,
     DriverId,

@@ -223,6 +223,7 @@ def _reconcile_conjectural_policy(
                 possible_resolutions=possible_resolutions,
                 blocking_claims=blocked_claims,
                 run_id=run_id,
+                origin="HOST_POLICY",
             )
             store.refresh_open_question(
                 claim_id,
@@ -232,6 +233,7 @@ def _reconcile_conjectural_policy(
                 problem=problem,
                 possible_resolutions=possible_resolutions,
                 blocking_claims=blocked_claims,
+                origin="HOST_POLICY",
             )
             store.set_claim_state(
                 claim_id,

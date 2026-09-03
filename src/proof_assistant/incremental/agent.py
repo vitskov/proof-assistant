@@ -500,6 +500,7 @@ class IncrementalAgentContext:
                 possible_resolutions=resolution_text,
                 blocking_claims=blocking,
                 run_id=self.run_id,
+                origin="PROOF_WORKER",
             )
             store.add_diagnostic(
                 run_id=self.run_id,

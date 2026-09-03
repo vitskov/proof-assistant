@@ -12,14 +12,15 @@ from collections.abc import Callable
 from pathlib import Path
 
 from textual.app import App, ComposeResult
-from textual.containers import Vertical
+from textual.binding import Binding
+from textual.containers import Vertical, VerticalScroll
 from textual.events import Resize
-from textual.screen import ModalScreen
-from textual.widgets import Static
+from textual.screen import ModalScreen, Screen
+from textual.widgets import Button, Static
 from textual.worker import Worker, get_current_worker
 
 from proof_assistant.tui import layout as responsive_layout
-from proof_assistant.tui.commands import GLOBAL_BINDINGS
+from proof_assistant.tui.commands import GLOBAL_BINDINGS, DesktopInput
 from proof_assistant.tui.screens import (
     ChangeReviewScreen,
     ClarificationScreen,
@@ -99,7 +100,7 @@ class ResizeNeededScreen(ModalScreen[None]):
         return (
             f"Current viewport: {width}x{height}\n"
             "Proof Assistant needs at least 80x24 before editable controls are "
-            "available. Resize the terminal to continue. Ctrl+Q exits safely."
+            "available. Resize the terminal to continue, or open Menu and choose Quit."
         )
 
     def update_viewport(self, width: int, height: int) -> None:
@@ -109,11 +110,163 @@ class ResizeNeededScreen(ModalScreen[None]):
             nodes[0].update(self._message())
 
 
-class ProofAssistantApp(App[None]):
+CommandMenuResult = tuple[str, object] | None
+
+
+def _button_label(button: Button) -> str:
+    label = button.label
+    return label if isinstance(label, str) else label.plain
+
+
+class CommandMenuScreen(ModalScreen[CommandMenuResult]):
+    """Visible, screen-aware menu over the current screen's actual controls."""
+
+    AUTO_FOCUS = "#command-search"
+    BINDINGS = [Binding("escape", "cancel", "Close", key_display="Esc")]
+
+    def __init__(self, origin: Screen[object], actions: tuple[Button, ...]) -> None:
+        super().__init__()
+        self.origin = origin
+        self.actions = actions
+
+    @staticmethod
+    def _is_dangerous(button: Button) -> bool:
+        identity = f"{button.id or ''} {_button_label(button)}".casefold()
+        return button.variant == "error" or any(
+            marker in identity
+            for marker in (
+                "request cooperative cancellation",
+                "delete",
+                "remove",
+                "reset",
+                "discard",
+                "quit",
+            )
+        )
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="command-menu-dialog"):
+            yield Static("Menu", classes="title")
+            yield DesktopInput(
+                placeholder="Search commands…",
+                id="command-search",
+            )
+            with VerticalScroll(id="command-menu-body"):
+                regular = tuple(
+                    (index, button)
+                    for index, button in enumerate(self.actions)
+                    if not self._is_dangerous(button)
+                )
+                dangerous = tuple(
+                    (index, button)
+                    for index, button in enumerate(self.actions)
+                    if self._is_dangerous(button)
+                )
+                if regular:
+                    yield Static(
+                        "This screen", id="command-current-heading", classes="section"
+                    )
+                    for index, button in regular:
+                        yield Button(
+                            button.label,
+                            id=f"command-current-{index}",
+                            classes="command-menu-item command-current",
+                        )
+                if dangerous:
+                    yield Static(
+                        "Caution — these actions may stop work or remove data",
+                        id="command-danger-heading",
+                        classes="section warning",
+                    )
+                    for index, button in dangerous:
+                        yield Button(
+                            button.label,
+                            id=f"command-current-{index}",
+                            classes="command-menu-item command-danger",
+                            variant="error",
+                        )
+                yield Static(
+                    "Application", id="command-application-heading", classes="section"
+                )
+                yield Button(
+                    "Help and keyboard reference",
+                    id="command-help",
+                    classes="command-menu-item command-application",
+                )
+                yield Button(
+                    "Projects",
+                    id="command-projects",
+                    classes="command-menu-item command-application",
+                )
+                yield Button(
+                    "Settings",
+                    id="command-settings",
+                    classes="command-menu-item command-application",
+                )
+                yield Button(
+                    "Switch light / dark theme",
+                    id="command-theme",
+                    classes="command-menu-item command-application",
+                )
+                yield Button(
+                    "Quit Proof Assistant",
+                    id="command-quit",
+                    classes="command-menu-item command-application",
+                    variant="error",
+                )
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def on_input_changed(self, event: DesktopInput.Changed) -> None:
+        if event.input.id != "command-search":
+            return
+        query = event.value.strip().casefold()
+        for button in self.query(".command-menu-item").nodes:
+            if isinstance(button, Button):
+                button.display = not query or query in _button_label(button).casefold()
+        groups = (
+            ("#command-current-heading", ".command-current"),
+            ("#command-danger-heading", ".command-danger"),
+            ("#command-application-heading", ".command-application"),
+        )
+        for heading_selector, button_selector in groups:
+            headings = self.query(heading_selector).nodes
+            if headings:
+                headings[0].display = any(
+                    isinstance(button, Button) and button.display
+                    for button in self.query(button_selector).nodes
+                )
+
+    def on_input_submitted(self, event: DesktopInput.Submitted) -> None:
+        if event.input.id != "command-search":
+            return
+        first_match = next(
+            (
+                button
+                for button in self.query(".command-menu-item").nodes
+                if isinstance(button, Button) and button.display and not button.disabled
+            ),
+            None,
+        )
+        if first_match is not None:
+            first_match.press()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        button_id = event.button.id or ""
+        if button_id.startswith("command-current-"):
+            index = int(button_id.rsplit("-", 1)[1])
+            self.dismiss(("screen", self.actions[index]))
+        elif button_id.startswith("command-"):
+            self.dismiss(("application", button_id.removeprefix("command-")))
+
+
+class ProofAssistantApp(App[None], inherit_bindings=False):
     """A thin, dependency-injected UI over ``WorkflowServiceContract``."""
 
     TITLE = "Proof Assistant"
     SUB_TITLE = "Persistent manuscript verification"
+    ENABLE_COMMAND_PALETTE = False
     BINDINGS = GLOBAL_BINDINGS
     HORIZONTAL_BREAKPOINTS = responsive_layout.HORIZONTAL_BREAKPOINTS
     VERTICAL_BREAKPOINTS = responsive_layout.VERTICAL_BREAKPOINTS
@@ -138,6 +291,15 @@ class ProofAssistantApp(App[None]):
         width: 72; max-width: 96%; height: auto;
         border: round $warning; background: $proof-dialog-background; padding: 1 2;
     }
+    CommandMenuScreen {
+        align: center middle; background: $proof-overlay;
+    }
+    #command-menu-dialog {
+        width: 64; max-width: 94%; height: auto; max-height: 88%;
+        border: round $primary; background: $proof-dialog-background; padding: 1 2;
+    }
+    #command-menu-body { width: 100%; height: auto; max-height: 26; }
+    .command-menu-item { width: 100%; }
     ResponsivePage, .responsive-page {
         width: 100%; height: 100%;
         layout: vertical; overflow: hidden;
@@ -483,6 +645,51 @@ class ProofAssistantApp(App[None]):
             self.pop_screen()
         else:
             self.push_screen(ShortcutHelpScreen())
+
+    def action_show_command_menu(self) -> None:
+        """Open a focusable menu containing live screen and app actions."""
+
+        if isinstance(self.screen, CommandMenuScreen):
+            self.pop_screen()
+            return
+        origin = self.screen
+        application_labels = {"help", "projects", "settings", "switch theme", "quit"}
+        actions = tuple(
+            button
+            for button in origin.query(Button)
+            if not button.disabled
+            and button.is_on_screen
+            and _button_label(button).strip().casefold() not in application_labels
+        )
+        self.push_screen(
+            CommandMenuScreen(origin, actions),
+            callback=self._run_command_menu_choice,
+        )
+
+    def _run_command_menu_choice(self, result: CommandMenuResult) -> None:
+        if result is None:
+            return
+        kind, payload = result
+        if kind == "screen":
+            button = payload
+            if (
+                isinstance(button, Button)
+                and button.is_mounted
+                and button.screen is self.screen
+            ):
+                button.press()
+            return
+        action = str(payload)
+        if action == "help":
+            self.action_show_shortcuts()
+        elif action == "projects":
+            self.action_main_menu()
+        elif action == "settings":
+            self.action_global_settings()
+        elif action == "theme":
+            self.action_toggle_proof_theme()
+        elif action == "quit":
+            self.exit()
 
     def action_toggle_proof_theme(self) -> None:
         self.theme = (

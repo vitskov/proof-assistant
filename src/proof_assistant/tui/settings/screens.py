@@ -20,24 +20,29 @@ from textual.widgets import (
     Button,
     Checkbox,
     ContentSwitcher,
-    DataTable,
-    Input,
     Label,
     OptionList,
     Select,
-    TextArea,
 )
 from textual.widgets.option_list import Option
 
 from proof_assistant.tui.commands import (
     BACK,
     CANCEL,
-    CONFIRM,
     REFRESH,
     SAVE,
     CommandFooter,
 )
 from proof_assistant.tui.commands import AppHeader as Header
+from proof_assistant.tui.commands import (
+    DesktopDataTable as DataTable,
+)
+from proof_assistant.tui.commands import (
+    DesktopInput as Input,
+)
+from proof_assistant.tui.commands import (
+    DesktopTextArea as TextArea,
+)
 from proof_assistant.tui.layout import (
     ActionBar,
     PageHeader,
@@ -45,7 +50,10 @@ from proof_assistant.tui.layout import (
     ResponsivePage,
     ResponsiveToolbar,
 )
-from proof_assistant.tui.screens import CopyableText, NoticeScreen
+from proof_assistant.tui.screens import (
+    CopyableText,
+    NoticeScreen,
+)
 from proof_assistant.tui.settings.components import (
     DRIVER_LABELS,
     ROLE_LABELS,
@@ -334,7 +342,7 @@ def _legacy_text(snapshot: MachineSettingsSnapshot) -> str:
 class AIInstallConfirmationScreen(ModalScreen[bool]):
     """Cancel-first review of the exact backend-produced installation plan."""
 
-    BINDINGS = [CANCEL.binding(), CONFIRM.binding()]
+    BINDINGS = [CANCEL.binding()]
 
     def __init__(self, plan: InstallPlan) -> None:
         super().__init__()
@@ -415,7 +423,7 @@ class AIInstallConfirmationScreen(ModalScreen[bool]):
 class AIAccountVerificationConfirmationScreen(ModalScreen[bool]):
     """Explicit consent for Copilot's necessarily billable account probe."""
 
-    BINDINGS = [CANCEL.binding(), CONFIRM.binding()]
+    BINDINGS = [CANCEL.binding()]
 
     def compose(self) -> ComposeResult:
         with Vertical(id="ai-account-check-dialog"):
@@ -523,7 +531,7 @@ class UnsavedAISettingsConfirmationScreen(ModalScreen[str | None]):
 class ProjectInheritanceConfirmationScreen(ModalScreen[bool]):
     """Preview removal of a project role-team override before persistence."""
 
-    BINDINGS = [CANCEL.binding(), CONFIRM.binding()]
+    BINDINGS = [CANCEL.binding()]
 
     def compose(self) -> ComposeResult:
         with Vertical(id="project-inheritance-dialog"):
@@ -563,7 +571,7 @@ class DestructiveSettingsConfirmationScreen(ModalScreen[bool]):
     """Cancel-first review for an exact destructive settings reset."""
 
     AUTO_FOCUS = "#settings-destructive-cancel"
-    BINDINGS = [CANCEL.binding(), CONFIRM.binding()]
+    BINDINGS = [CANCEL.binding()]
 
     def __init__(self, title: str, detail: str, confirm_label: str) -> None:
         super().__init__()
@@ -785,9 +793,7 @@ class AIProviderSettingsScreen(NoticeScreen):
                 yield OptionList(*navigation_options, id="ai-settings-nav")
                 with ContentSwitcher(initial=initial_view, id="ai-settings-pages"):
                     if self.first_run:
-                        with VerticalScroll(
-                            id="choose-page", classes="settings-page"
-                        ):
+                        with VerticalScroll(id="choose-page", classes="settings-page"):
                             yield CopyableText(
                                 "Step 1 of 3 · Choose a provider", classes="section"
                             )
@@ -1191,9 +1197,7 @@ class AIProviderSettingsScreen(NoticeScreen):
                 and destination == "roles"
                 and (self.snapshot is None or not self.snapshot.primary_ready)
             ):
-                event.option_list.highlighted = (
-                    0 if current == "choose-page" else 1
-                )
+                event.option_list.highlighted = 0 if current == "choose-page" else 1
                 self.show_notice(
                     "Connect and save the selected provider before reviewing its "
                     "eight-role team.",
@@ -1285,9 +1289,7 @@ class AIProviderSettingsScreen(NoticeScreen):
         back.display = view in {"choose", "connection", "roles"}
         next_button.display = view in {"choose", "connection"}
         next_button.label = (
-            "Continue to connection"
-            if view == "choose"
-            else "Save and review team"
+            "Continue to connection" if view == "choose" else "Save and review team"
         )
         next_button.disabled = self.snapshot is None
         save.display = view == "roles"
@@ -1431,12 +1433,12 @@ class AIProviderSettingsScreen(NoticeScreen):
             self._project_draft_generation += 1
             if self.project_settings is not None:
                 self._project_customizing = not self.project_settings.inherited
-                self.query_one("#reset-project-ai", Button).disabled = (
-                    self.project_settings.inherited
-                )
-                self.query_one("#customize-project-ai", Button).disabled = (
-                    not self.project_settings.inherited
-                )
+                self.query_one(
+                    "#reset-project-ai", Button
+                ).disabled = self.project_settings.inherited
+                self.query_one(
+                    "#customize-project-ai", Button
+                ).disabled = not self.project_settings.inherited
             self.query_one("#project-ai-undo-recommended", Button).disabled = True
             self._render_project_ai_choices(reset_driver=True)
             return
@@ -1875,9 +1877,7 @@ class AIProviderSettingsScreen(NoticeScreen):
 
         self.run_worker(refresh, thread=True, exclusive=True, group="ai-provider-setup")
 
-    def _record_setup_load_error(
-        self, detail: str, request_generation: int
-    ) -> None:
+    def _record_setup_load_error(self, detail: str, request_generation: int) -> None:
         if request_generation != self._setup_load_generation:
             return
         self.show_notice(f"Provider setup check failed: {detail}", error=True)
@@ -3372,9 +3372,7 @@ class AIProviderSettingsScreen(NoticeScreen):
             self._sync_first_run_actions(current_view.removesuffix("-page"))
         self.show_notice(message, error=True)
 
-    def _credential_mutation_finished(
-        self, snapshot: ProviderSetupSnapshot
-    ) -> None:
+    def _credential_mutation_finished(self, snapshot: ProviderSetupSnapshot) -> None:
         # Keep the application-level sanitized cache authoritative even if a
         # lifecycle edge unmounted this page before the backend write completed.
         self.proof_app.record_ai_setup(snapshot)
@@ -4792,7 +4790,7 @@ class LegacySettingsScreen(_SettingsEditorScreen):
 class SettingsWarningConfirmationScreen(ModalScreen[bool]):
     """Cancel-first confirmation for backend-classified unsafe settings."""
 
-    BINDINGS = [CANCEL.binding(), CONFIRM.binding()]
+    BINDINGS = [CANCEL.binding()]
 
     def __init__(self, preview: SettingsChangePreview) -> None:
         super().__init__()

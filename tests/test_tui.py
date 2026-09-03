@@ -26,7 +26,9 @@ from textual.widgets import (
 )
 
 import proof_assistant.tui.screens as tui_screens
+import proof_assistant.tui.settings.screens as tui_settings_screens
 from proof_assistant.tui import ProofAssistantApp
+from proof_assistant.tui.app import CommandMenuScreen
 from proof_assistant.tui.commands import (
     AppHeader,
     AppHeaderIcon,
@@ -36,7 +38,10 @@ from proof_assistant.tui.commands import (
 from proof_assistant.tui.screens import (
     ChangeReviewScreen,
     ClarificationScreen,
+    CopyableText,
     DashboardScreen,
+    DesktopInput,
+    DesktopTextArea,
     ExistingProjectMainFileSelectionScreen,
     FailureDependencyScreen,
     FailureTree,
@@ -70,7 +75,12 @@ from proof_assistant.workflow.contracts import (
     ChangeImpactPlan,
     ClaimChangeKind,
     ClaimImpact,
+    ClarificationAnalysis,
+    ClarificationAnalysisStatus,
+    ClarificationConfidence,
+    ClarificationOrigin,
     ClarificationPresentation,
+    ClarificationReasoning,
     ConcurrencySettingsView,
     EffectiveConcurrencyView,
     FailureArtifact,
@@ -252,12 +262,35 @@ def clarification(p: ProjectSummary) -> ClarificationPresentation:
         category="missing_assumption",
         headline="Clarify positive definiteness",
         explanation="The current assumptions appear to imply only semidefiniteness.",
+        observed_problem="The verifier could not justify positive definiteness from the stated assumptions.",
         requested_actions=("State the missing hypothesis explicitly.",),
         possible_resolutions=("Strengthen the assumptions.", "Weaken the conclusion."),
         location=location,
         blocked_claims=("thm:child-a", "thm:child-b"),
         generated_by="deterministic-fallback",
         provenance_sha256="deadbeef",
+        analysis=ClarificationAnalysis(
+            status=ClarificationAnalysisStatus.AVAILABLE,
+            evidence_sha256="evidence-deadbeef",
+            origin=ClarificationOrigin.PROOF_WORKER,
+            hypothesis=(
+                "The assumptions likely establish semidefiniteness while the claim "
+                "requires positive definiteness."
+            ),
+            confidence=ClarificationConfidence.HIGH,
+            reasoning=(
+                ClarificationReasoning(
+                    "The stated assumptions do not exclude a nontrivial kernel.",
+                    ("E-deadbeef0000001",),
+                ),
+            ),
+            alternatives=("A missing earlier dependency may supply definiteness.",),
+            uncertainties=("The intended kernel hypothesis is not stated.",),
+            recommended_author_check="Confirm the missing definiteness hypothesis.",
+            provider="claude_cli",
+            model="fable",
+            effort="xhigh",
+        ),
     )
 
 
@@ -1057,13 +1090,17 @@ def test_syntax_static_is_selectable_without_a_duplicate_source_pane() -> None:
         and isinstance(node.func, ast.Name)
         and node.func.id == "Static"
     ]
-    assert len(static_calls) == 1
-    ids = {
-        keyword.value.value
-        for keyword in static_calls[0].keywords
-        if keyword.arg == "id" and isinstance(keyword.value, ast.Constant)
-    }
-    assert ids == {"source-excerpt"}
+    source_excerpt_calls = [
+        node
+        for node in static_calls
+        if any(
+            keyword.arg == "id"
+            and isinstance(keyword.value, ast.Constant)
+            and keyword.value.value == "source-excerpt"
+            for keyword in node.keywords
+        )
+    ]
+    assert len(source_excerpt_calls) == 1
     assert Static.ALLOW_SELECT
     assert "source-excerpt-copy" not in source_text
 
@@ -1118,7 +1155,7 @@ async def test_application_header_title_click_toggles_tall_layout() -> None:
 
 
 @async_test
-async def test_application_header_icon_opens_palette_without_toggling_tall() -> None:
+async def test_application_header_menu_opens_without_toggling_tall() -> None:
     service = FakeWorkflowService()
     app = ProofAssistantApp(service)
 
@@ -1126,14 +1163,18 @@ async def test_application_header_icon_opens_palette_without_toggling_tall() -> 
         await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
         await settle_screen(pilot)
         header = app.screen.query_one(AppHeader)
-        assert app.screen.query_one(AppHeaderIcon).tooltip == "Open the command palette"
-        await pilot.click("AppHeaderIcon")
-        await wait_for(pilot, lambda: app.screen.__class__.__name__ == "CommandPalette")
+        icon = app.screen.query_one(AppHeaderIcon)
+        assert icon.tooltip == "Open commands menu"
+        assert icon.can_focus
+        icon.focus()
+        await pilot.press("enter")
+        await wait_for(pilot, lambda: isinstance(app.screen, CommandMenuScreen))
+        assert app.focused is app.screen.query_one("#command-search", Input)
         assert not header.has_class("-tall")
 
 
 @async_test
-async def test_permanent_command_footer_help_and_theme_toggle() -> None:
+async def test_permanent_footer_and_screen_aware_command_menu() -> None:
     service = FakeWorkflowService()
     app = ProofAssistantApp(service)
 
@@ -1141,26 +1182,69 @@ async def test_permanent_command_footer_help_and_theme_toggle() -> None:
         await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
         await wait_for(pilot, lambda: bool(app.screen.query(CommandFooter).nodes))
         assert app.theme == PROOF_DARK_THEME.name
-        assert {"f1", "ctrl+p", "ctrl+t", "ctrl+q", "n", "r", "s"}.issubset(
+        assert {"ctrl+p", "ctrl+n", "ctrl+o", "ctrl+r"}.issubset(
+            app.screen.active_bindings
+        )
+        assert not {"f1", "f2", "f3", "ctrl+t", "ctrl+q", "n", "o", "r", "s"} & set(
             app.screen.active_bindings
         )
 
+        await wait_for(pilot, lambda: button_is_ready(app, "#resume-0"))
         await pilot.press("ctrl+p")
-        await wait_for(pilot, lambda: app.screen.__class__.__name__ == "CommandPalette")
-        await pilot.press("escape")
-        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
-
-        await pilot.press("f1")
+        await wait_for(pilot, lambda: isinstance(app.screen, CommandMenuScreen))
+        assert (
+            app.screen.query_one("#command-current-0", Button).label.plain
+            == "Resume / open"
+        )
+        assert app.screen.query_one("#command-danger-heading", Static)
+        assert app.screen.query_one("#command-current-1", Button).has_class(
+            "command-danger"
+        )
+        app.screen.query_one("#command-help", Button).press()
         await wait_for(pilot, lambda: isinstance(app.screen, ShortcutHelpScreen))
         reference = app.screen.query_one("#shortcut-reference", TextArea).text
-        assert "F1 / ?" in reference
         assert "Ctrl+P" in reference
-        assert "Ctrl+T" in reference
-        assert "Ctrl+Enter" in reference
+        assert "Ctrl+N" in reference
+        assert "Ctrl+O" in reference
+        assert "Ctrl+R" in reference
         assert "Ctrl+S" in reference
+        assert "F1" not in reference
+        assert "Ctrl+Enter" not in reference
         assert app.screen.query_one(CommandFooter)
 
-        await pilot.press("ctrl+t")
+
+@async_test
+async def test_command_menu_search_activates_match_and_escape_restores_focus() -> None:
+    service = FakeWorkflowService()
+    app = ProofAssistantApp(service)
+
+    async with app.run_test(size=(100, 36)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        await wait_for(pilot, lambda: button_is_ready(app, "#resume-0"))
+        origin = app.screen
+        resume = origin.query_one("#resume-0", Button)
+        await wait_for(pilot, lambda: app.focused is resume)
+
+        await pilot.press("ctrl+p")
+        await wait_for(pilot, lambda: isinstance(app.screen, CommandMenuScreen))
+        search = app.screen.query_one("#command-search", Input)
+        await pilot.press("x", "y", "z")
+        await pilot.press("escape")
+        await wait_for(pilot, lambda: app.screen is origin)
+        assert app.focused is resume
+
+        await pilot.press("ctrl+p")
+        await wait_for(pilot, lambda: isinstance(app.screen, CommandMenuScreen))
+        search = app.screen.query_one("#command-search", Input)
+        assert app.focused is search
+        search.value = "new project"
+        await pilot.pause()
+        assert app.screen.query_one("#command-help", Button).display is False
+        assert app.screen.query_one("#command-current-2", Button).display is True
+        await pilot.press("enter")
+        await wait_for(pilot, lambda: isinstance(app.screen, NewProjectScreen))
+
+        app.action_toggle_proof_theme()
         assert app.theme == PROOF_LIGHT_THEME.name
         assert app.get_css_variables()["proof-page-background"] == "#FFFCF0"
 
@@ -1171,13 +1255,13 @@ async def test_permanent_command_footer_help_and_theme_toggle() -> None:
 
 
 @async_test
-async def test_question_mark_remains_typable_while_f1_help_is_global() -> None:
+async def test_desktop_text_widgets_remove_legacy_keys_and_keep_select_all() -> None:
     service = FakeWorkflowService()
     app = ProofAssistantApp(service)
 
     async with app.run_test(size=(100, 36)) as pilot:
         await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
-        await pilot.press("n")
+        await pilot.press("ctrl+n")
         await wait_for(pilot, lambda: isinstance(app.screen, NewProjectScreen))
         name = app.screen.query_one("#project-name", Input)
         name.focus()
@@ -1185,44 +1269,78 @@ async def test_question_mark_remains_typable_while_f1_help_is_global() -> None:
         assert name.value == "?"
         assert isinstance(app.screen, NewProjectScreen)
 
-        await pilot.press("f1")
-        await wait_for(pilot, lambda: isinstance(app.screen, ShortcutHelpScreen))
+        await pilot.press("ctrl+a")
+        assert name.selection.start == 0
+        assert name.selection.end == len(name.value)
+
+        forbidden = {"f6", "f7", "ctrl+e", "ctrl+d", "ctrl+w", "ctrl+u", "ctrl+k"}
+        for widget_type in (DesktopInput, DesktopTextArea):
+            keys = {
+                key
+                for binding in widget_type.BINDINGS
+                for key in binding.key.split(",")
+            }
+            assert not forbidden & keys
+            assert not any(key.startswith("alt+") for key in keys)
+
+        assert CopyableText("Page title", classes="title").can_focus is False
+        assert CopyableText("Useful value").can_focus is True
+
+
+def test_application_bindings_have_no_collisions_or_legacy_accelerators() -> None:
+    forbidden_actions = {"cancel_job", "confirm", "failures", "report", "verify"}
+    for module in (tui_screens, tui_settings_screens):
+        for value in vars(module).values():
+            if (
+                not isinstance(value, type)
+                or value.__module__ != module.__name__
+                or "BINDINGS" not in value.__dict__
+            ):
+                continue
+            seen: set[str] = set()
+            for binding in value.BINDINGS:
+                key_spec = binding[0] if isinstance(binding, tuple) else binding.key
+                action = binding[1] if isinstance(binding, tuple) else binding.action
+                keys = tuple(key.strip() for key in key_spec.split(","))
+                for key in keys:
+                    assert key not in seen, f"{value.__name__} binds {key} twice"
+                    seen.add(key)
+                    assert not (len(key) == 1 and key.isalpha())
+                    assert key not in {"[", "]", "ctrl+enter"}
+                    assert not key.startswith("alt+")
+                    assert not (key.startswith("f") and key[1:].isdigit())
+                assert action not in forbidden_actions
 
 
 @async_test
-async def test_f2_f3_global_navigation_is_input_safe_and_cancel_first() -> None:
+async def test_menu_navigation_preserves_draft_and_uses_no_function_keys() -> None:
     service = FakeWorkflowService()
     app = ProofAssistantApp(service)
 
     async with app.run_test(size=(100, 36)) as pilot:
         await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
-        assert {"f2", "f3"}.issubset(app.screen.active_bindings)
-        await pilot.press("n")
+        assert not any(
+            key.startswith("f") and key[1:].isdigit()
+            for key in app.screen.active_bindings
+        )
+        await pilot.press("ctrl+n")
         await wait_for(pilot, lambda: isinstance(app.screen, NewProjectScreen))
         draft_screen = app.screen
         name = draft_screen.query_one("#project-name", Input)
         name.value = "A preserved draft"
         name.focus()
 
-        await pilot.press("f1")
-        await wait_for(pilot, lambda: isinstance(app.screen, ShortcutHelpScreen))
-        reference = app.screen.query_one("#shortcut-reference", TextArea).text
-        assert "F2" in reference and "Main menu" in reference
-        assert "F3" in reference and "Settings" in reference
-
-        # A global navigation key cancels a modal first. It neither confirms the
-        # modal nor discards the screen and input preserved underneath it.
-        await pilot.press("f3")
-        await wait_for(pilot, lambda: app.screen is draft_screen)
-        assert name.value == "A preserved draft"
-
-        await pilot.press("f3")
+        await pilot.press("ctrl+p")
+        await wait_for(pilot, lambda: isinstance(app.screen, CommandMenuScreen))
+        app.screen.query_one("#command-settings", Button).press()
         await wait_for(pilot, lambda: settings_home_is_ready(app))
         app.screen.query_one("#settings-back", Button).press()
         await wait_for(pilot, lambda: app.screen is draft_screen)
         assert name.value == "A preserved draft"
 
-        await pilot.press("f2")
+        await pilot.press("ctrl+p")
+        await wait_for(pilot, lambda: isinstance(app.screen, CommandMenuScreen))
+        app.screen.query_one("#command-projects", Button).press()
         await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
 
 
@@ -1243,7 +1361,7 @@ async def test_settings_preserves_observer_and_main_menu_detaches_only_client() 
         assert observer is not None
         assert observation is not None
 
-        await pilot.press("f3")
+        app.action_global_settings()
         await wait_for(pilot, lambda: settings_home_is_ready(app))
         await wait_for(pilot, lambda: app._active_observation is not observation)
         assert service.cancel_requests == []
@@ -1260,7 +1378,7 @@ async def test_settings_preserves_observer_and_main_menu_detaches_only_client() 
 
         app.screen.query_one("#settings-back", Button).press()
         await wait_for(pilot, lambda: app.screen is progress)
-        await pilot.press("f2")
+        app.action_main_menu()
         await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
         assert app._observer_worker is None
         assert app._active_observation is None
@@ -2379,8 +2497,10 @@ async def test_welcome_catalog_refresh_preserves_deliberate_focus() -> None:
         app.screen.action_refresh()
         await wait_for(
             pilot,
-            lambda: app.screen.query_one("#status-line", TextArea).text
-            == "1 project(s) available.",
+            lambda: (
+                app.screen.query_one("#status-line", TextArea).text
+                == "1 project(s) available."
+            ),
         )
         await pilot.pause()
 
@@ -2423,7 +2543,7 @@ async def test_welcome_open_shortcut_uses_the_focused_project_row() -> None:
         second_button = app.screen.query_one("#resume-1", Button)
         second_button.focus()
         await wait_for(pilot, lambda: app.focused is second_button)
-        await pilot.press("o")
+        await pilot.press("ctrl+o")
         await wait_for(pilot, lambda: isinstance(app.screen, DashboardScreen))
 
         assert service.resumed == [second.project_path]
@@ -2456,8 +2576,10 @@ async def test_welcome_reports_invalid_project_action_payload() -> None:
         button.press()
         await wait_for(
             pilot,
-            lambda: "stale or invalid"
-            in app.screen.query_one("#status-line", TextArea).text,
+            lambda: (
+                "stale or invalid"
+                in app.screen.query_one("#status-line", TextArea).text
+            ),
         )
 
         status = app.screen.query_one("#status-line", TextArea)
@@ -2508,6 +2630,16 @@ async def test_resume_clarification_exact_source_and_no_change(tmp_path: Path) -
         detail = app.screen.query_one("#clarification-detail", TextArea).text
         assert "thm:child-a" in detail
         assert "Strengthen the assumptions" in detail
+        assert "Why verification stopped" in detail
+        assert "could not justify positive definiteness" in detail
+        assert "Best current guess" in detail
+        assert "not confirmed fact or a Lean result" in detail
+        assert "E-deadbeef0000001" in detail
+        assert "Provider: claude_cli" in detail
+        banner = str(app.screen.query_one("#clarification-best-guess", Static).render())
+        assert "AI-assisted hypothesis" in banner
+        assert "Confidence: High" in banner
+        assert "not a Lean result" in banner
         assert "sections/main.tex:42:1" in str(
             app.screen.query_one("#source-location", TextArea).text
         )
@@ -2518,16 +2650,18 @@ async def test_resume_clarification_exact_source_and_no_change(tmp_path: Path) -
         assert "The restriction is positive definite" in syntax.code
         assert syntax.line_numbers
         assert syntax.start_line == 40
-        assert syntax.highlight_lines == set(app.screen.question.location.highlighted_lines)
+        assert syntax.highlight_lines == set(
+            app.screen.question.location.highlighted_lines
+        )
         assert 42 in syntax.highlight_lines
-        assert syntax.word_wrap
+        assert not syntax.word_wrap
         assert source.allow_select
         assert source.region.height > 0
         assert not app.screen.query("#source-excerpt-copy")
         assert not app.screen.query("#open-file")
         assert not hasattr(app, "edit_source")
         clarification_screen = app.screen
-        await pilot.press("o")
+        await pilot.press("ctrl+o")
         assert app.screen is clarification_screen
         assert opened == []
         await pilot.click("#open-folder")
@@ -2551,6 +2685,55 @@ async def test_resume_clarification_exact_source_and_no_change(tmp_path: Path) -
 
         await pilot.press("escape")
         await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+
+
+@async_test
+async def test_clarification_navigation_preserves_screen_and_handles_unavailable_guess() -> (
+    None
+):
+    service = FakeWorkflowService()
+    first = clarification(service.project)
+    second = replace(
+        first,
+        question_id="q-2",
+        claim_id="lem:second",
+        analysis=ClarificationAnalysis(
+            status=ClarificationAnalysisStatus.UNAVAILABLE,
+            evidence_sha256="evidence-second",
+            origin=ClarificationOrigin.HOST_POLICY,
+            failure_detail="No eligible strongest-model analysis was recorded.",
+        ),
+    )
+    snapshot = WorkflowSnapshot(
+        WorkflowState.AWAITING_CLARIFICATION,
+        service.project,
+        clarifications=(first, second),
+    )
+    screen = ClarificationScreen(snapshot)
+    app = ProofAssistantApp(service)
+
+    async with app.run_test(size=(100, 32)) as pilot:
+        app.switch_screen(screen)
+        await wait_for(
+            pilot,
+            lambda: (
+                app.screen is screen
+                and bool(screen.query("#show-clarification-resolution").nodes)
+            ),
+        )
+        await pilot.click("#show-clarification-resolution")
+        assert screen.has_class("show-resolution")
+
+        await pilot.click("#next")
+        await wait_for(pilot, lambda: screen.question.question_id == "q-2")
+        assert app.screen is screen
+        assert screen.has_class("show-resolution")
+        banner = str(screen.query_one("#clarification-best-guess", Static).render())
+        detail = screen.query_one("#clarification-detail", TextArea).text
+        assert "Best current guess unavailable" in banner
+        assert "No eligible strongest-model analysis" in banner
+        assert "Origin: Host policy" in detail
+        assert "No substitute model or provider was used" in detail
 
 
 @async_test
@@ -2852,7 +3035,7 @@ async def test_settings_overlay_restores_exact_live_verification_observer() -> N
         assert observation is not None
         assert observer_worker is not None
 
-        await pilot.press("f3")
+        app.action_global_settings()
         await wait_for(pilot, lambda: isinstance(app.screen, SettingsHomeScreen))
         assert app._active_observation is not None
         assert app._active_observation.job.job_id == observation.job.job_id
@@ -2880,7 +3063,7 @@ async def test_verification_completion_waits_for_settings_overlay_to_close() -> 
         await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
         app.start_verification(service.project, None)
         await wait_for(pilot, lambda: progress_log_contains(app, "INDEXING"))
-        await pilot.press("f3")
+        app.action_global_settings()
         await wait_for(pilot, lambda: isinstance(app.screen, SettingsHomeScreen))
 
         service.verification_release.set()
@@ -2911,7 +3094,7 @@ async def test_non_observer_snapshot_completion_waits_for_settings_overlay() -> 
         app.switch_screen(progress)
         await wait_for(pilot, lambda: app.screen is progress)
 
-        await pilot.press("f3")
+        app.action_global_settings()
         await wait_for(pilot, lambda: isinstance(app.screen, SettingsHomeScreen))
         app.show_snapshot(service.verify_result)
         await pilot.pause()
@@ -2940,7 +3123,7 @@ async def test_unattachable_activity_recovery_waits_for_settings_overlay() -> No
         )
         app.switch_screen(progress)
         await wait_for(pilot, lambda: app.screen is progress)
-        await pilot.press("f3")
+        app.action_global_settings()
         await wait_for(pilot, lambda: isinstance(app.screen, SettingsHomeScreen))
 
         app._show_unattachable_activity(snapshot)
@@ -2990,12 +3173,12 @@ async def test_main_menu_discards_queued_settings_completion_result() -> None:
         await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
         app.start_verification(service.project, None)
         await wait_for(pilot, lambda: progress_log_contains(app, "INDEXING"))
-        await pilot.press("f3")
+        app.action_global_settings()
         await wait_for(pilot, lambda: isinstance(app.screen, SettingsHomeScreen))
         service.verification_release.set()
         await wait_for(pilot, lambda: app._pending_settings_snapshot is not None)
 
-        await pilot.press("f2")
+        app.action_main_menu()
         await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
         assert app._pending_settings_snapshot is None
         app.show_settings(service.machine_settings)
@@ -3337,7 +3520,7 @@ async def test_reset_to_auto_recalculates_and_updates_editors() -> None:
         assert app.screen.focused is app.screen.query_one(
             "#settings-destructive-cancel", Button
         )
-        await pilot.press("f3")
+        app.action_global_settings()
         await wait_for(
             pilot, lambda: isinstance(app.screen, ConcurrencyResourcesScreen)
         )
@@ -3410,7 +3593,7 @@ async def test_machine_settings_editors_guard_dirty_navigation() -> None:
         assert runtime.query_one("#ai-concurrency", Input).value == "6"
         assert service.settings_previews == []
 
-        await pilot.press("f2")
+        app.action_main_menu()
         await wait_for(
             pilot,
             lambda: bool(app.screen.query("#settings-unsaved-save").nodes),
@@ -3425,7 +3608,7 @@ async def test_machine_settings_editors_guard_dirty_navigation() -> None:
         assert isinstance(legacy, LegacySettingsScreen)
         await wait_for(pilot, lambda: bool(legacy.query("#legacy-proof-jobs").nodes))
         legacy.query_one("#legacy-proof-jobs", Input).value = "5"
-        await pilot.press("f3")
+        app.action_global_settings()
         await wait_for(
             pilot,
             lambda: bool(app.screen.query("#settings-unsaved-discard").nodes),

@@ -100,9 +100,7 @@ def test_change_plan_labels_assistant_context_separately_from_statement(tmp_path
     )
     plan = workflow.plan_changes(project)
     assert plan is not None
-    impacts = {
-        (item.claim_id, item.kind) for item in plan.direct_claim_changes
-    }
+    impacts = {(item.claim_id, item.kind) for item in plan.direct_claim_changes}
     assert ("lem:zero-add", ClaimChangeKind.ASSISTANT_CONTEXT) in impacts
     assert ("lem:zero-add", ClaimChangeKind.STATEMENT) not in impacts
 
@@ -451,6 +449,8 @@ def test_resume_reuses_persisted_clarification_without_narrating(tmp_path):
     narrator = CountingNarrator()
     generated = ClarificationPresenter(narrator).present_all(project, source)
     assert narrator.calls == 1
+    assert generated[0].explanation == "The quantifier is not explicit."
+    assert generated[0].observed_problem == "Clarify the quantifier."
 
     workflow = ProofAssistantWorkflow(
         catalog_root=tmp_path / "catalog-two",

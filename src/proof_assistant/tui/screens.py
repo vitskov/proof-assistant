@@ -5,7 +5,7 @@ from __future__ import annotations
 import shlex
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING, TypeVar, cast
 
 from rich.syntax import Syntax
 from rich.text import Text
@@ -15,8 +15,6 @@ from textual.events import Resize
 from textual.screen import ModalScreen, Screen
 from textual.widgets import (
     Button,
-    DataTable,
-    Input,
     Label,
     MarkdownViewer,
     ProgressBar,
@@ -25,33 +23,23 @@ from textual.widgets import (
     Static,
     TabbedContent,
     TabPane,
-    TextArea,
     Tree,
 )
 from textual.widgets.tree import TreeNode
+from textual.worker import Worker
 
 from proof_assistant.tui.commands import (
     BACK,
     CANCEL,
-    CANCEL_JOB,
-    CHECK_CHANGES,
-    CLOSE,
-    CONFIRM,
-    DETACH_JOB,
-    FAILURES,
-    HOME_FOLDER,
     NEW_PROJECT,
-    NEXT,
     OPEN,
-    PARENT_FOLDER,
-    PREVIOUS,
     REFRESH,
-    REPORT,
     RETRY,
-    SELECT_ALL,
-    SETTINGS,
-    VERIFY,
+    AppHeaderIcon,
     CommandFooter,
+    DesktopDataTable,
+    DesktopInput,
+    DesktopTextArea,
     shortcut_reference_text,
 )
 from proof_assistant.tui.commands import AppHeader as Header
@@ -67,6 +55,8 @@ from proof_assistant.tui.layout import (
 )
 from proof_assistant.workflow.contracts import (
     ChangeImpactPlan,
+    ClarificationAnalysisStatus,
+    ClarificationOrigin,
     ClarificationPresentation,
     FailureComponent,
     FailureDependencyReport,
@@ -100,6 +90,13 @@ if TYPE_CHECKING:
 ActionPayloadT = TypeVar("ActionPayloadT")
 
 
+# Keep the established local names so existing screen code and public test types
+# continue to refer to Textual-compatible subclasses.
+Input = DesktopInput
+TextArea = DesktopTextArea
+DataTable = DesktopDataTable
+
+
 def _dropbox_warning(project: ProjectSummary | ChangeImpactPlan) -> str:
     if not project.source_in_dropbox:
         return ""
@@ -126,10 +123,10 @@ def _candidate_text(
     return f"{candidate.relative_path}{suffix}"
 
 
-class CopyableText(TextArea):
+class CopyableText(DesktopTextArea, inherit_bindings=False):
     """Read-only selectable text for every externally useful displayed value."""
 
-    BINDINGS = [SELECT_ALL.binding()]
+    BINDINGS = DesktopTextArea.BINDINGS
 
     def __init__(
         self,
@@ -151,6 +148,10 @@ class CopyableText(TextArea):
             id=id,
             classes=class_names,
         )
+        # Page and dialog titles are landmarks, not controls. Keeping them out
+        # of the Tab order makes focus movement match a desktop settings UI.
+        if classes and "title" in classes.split():
+            self.can_focus = False
         if not expand:
             line_count = max(1, text.count("\n") + 1)
             border_rows = (
@@ -178,16 +179,39 @@ class _FailureSelection:
     shared_reference: bool = False
 
 
-class FailureTree(Tree[_FailureSelection]):
+class FailureTree(Tree[_FailureSelection], inherit_bindings=False):
     """Textual 1.0 tree with complete small-terminal navigation bindings."""
 
     BINDINGS = [
-        *Tree.BINDINGS,
+        ("up", "cursor_up", "Previous node"),
+        ("down", "cursor_down", "Next node"),
+        ("left", "collapse_or_parent", "Collapse or parent"),
+        ("right", "expand_or_child", "Expand or child"),
+        ("enter", "select_cursor", "Select"),
+        ("space", "toggle_node", "Toggle"),
         ("pageup", "page_up", "Previous page"),
         ("pagedown", "page_down", "Next page"),
         ("home", "scroll_home", "First node"),
         ("end", "scroll_end", "Last node"),
     ]
+
+    def action_collapse_or_parent(self) -> None:
+        node = self.cursor_node
+        if node is None:
+            return
+        if node.is_expanded and node.children:
+            node.collapse()
+        elif node.parent is not None:
+            self.move_cursor(node.parent)
+
+    def action_expand_or_child(self) -> None:
+        node = self.cursor_node
+        if node is None or not node.children:
+            return
+        if not node.is_expanded:
+            node.expand()
+        else:
+            self.move_cursor(node.children[0])
 
 
 @dataclass(frozen=True)
@@ -260,7 +284,7 @@ class NoticeScreen(Screen[None]):
 class ShortcutHelpScreen(ModalScreen[None]):
     """Complete command reference generated from the binding registry."""
 
-    BINDINGS = [BACK.binding(action="close"), CLOSE.binding()]
+    BINDINGS = [BACK.binding(action="close")]
 
     def compose(self) -> ComposeResult:
         with Vertical(id="shortcut-help-dialog"):
@@ -290,7 +314,6 @@ class WelcomeScreen(NoticeScreen):
         NEW_PROJECT.binding(),
         OPEN.binding(),
         REFRESH.binding(),
-        SETTINGS.binding(),
     ]
 
     def __init__(
@@ -302,6 +325,7 @@ class WelcomeScreen(NoticeScreen):
         super().__init__()
         self.ai_setup = ai_setup
         self.ai_setup_supported = ai_setup_supported
+        self._render_worker: Worker[None] | None = None
 
     def _ai_status_text(self) -> str:
         if not self.ai_setup_supported:
@@ -514,7 +538,10 @@ class WelcomeScreen(NoticeScreen):
         self.run_worker(load, thread=True, exclusive=True, group="catalog")
 
     def _start_render_projects(self, projects: tuple[ProjectCatalogEntry, ...]) -> None:
-        self.run_worker(self._render_projects(projects), group="catalog-render")
+        async def render() -> None:
+            await self._render_projects(projects)
+
+        self._render_worker = self.run_worker(render, group="catalog-render")
 
     async def _render_projects(self, projects: tuple[ProjectCatalogEntry, ...]) -> None:
         container = self.query_one("#project-list", Vertical)
@@ -522,6 +549,7 @@ class WelcomeScreen(NoticeScreen):
         should_focus_project = (
             focused_before_render is None
             or focused_before_render.id == "landing-title"
+            or isinstance(focused_before_render, AppHeaderIcon)
             or isinstance(focused_before_render, _ProjectActionButton)
         )
         await container.remove_children()
@@ -798,8 +826,6 @@ class ManuscriptFolderPickerScreen(NoticeScreen):
 
     BINDINGS = [
         CANCEL.binding(),
-        PARENT_FOLDER.binding(),
-        HOME_FOLDER.binding(),
     ]
 
     def __init__(self) -> None:
@@ -847,7 +873,7 @@ class ManuscriptFolderPickerScreen(NoticeScreen):
                 )
                 yield Button("Cancel", id="folder-picker-cancel")
                 yield CopyableText(
-                    "Enter opens; Backspace goes up; Ctrl+Home returns home.",
+                    "Enter opens the selected folder; use the visible Up and Home controls.",
                     id="status-line",
                     classes="muted",
                     max_lines=3,
@@ -855,7 +881,7 @@ class ManuscriptFolderPickerScreen(NoticeScreen):
         yield CommandFooter()
 
     def on_mount(self) -> None:
-        table = self.query_one("#folder-picker-table", DataTable)
+        table = cast(DataTable[str], self.query_one("#folder-picker-table", DataTable))
         table.add_columns("Folder", "Resolved path")
         table.focus()
         self._load(None)
@@ -883,7 +909,7 @@ class ManuscriptFolderPickerScreen(NoticeScreen):
         self.listing = listing
         self._rows.clear()
         self._selected = None
-        table = self.query_one("#folder-picker-table", DataTable)
+        table = cast(DataTable[str], self.query_one("#folder-picker-table", DataTable))
         table.clear(columns=False)
         for index, folder in enumerate(listing.folders):
             key = f"folder:{index}"
@@ -989,7 +1015,7 @@ class ManuscriptFolderPickerScreen(NoticeScreen):
 class NewProjectScreen(NoticeScreen):
     """First wizard step: collect source, destination, and project task."""
 
-    BINDINGS = [BACK.binding(), CONFIRM.binding(action="continue")]
+    BINDINGS = [BACK.binding()]
 
     def __init__(self, draft: NewProjectDraft | None = None) -> None:
         super().__init__()
@@ -1143,7 +1169,7 @@ class NewProjectScreen(NoticeScreen):
 class MainFileSelectionScreen(NoticeScreen):
     """Require a deliberate main-file choice for an ambiguous source folder."""
 
-    BINDINGS = [BACK.binding(), CONFIRM.binding()]
+    BINDINGS = [BACK.binding()]
 
     def __init__(
         self,
@@ -1246,7 +1272,7 @@ class MainFileSelectionScreen(NoticeScreen):
 class ProjectReviewScreen(NoticeScreen):
     """Final wizard step before the first persistent project mutation."""
 
-    BINDINGS = [BACK.binding(), CONFIRM.binding()]
+    BINDINGS = [BACK.binding()]
 
     def __init__(
         self,
@@ -1349,7 +1375,7 @@ class ProjectReviewScreen(NoticeScreen):
 class ExistingProjectMainFileSelectionScreen(NoticeScreen):
     """Recover a catalogued legacy project through backend-provided candidates."""
 
-    BINDINGS = [BACK.binding(), CONFIRM.binding()]
+    BINDINGS = [BACK.binding()]
 
     def __init__(self, entry: ProjectCatalogEntry) -> None:
         super().__init__()
@@ -1481,10 +1507,7 @@ class DashboardScreen(NoticeScreen):
     """Project landing page between verification iterations."""
 
     BINDINGS = [
-        VERIFY.binding(),
-        CHECK_CHANGES.binding(),
         OPEN.binding(),
-        SETTINGS.binding(),
         BACK.binding(),
     ]
 
@@ -1669,7 +1692,7 @@ class ProgressScreen(NoticeScreen):
     }
     """
 
-    BINDINGS = [CANCEL_JOB.binding(), DETACH_JOB.binding()]
+    BINDINGS = [BACK.binding(action="detach_job")]
 
     def on_mount(self) -> None:
         self._sync_composition(self.app.size.width, self.app.size.height)
@@ -1818,8 +1841,8 @@ class ProgressScreen(NoticeScreen):
         if self._client_detached:
             return (
                 "This TUI observer is detached. The backend-owned verification was "
-                "not cancelled and may still be running. Use F2 Main menu and "
-                "Resume / open to attach again."
+                "not cancelled and may still be running. Open Menu, choose Projects, "
+                "and then Resume / open to attach again."
             )
         if self._observer_error is not None:
             message, job_may_continue = self._observer_error
@@ -2036,11 +2059,20 @@ class ClarificationScreen(NoticeScreen):
     """Show exact source context for a persisted clarification request."""
 
     CSS = """
-    #clarification-primary-actions,
-    #clarification-navigation-actions {
-        width: auto;
+    #clarification-action-buttons {
+        width: 100%;
         height: 3;
         overflow: hidden;
+    }
+    #clarification-best-guess {
+        width: 100%;
+        height: auto;
+        max-height: 4;
+        padding: 0 1;
+        border-left: thick $warning;
+    }
+    #clarification-detail {
+        height: 1fr;
     }
     #clarification-view-switcher {
         display: none;
@@ -2048,12 +2080,15 @@ class ClarificationScreen(NoticeScreen):
     }
     #clarification-panels {
         width: 100%;
-        height: auto;
+        height: 1fr;
+        min-height: 4;
         layout: vertical;
+        overflow: hidden;
     }
     .clarification-panel {
         width: 100%;
-        height: auto;
+        height: 1fr;
+        overflow: auto;
     }
     ClarificationScreen #status-line {
         width: 1fr;
@@ -2077,17 +2112,10 @@ class ClarificationScreen(NoticeScreen):
     ClarificationScreen.compact-short.show-resolution #clarification-resolution-panel {
         display: block;
     }
-    ClarificationScreen.-h-compact #clarification-actions,
-    ClarificationScreen.compact-short #clarification-actions {
-        height: 7;
-        max-height: 7;
+    #clarification-actions {
+        height: 4;
+        max-height: 4;
         layout: vertical;
-    }
-    ClarificationScreen.-h-compact #clarification-primary-actions,
-    ClarificationScreen.-h-compact #clarification-navigation-actions,
-    ClarificationScreen.compact-short #clarification-primary-actions,
-    ClarificationScreen.compact-short #clarification-navigation-actions {
-        width: 100%;
     }
     ClarificationScreen.standard #clarification-panels,
     ClarificationScreen.wide #clarification-panels {
@@ -2101,9 +2129,6 @@ class ClarificationScreen(NoticeScreen):
     """
 
     BINDINGS = [
-        PREVIOUS.binding(),
-        NEXT.binding(),
-        CHECK_CHANGES.binding(),
         BACK.binding(),
     ]
 
@@ -2143,6 +2168,11 @@ class ClarificationScreen(NoticeScreen):
                     classes="muted",
                 )
             with PageWorkspace():
+                yield Static(
+                    self._best_guess_summary(question),
+                    id="clarification-best-guess",
+                    markup=False,
+                )
                 with ResponsiveToolbar(id="clarification-view-switcher"):
                     yield Button(
                         "Source context",
@@ -2150,7 +2180,7 @@ class ClarificationScreen(NoticeScreen):
                         variant="primary",
                     )
                     yield Button(
-                        "Resolution guidance", id="show-clarification-resolution"
+                        "Diagnosis & options", id="show-clarification-resolution"
                     )
                 with Horizontal(id="clarification-panels"):
                     with Vertical(
@@ -2176,20 +2206,18 @@ class ClarificationScreen(NoticeScreen):
                         classes="clarification-panel",
                     ):
                         yield CopyableText(
-                            f"{question.headline}\n{question.explanation}"
-                        )
-                        yield CopyableText(
-                            self._request_detail(question), id="clarification-detail"
+                            self._request_detail(question),
+                            id="clarification-detail",
+                            expand=True,
                         )
             with ActionBar(id="clarification-actions"):
-                with Horizontal(id="clarification-primary-actions"):
+                with Horizontal(id="clarification-action-buttons"):
                     yield Button("Open source folder", id="open-folder")
                     yield Button(
                         "Check all files for changes",
                         id="check-changes",
                         variant="primary",
                     )
-                with Horizontal(id="clarification-navigation-actions"):
                     yield Button("Previous", id="previous", disabled=self.index == 0)
                     yield Button(
                         "Next",
@@ -2211,10 +2239,105 @@ class ClarificationScreen(NoticeScreen):
             line_numbers=True,
             start_line=location.context_start_line,
             highlight_lines=set(location.highlighted_lines),
-            word_wrap=True,
+            word_wrap=False,
+        )
+
+    @staticmethod
+    def _origin_label(origin: ClarificationOrigin) -> str:
+        return {
+            ClarificationOrigin.HOST_POLICY: "Host policy",
+            ClarificationOrigin.PROOF_WORKER: "Proof worker",
+            ClarificationOrigin.LEGACY_UNKNOWN: "Legacy record",
+        }[origin]
+
+    @staticmethod
+    def _short_text(value: str, *, limit: int = 160) -> str:
+        compact = " ".join(value.split())
+        if len(compact) <= limit:
+            return compact
+        return compact[: limit - 1].rstrip() + "…"
+
+    def _best_guess_summary(self, question: ClarificationPresentation) -> str:
+        analysis = question.analysis
+        if (
+            analysis is not None
+            and analysis.status is ClarificationAnalysisStatus.AVAILABLE
+            and analysis.hypothesis
+        ):
+            confidence = (
+                analysis.confidence.value.title() if analysis.confidence else "Unknown"
+            )
+            return (
+                f"Best current guess · AI-assisted hypothesis · Confidence: {confidence}\n"
+                f"{self._short_text(analysis.hypothesis)}\n"
+                "Interpretation only — not a Lean result or confirmed author intent."
+            )
+        detail = (
+            analysis.failure_detail
+            if analysis is not None and analysis.failure_detail
+            else "No evidence-grounded analysis was recorded for this clarification."
+        )
+        return (
+            "Best current guess unavailable\n"
+            f"{self._short_text(detail)}\n"
+            "The verified source location and observed blocker remain available."
         )
 
     def _request_detail(self, question: ClarificationPresentation) -> str:
+        analysis = question.analysis
+        observed_problem = question.observed_problem or question.explanation
+        if analysis is None:
+            origin = ClarificationOrigin.LEGACY_UNKNOWN
+        else:
+            origin = analysis.origin
+        if (
+            analysis is not None
+            and analysis.status is ClarificationAnalysisStatus.AVAILABLE
+            and analysis.hypothesis
+        ):
+            confidence = (
+                analysis.confidence.value.title() if analysis.confidence else "Unknown"
+            )
+            reasoning = (
+                "\n".join(
+                    f"  • {item.statement} [{', '.join(item.evidence_ids)}]"
+                    for item in analysis.reasoning
+                )
+                or "  • No validated reasoning details were returned."
+            )
+            alternatives = (
+                "\n".join(f"  • {item}" for item in analysis.alternatives)
+                or "  • None identified."
+            )
+            uncertainties = (
+                "\n".join(f"  • {item}" for item in analysis.uncertainties)
+                or "  • None reported."
+            )
+            analysis_detail = (
+                f"Best current guess\n{analysis.hypothesis}\n"
+                f"Confidence: {confidence}\n"
+                "AI-generated hypothesis; not confirmed fact or a Lean result.\n\n"
+                f"Evidence-backed reasoning\n{reasoning}\n\n"
+                f"Alternatives\n{alternatives}\n\n"
+                f"Uncertainties\n{uncertainties}\n\n"
+                "Recommended author check\n"
+                f"{analysis.recommended_author_check or 'Review the observed blocker.'}\n\n"
+                "Analysis provenance\n"
+                f"Provider: {analysis.provider or 'not recorded'}\n"
+                f"Model: {analysis.model or 'not recorded'}\n"
+                f"Reasoning effort: {analysis.effort or 'not recorded'}"
+            )
+        else:
+            detail = (
+                analysis.failure_detail
+                if analysis is not None and analysis.failure_detail
+                else "No analysis was recorded for this clarification."
+            )
+            analysis_detail = (
+                "Best current guess unavailable\n"
+                f"{detail}\n"
+                "No substitute model or provider was used."
+            )
         actions = (
             "\n".join(f"  • {item}" for item in question.requested_actions)
             or "  • Clarify the passage."
@@ -2225,6 +2348,10 @@ class ClarificationScreen(NoticeScreen):
         )
         blocked = ", ".join(question.blocked_claims) or "none"
         return (
+            "Why verification stopped\n"
+            f"Origin: {self._origin_label(origin)}\n{observed_problem}\n\n"
+            f"{analysis_detail}\n\n"
+            f"Presentation\n{question.headline}\n{question.explanation}\n\n"
             f"Requested action\n{actions}\n\nPossible resolutions\n{resolutions}\n\n"
             f"Blocked claims: {blocked}"
         )
@@ -2260,15 +2387,20 @@ class ClarificationScreen(NoticeScreen):
 
     def action_previous(self) -> None:
         if self.index > 0:
-            self.proof_app.switch_screen(
-                ClarificationScreen(self.snapshot, self.index - 1)
-            )
+            self.index -= 1
+            self.refresh(recompose=True)
+            self.call_after_refresh(self._focus_navigation, "previous")
 
     def action_next(self) -> None:
         if self.index + 1 < len(self.snapshot.clarifications):
-            self.proof_app.switch_screen(
-                ClarificationScreen(self.snapshot, self.index + 1)
-            )
+            self.index += 1
+            self.refresh(recompose=True)
+            self.call_after_refresh(self._focus_navigation, "next")
+
+    def _focus_navigation(self, button_id: str) -> None:
+        matches = self.query(f"#{button_id}")
+        if matches:
+            matches.first().focus()
 
     def action_check_changes(self) -> None:
         self.proof_app.check_for_changes(self.snapshot.project)
@@ -2281,7 +2413,6 @@ class ChangeReviewScreen(NoticeScreen):
     """Require explicit confirmation of an immutable source-impact plan."""
 
     BINDINGS = [
-        CONFIRM.binding(),
         BACK.binding(action="wait"),
         OPEN.binding(),
     ]
@@ -2398,9 +2529,6 @@ class FindingsScreen(NoticeScreen):
     """Human-readable outcome and durable output locations."""
 
     BINDINGS = [
-        CHECK_CHANGES.binding(),
-        REPORT.binding(),
-        FAILURES.binding(),
         OPEN.binding(),
         BACK.binding(),
     ]
@@ -2575,7 +2703,7 @@ def _status_label(
 class FailureDependencyScreen(NoticeScreen):
     """Interactive terminal explanation of one backend-owned failure report."""
 
-    BINDINGS = [RETRY.binding(), BACK.binding(), CLOSE.binding(), REPORT.binding()]
+    BINDINGS = [RETRY.binding(), BACK.binding()]
 
     def __init__(
         self,
@@ -3130,7 +3258,7 @@ class FailureDependencyScreen(NoticeScreen):
 class ReportViewerScreen(NoticeScreen):
     """Terminal-native rendered and copyable verification-report presentation."""
 
-    BINDINGS = [BACK.binding(), CLOSE.binding()]
+    BINDINGS = [BACK.binding()]
 
     def __init__(
         self,
@@ -3213,7 +3341,6 @@ class RecoveryScreen(NoticeScreen):
 
     BINDINGS = [
         RETRY.binding(),
-        FAILURES.binding(),
         OPEN.binding(),
         BACK.binding(),
     ]

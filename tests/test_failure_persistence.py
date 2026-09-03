@@ -67,7 +67,7 @@ def test_schema_one_database_migrates_to_current_failure_and_run_schema(tmp_path
     connection.close()
 
     with StateStore(database) as store:
-        assert store.get_metadata("schema_version") == "4"
+        assert store.get_metadata("schema_version") == "5"
         claim_version_columns = {
             str(row[1])
             for row in store.connection.execute("PRAGMA table_info(claim_versions)")
@@ -88,9 +88,7 @@ def test_schema_one_database_migrates_to_current_failure_and_run_schema(tmp_path
         "failure_artifacts",
         "run_concurrency",
     } <= tables
-    assert {"assistant_context", "assistant_references_json"} <= (
-        claim_version_columns
-    )
+    assert {"assistant_context", "assistant_references_json"} <= claim_version_columns
 
 
 def test_schema_three_populated_claim_version_gets_empty_assistant_defaults(tmp_path):
@@ -141,6 +139,48 @@ def test_schema_three_populated_claim_version_gets_empty_assistant_defaults(tmp_
         restored = _source_object_from_version(row)
     assert restored.assistant_context == ""
     assert restored.assistant_references == ()
+
+
+def test_schema_four_populated_clarification_gets_legacy_origin(tmp_path):
+    database = tmp_path / "schema-four.sqlite3"
+    connection = sqlite3.connect(database)
+    connection.executescript(
+        """
+        CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        INSERT INTO metadata(key, value) VALUES ('schema_version', '4');
+        CREATE TABLE clarifications (
+            question_id TEXT PRIMARY KEY,
+            claim_id TEXT NOT NULL,
+            snapshot_commit TEXT NOT NULL,
+            category TEXT NOT NULL,
+            passage TEXT NOT NULL,
+            problem TEXT NOT NULL,
+            resolutions_json TEXT NOT NULL,
+            blocking_claims_json TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_run INTEGER NOT NULL,
+            resolved_run INTEGER,
+            resolution TEXT
+        );
+        INSERT INTO clarifications VALUES (
+            'Q0001', 'T', 'snapshot', 'legacy', 'passage', 'problem',
+            '["repair"]', '["T"]', 'OPEN', 1, NULL, NULL
+        );
+        """
+    )
+    connection.close()
+
+    with StateStore(database) as store:
+        row = store.question_row("Q0001")
+        assert row is not None
+        assert row["origin"] == "LEGACY_UNKNOWN"
+        assert store.get_metadata("schema_version") == "5"
+        assert (
+            store.connection.execute(
+                "SELECT COUNT(*) FROM clarification_analyses"
+            ).fetchone()[0]
+            == 0
+        )
 
 
 def test_run_concurrency_provenance_records_initial_and_final_state(tmp_path):
@@ -257,7 +297,7 @@ def test_failure_claim_attribution_must_stay_inside_run_scope(tmp_path):
 def test_contract_schema_version_is_persisted_as_integer(tmp_path):
     store, _run_id = _run_with_claim(tmp_path, ClaimState.INVALIDATED)
     try:
-        assert json.loads(store.get_metadata("schema_version") or "0") == 4
+        assert json.loads(store.get_metadata("schema_version") or "0") == 5
     finally:
         store.close()
 

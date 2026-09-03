@@ -1482,11 +1482,9 @@ class ProviderService:
                 preferences = ("fable", "best", "opus", "sonnet", "haiku")
             elif task is TaskKind.PROOF:
                 preferences = ("best", "fable", "opus", "sonnet", "haiku")
-            elif task in {
-                TaskKind.CLARIFICATION,
-                TaskKind.DIAGNOSTIC,
-                TaskKind.REVIEW,
-            }:
+            elif task is TaskKind.CLARIFICATION:
+                preferences = ("fable", "opus", "best", "sonnet", "haiku")
+            elif task in {TaskKind.DIAGNOSTIC, TaskKind.REVIEW}:
                 preferences = ("opus", "best", "fable", "sonnet", "haiku")
             elif task in {TaskKind.SKETCH, TaskKind.MAINTENANCE}:
                 preferences = ("sonnet", "opus", "best", "fable", "haiku")
@@ -1542,7 +1540,7 @@ class ProviderService:
             return Difficulty.LOW
         if task in {TaskKind.SKETCH, TaskKind.MAINTENANCE}:
             return Difficulty.MEDIUM
-        if task is TaskKind.DUPLICATE_PROOF:
+        if task in {TaskKind.CLARIFICATION, TaskKind.DUPLICATE_PROOF}:
             return Difficulty.XHIGH
         return Difficulty.HIGH
 
@@ -1557,6 +1555,14 @@ class ProviderService:
         if recommended in allowed:
             return recommended
         preferences = {
+            TaskKind.CLARIFICATION: (
+                Difficulty.XHIGH,
+                Difficulty.HIGH,
+                Difficulty.MAX,
+                Difficulty.MEDIUM,
+                Difficulty.LOW,
+                Difficulty.AUTO,
+            ),
             TaskKind.PROOF: (
                 Difficulty.HIGH,
                 Difficulty.XHIGH,

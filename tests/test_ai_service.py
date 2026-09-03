@@ -930,7 +930,7 @@ def test_machine_defaults_reject_fable_after_claude_cli_downgrade(tmp_path):
     [
         (TaskKind.PROOF, "best", Difficulty.HIGH),
         (TaskKind.DUPLICATE_PROOF, "fable", Difficulty.XHIGH),
-        (TaskKind.CLARIFICATION, "opus", Difficulty.HIGH),
+        (TaskKind.CLARIFICATION, "fable", Difficulty.XHIGH),
         (TaskKind.DIAGNOSTIC, "opus", Difficulty.HIGH),
         (TaskKind.REVIEW, "opus", Difficulty.HIGH),
         (TaskKind.SKETCH, "sonnet", Difficulty.MEDIUM),

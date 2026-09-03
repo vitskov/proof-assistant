@@ -21,7 +21,7 @@ from proof_assistant.tui.theme import PROOF_DARK_THEME, PROOF_LIGHT_THEME
 from tests.test_tui_providers import ProviderWorkflowFake, _snapshot, wait_for
 
 _CLAUDE_DEFAULTS = {
-    TaskKind.CLARIFICATION: ("opus", Difficulty.HIGH),
+    TaskKind.CLARIFICATION: ("fable", Difficulty.XHIGH),
     TaskKind.DIAGNOSTIC: ("opus", Difficulty.HIGH),
     TaskKind.PROOF: ("best", Difficulty.HIGH),
     TaskKind.SKETCH: ("sonnet", Difficulty.MEDIUM),

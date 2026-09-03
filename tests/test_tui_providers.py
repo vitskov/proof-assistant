@@ -646,7 +646,7 @@ async def test_first_run_routes_to_setup_and_blocks_main_menu() -> None:
         )
         assert "Available models and exact difficulties" in summary
         await settle_screen(pilot)
-        await pilot.press("f2")
+        app.action_main_menu()
         await wait_for(
             pilot,
             lambda: (
@@ -654,7 +654,7 @@ async def test_first_run_routes_to_setup_and_blocks_main_menu() -> None:
                 and "Finish primary AI setup" in notice_text(screen)
             ),
         )
-        await pilot.press("f3")
+        app.action_global_settings()
         await wait_for(
             pilot,
             lambda: (
@@ -662,7 +662,7 @@ async def test_first_run_routes_to_setup_and_blocks_main_menu() -> None:
                 and "Finish first-run provider setup" in notice_text(screen)
             ),
         )
-        await pilot.press("f2")
+        app.action_main_menu()
         await wait_for(pilot, lambda: app.screen is screen)
 
 
@@ -714,10 +714,10 @@ async def test_first_run_ready_alternate_provider_can_be_selected_and_saved() ->
         screen.query_one("#ai-first-run-next", Button).press()
         await wait_for(
             pilot,
-            lambda: screen.query_one(
-                "#ai-settings-pages", ContentSwitcher
-            ).current
-            == "connection-page",
+            lambda: (
+                screen.query_one("#ai-settings-pages", ContentSwitcher).current
+                == "connection-page"
+            ),
         )
         screen.query_one("#ai-first-run-next", Button).press()
         await wait_for(
@@ -1519,7 +1519,7 @@ async def test_newer_f2_notice_survives_stale_defaults_completion() -> None:
 
         screen.query_one("#ai-use-recommended", Button).press()
         await wait_for(pilot, service.recommended_defaults_started.is_set)
-        await pilot.press("f2")
+        app.action_main_menu()
         await wait_for(
             pilot,
             lambda: (
@@ -1915,7 +1915,7 @@ async def test_api_key_is_one_shot_and_never_remains_in_dom_or_screen_repr() -> 
             pilot,
             lambda: bool(app.screen.query("#settings-destructive-cancel").nodes),
         )
-        await pilot.press("f2")
+        app.action_main_menu()
         await wait_for(pilot, lambda: app.screen is screen)
         assert service.credential_deleted == []
 
@@ -2006,12 +2006,12 @@ async def test_api_key_is_destroyed_across_back_and_global_navigation() -> None:
         assert retained_input.value == ""
 
         _screen, retained_input = await open_with_secret("secret-f2")
-        await pilot.press("f2")
+        app.action_main_menu()
         await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
         assert retained_input.value == ""
 
         _screen, retained_input = await open_with_secret("secret-f3")
-        await pilot.press("f3")
+        app.action_global_settings()
         await wait_for(pilot, lambda: isinstance(app.screen, SettingsHomeScreen))
         assert retained_input.value == ""
 
@@ -2160,9 +2160,7 @@ async def test_overlapping_task_policy_loads_cannot_finish_out_of_order() -> Non
         await wait_for(pilot, lambda: isinstance(app.screen, AIProviderSettingsScreen))
         screen = app.screen
         assert isinstance(screen, AIProviderSettingsScreen)
-        await wait_for(
-            pilot, lambda: set(screen._machine_role_drafts) == set(TaskKind)
-        )
+        await wait_for(pilot, lambda: set(screen._machine_role_drafts) == set(TaskKind))
 
         base = service.ai_task_policies()
         older = tuple(replace(policy, model="gpt-5.6-sol") for policy in base)
@@ -2203,8 +2201,7 @@ async def test_overlapping_task_policy_loads_cannot_finish_out_of_order() -> Non
         screen._load_task_policies()
         await wait_for(
             pilot,
-            lambda: screen._machine_role_drafts[TaskKind.PROOF][0]
-            == "gpt-5.6-terra",
+            lambda: screen._machine_role_drafts[TaskKind.PROOF][0] == "gpt-5.6-terra",
         )
 
         older_release.set()
@@ -2292,8 +2289,10 @@ async def test_project_loads_reject_out_of_order_results_and_post_request_edits(
         screen._load_project_settings()
         await wait_for(
             pilot,
-            lambda: screen.project_settings is not None
-            and screen.project_settings.revision == 2,
+            lambda: (
+                screen.project_settings is not None
+                and screen.project_settings.revision == 2
+            ),
         )
         first_release.set()
         await wait_for(pilot, lambda: record_calls == 2)
@@ -2306,8 +2305,7 @@ async def test_project_loads_reject_out_of_order_results_and_post_request_edits(
         screen.query_one("#project-ai-role-model", Select).value = "gpt-5.6-sol"
         await wait_for(
             pilot,
-            lambda: screen._project_role_drafts[TaskKind.PROOF][0]
-            == "gpt-5.6-sol",
+            lambda: screen._project_role_drafts[TaskKind.PROOF][0] == "gpt-5.6-sol",
         )
         edit_release.set()
         await wait_for(pilot, lambda: record_calls == 3)
@@ -2382,8 +2380,9 @@ async def test_setup_refreshes_reject_out_of_order_and_pre_mutation_results() ->
         screen.refresh_setup()
         await wait_for(
             pilot,
-            lambda: screen.snapshot is not None
-            and screen.snapshot.settings.revision == 2,
+            lambda: (
+                screen.snapshot is not None and screen.snapshot.settings.revision == 2
+            ),
         )
         first_release.set()
         await wait_for(pilot, lambda: record_calls == 2)
@@ -2452,9 +2451,9 @@ async def test_credential_store_serializes_backend_mutations() -> None:
         assert screen.query_one("#ai-configure-driver", Select).disabled
         assert screen.query_one("#ai-settings-nav", OptionList).disabled
 
-        await pilot.press("f2")
+        app.action_main_menu()
         await wait_for(pilot, lambda: app.screen is screen)
-        await pilot.press("f3")
+        app.action_global_settings()
         await wait_for(pilot, lambda: app.screen is screen)
 
         key_input.value = "second-secret-must-not-submit"
@@ -2507,8 +2506,10 @@ async def test_project_discard_restores_inherited_read_only_editor_state() -> No
         app.screen.query_one("#ai-unsaved-discard", Button).press()
         await wait_for(
             pilot,
-            lambda: app.screen is screen
-            and screen._active_scope is SettingsScopeKind.MACHINE,
+            lambda: (
+                app.screen is screen
+                and screen._active_scope is SettingsScopeKind.MACHINE
+            ),
         )
 
         screen.query_one("#settings-scope", Select).value = SettingsScopeKind.PROJECT
@@ -2542,9 +2543,7 @@ async def test_degraded_provider_discard_keeps_machine_save_disabled() -> None:
         await wait_for(pilot, lambda: isinstance(app.screen, AIProviderSettingsScreen))
         screen = app.screen
         assert isinstance(screen, AIProviderSettingsScreen)
-        await wait_for(
-            pilot, lambda: set(screen._machine_role_drafts) == set(TaskKind)
-        )
+        await wait_for(pilot, lambda: set(screen._machine_role_drafts) == set(TaskKind))
 
         screen._machine_role_drafts[TaskKind.REPORTING] = (
             "gpt-5.6-terra",
@@ -2568,17 +2567,17 @@ async def test_continue_editing_remounts_an_empty_one_shot_secret_field() -> Non
         await wait_for(pilot, lambda: isinstance(app.screen, AIProviderSettingsScreen))
         screen = app.screen
         assert isinstance(screen, AIProviderSettingsScreen)
-        await wait_for(
-            pilot, lambda: set(screen._machine_role_drafts) == set(TaskKind)
-        )
+        await wait_for(pilot, lambda: set(screen._machine_role_drafts) == set(TaskKind))
         await show_ai_settings_view(pilot, screen, "connection")
         screen.query_one(
             "#ai-configure-driver", Select
         ).value = DriverId.OPENAI_API.value
         await wait_for(
             pilot,
-            lambda: bool(screen.query("#ai-api-key").nodes)
-            and not screen.query_one("#ai-api-key", Input).disabled,
+            lambda: (
+                bool(screen.query("#ai-api-key").nodes)
+                and not screen.query_one("#ai-api-key", Input).disabled
+            ),
         )
         old_input = screen.query_one("#ai-api-key", Input)
         old_input.value = "secret-that-must-be-destroyed"
@@ -2587,17 +2586,22 @@ async def test_continue_editing_remounts_an_empty_one_shot_secret_field() -> Non
             Difficulty.HIGH,
         )
 
-        await pilot.press("f2")
+        app.action_main_menu()
         await wait_for(
             pilot,
-            lambda: isinstance(app.screen, UnsavedAISettingsConfirmationScreen),
+            lambda: (
+                isinstance(app.screen, UnsavedAISettingsConfirmationScreen)
+                and bool(app.screen.query("#ai-unsaved-continue").nodes)
+            ),
         )
         app.screen.query_one("#ai-unsaved-continue", Button).press()
         await wait_for(
             pilot,
-            lambda: app.screen is screen
-            and bool(screen.query("#ai-api-key").nodes)
-            and not screen.query_one("#ai-api-key", Input).disabled,
+            lambda: (
+                app.screen is screen
+                and bool(screen.query("#ai-api-key").nodes)
+                and not screen.query_one("#ai-api-key", Input).disabled
+            ),
         )
         new_input = screen.query_one("#ai-api-key", Input)
         assert new_input is not old_input

@@ -7,20 +7,34 @@ screens from inventing subtly different labels for the same interaction.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
+from typing import ClassVar, TypeVar
 
 from textual.app import ComposeResult, RenderResult
-from textual.binding import Binding
+from textual.binding import Binding, BindingType
 from textual.content import Content
 from textual.events import Click
 from textual.reactive import Reactive
 from textual.widget import Widget
-from textual.widgets import Footer, Static
+from textual.widgets import (
+    DataTable as TextualDataTable,
+)
+from textual.widgets import (
+    Footer,
+    Static,
+)
+from textual.widgets import (
+    Input as TextualInput,
+)
+from textual.widgets import (
+    TextArea as TextualTextArea,
+)
 
 
-class AppHeaderIcon(Widget):
-    """Command-palette affordance at the left edge of the app header."""
+class AppHeaderIcon(Widget, can_focus=True):
+    """Keyboard-focusable command-menu affordance in the app header."""
 
     DEFAULT_CSS = """
     AppHeaderIcon {
@@ -30,19 +44,29 @@ class AppHeaderIcon(Widget):
         content-align: left middle;
     }
     AppHeaderIcon:hover { background: $foreground 10%; }
+    AppHeaderIcon:focus {
+        background: $accent;
+        color: $text;
+        text-style: bold;
+    }
     """
 
-    icon: Reactive[str] = Reactive("⭘")
+    BINDINGS = [
+        Binding("enter", "open_menu", show=False),
+        Binding("space", "open_menu", show=False),
+    ]
+
+    icon: Reactive[str] = Reactive("Menu")
 
     def on_mount(self) -> None:
-        if self.app.ENABLE_COMMAND_PALETTE:
-            self.tooltip = "Open the command palette"
-        else:
-            self.disabled = True
+        self.tooltip = "Open commands menu"
 
     async def on_click(self, event: Click) -> None:
         event.stop()
-        await self.run_action("app.command_palette")
+        await self.run_action("app.show_command_menu")
+
+    async def action_open_menu(self) -> None:
+        await self.run_action("app.show_command_menu")
 
     def render(self) -> RenderResult:
         return self.icon
@@ -112,7 +136,7 @@ class AppHeader(Widget):
     """
 
     tall: Reactive[bool] = Reactive(False)
-    icon: Reactive[str] = Reactive("⭘")
+    icon: Reactive[str] = Reactive("Menu")
     time_format: Reactive[str] = Reactive("%X")
 
     def __init__(
@@ -231,19 +255,18 @@ class CommandSpec:
 
 
 HELP = CommandSpec(
-    "f1",
-    "F1",
+    "",
+    "Menu",
     "show_shortcuts",
-    "Keys",
-    "Open the complete keyboard-command reference.",
-    aliases=("?",),
+    "Help",
+    "Open the complete keyboard-command reference from Menu.",
 )
 COMMAND_PALETTE = CommandSpec(
     "ctrl+p",
     "Ctrl+P",
-    "command_palette",
+    "show_command_menu",
     "Commands",
-    "Search Textual commands and available themes.",
+    "Open commands for the current screen and the application.",
 )
 SELECT_ALL = CommandSpec(
     "ctrl+a",
@@ -253,29 +276,29 @@ SELECT_ALL = CommandSpec(
     "Select all content in a text field.",
 )
 TOGGLE_THEME = CommandSpec(
-    "ctrl+t",
-    "Ctrl+T",
+    "",
+    "Menu",
     "toggle_proof_theme",
     "Theme",
     "Switch between the Proof Ink and Proof Paper themes.",
 )
 QUIT = CommandSpec(
-    "ctrl+q",
-    "Ctrl+Q",
+    "",
+    "Menu",
     "quit",
     "Quit",
     "Exit Proof Assistant and return to the shell.",
 )
 MAIN_MENU = CommandSpec(
-    "f2",
-    "F2",
+    "",
+    "Menu",
     "main_menu",
     "Main menu",
     "Return to the Proof Assistant landing screen.",
 )
 GLOBAL_SETTINGS = CommandSpec(
-    "f3",
-    "F3",
+    "",
+    "Menu",
     "global_settings",
     "Settings",
     "Open machine settings from any screen.",
@@ -285,10 +308,10 @@ BACK = CommandSpec("escape", "Esc", "back", "Back", "Return to the prior screen.
 CANCEL = CommandSpec(
     "escape", "Esc", "cancel", "Cancel", "Dismiss a dialog without applying it."
 )
-CLOSE = CommandSpec("q", "Q", "close", "Close", "Close the current viewer to Projects.")
+CLOSE = CommandSpec("escape", "Esc", "close", "Close", "Close the current viewer.")
 CONFIRM = CommandSpec(
-    "ctrl+enter",
-    "Ctrl+Enter",
+    "",
+    "Enter",
     "confirm",
     "Continue",
     "Continue or confirm the current reviewed form.",
@@ -302,56 +325,104 @@ SAVE = CommandSpec(
 )
 
 NEW_PROJECT = CommandSpec(
-    "n", "N", "new_project", "New", "Create a new verification project."
+    "ctrl+n", "Ctrl+N", "new_project", "New", "Create a new verification project."
 )
-REFRESH = CommandSpec("r", "R", "refresh", "Refresh", "Reload current data.")
-SETTINGS = CommandSpec("s", "S", "settings", "Settings", "Open machine settings.")
-VERIFY = CommandSpec("v", "V", "verify", "Verify", "Start a verification iteration.")
+REFRESH = CommandSpec("ctrl+r", "Ctrl+R", "refresh", "Refresh", "Reload current data.")
+SETTINGS = CommandSpec("", "Menu", "settings", "Settings", "Open machine settings.")
+VERIFY = CommandSpec("", "Menu", "verify", "Verify", "Start a verification iteration.")
 CHECK_CHANGES = CommandSpec(
-    "c", "C", "check_changes", "Changes", "Check the manuscript for changes."
+    "", "Menu", "check_changes", "Changes", "Check the manuscript for changes."
 )
 OPEN = CommandSpec(
-    "o",
-    "O",
+    "ctrl+o",
+    "Ctrl+O",
     "open",
     "Open",
     "Open the focused project, source file, or folder.",
 )
 REPORT = CommandSpec(
-    "r", "R", "report", "Report", "Open the terminal verification report."
+    "", "Menu", "report", "Report", "Open the terminal verification report."
 )
 FAILURES = CommandSpec(
-    "f", "F", "failures", "Failures", "Open failure dependency analysis."
+    "", "Menu", "failures", "Failures", "Open failure dependency analysis."
 )
-RETRY = CommandSpec("r", "R", "retry", "Retry", "Retry or recover the project.")
+RETRY = CommandSpec(
+    "ctrl+r", "Ctrl+R", "retry", "Retry", "Retry or recover the project."
+)
 PREVIOUS = CommandSpec(
-    "[", "[", "previous", "Previous", "Show the previous clarification."
+    "", "Menu", "previous", "Previous", "Show the previous clarification."
 )
-NEXT = CommandSpec("]", "]", "next", "Next", "Show the next clarification.")
-PARENT_FOLDER = CommandSpec(
-    "backspace", "Backspace", "parent", "Up", "Open the parent folder."
-)
-HOME_FOLDER = CommandSpec(
-    "ctrl+home", "Ctrl+Home", "home_folder", "Home", "Open the home folder."
-)
+NEXT = CommandSpec("", "Menu", "next", "Next", "Show the next clarification.")
+PARENT_FOLDER = CommandSpec("", "Menu", "parent", "Up", "Open the parent folder.")
+HOME_FOLDER = CommandSpec("", "Menu", "home_folder", "Home", "Open the home folder.")
 CANCEL_JOB = CommandSpec(
-    "c", "C", "cancel_job", "Cancel", "Request cooperative job cancellation."
+    "", "Menu", "cancel_job", "Cancel", "Request cooperative job cancellation."
 )
 DETACH_JOB = CommandSpec(
-    "d", "D", "detach_job", "Detach", "Stop observing while the job continues."
+    "", "Menu", "detach_job", "Detach", "Stop observing while the job continues."
 )
 
-# Alternative help is intentionally non-priority: typing '?' in an editable field
-# remains ordinary text input, while F1 always opens the reference screen.
 GLOBAL_BINDINGS: list[Binding | tuple[str, str] | tuple[str, str, str]] = [
-    HELP.binding(priority=True),
-    Binding("question_mark", "show_shortcuts", show=False),
-    MAIN_MENU.binding(priority=True),
-    GLOBAL_SETTINGS.binding(priority=True),
     COMMAND_PALETTE.binding(priority=True),
-    TOGGLE_THEME.binding(priority=True),
-    QUIT.binding(priority=True),
 ]
+
+
+_LEGACY_TEXT_KEYS = {
+    "ctrl+a",
+    "ctrl+d",
+    "ctrl+e",
+    "ctrl+k",
+    "ctrl+shift+k",
+    "ctrl+u",
+    "ctrl+w",
+}
+
+
+def _desktop_bindings(bindings: Iterable[BindingType]) -> list[BindingType]:
+    """Keep desktop editing keys while dropping terminal/Emacs/F-key aliases."""
+
+    sanitized: list[BindingType] = []
+    for binding in bindings:
+        if not isinstance(binding, Binding):
+            binding = Binding(*binding)
+        keys = tuple(key.strip() for key in binding.key.split(","))
+        allowed = tuple(
+            key
+            for key in keys
+            if key not in _LEGACY_TEXT_KEYS
+            and not key.startswith("alt+")
+            and not (key.startswith("f") and key[1:].isdigit())
+        )
+        if allowed:
+            sanitized.append(binding.with_key(",".join(allowed)))
+    return sanitized
+
+
+class DesktopInput(TextualInput, inherit_bindings=False):
+    """Text input with familiar desktop selection and clipboard bindings."""
+
+    BINDINGS = [
+        SELECT_ALL.binding(show=False),
+        *_desktop_bindings(TextualInput.BINDINGS),
+    ]
+
+
+class DesktopTextArea(TextualTextArea, inherit_bindings=False):
+    """Text area without inherited function-key or Emacs-style aliases."""
+
+    BINDINGS = [
+        SELECT_ALL.binding(show=False),
+        *_desktop_bindings(TextualTextArea.BINDINGS),
+    ]
+
+
+CellType = TypeVar("CellType", default=str)
+
+
+class DesktopDataTable(TextualDataTable[CellType], inherit_bindings=False):
+    """Data table exposing only its standard navigation bindings."""
+
+    BINDINGS: ClassVar[list[BindingType]] = _desktop_bindings(TextualDataTable.BINDINGS)
 
 
 @dataclass(frozen=True)
@@ -368,18 +439,11 @@ def _reference(command: CommandSpec) -> ReferenceCommand:
 SHORTCUT_GROUPS: tuple[tuple[str, tuple[ReferenceCommand, ...]], ...] = (
     (
         "Everywhere",
-        tuple(
-            map(
-                _reference,
-                (
-                    HELP,
-                    MAIN_MENU,
-                    GLOBAL_SETTINGS,
-                    COMMAND_PALETTE,
-                    TOGGLE_THEME,
-                    QUIT,
-                ),
-            )
+        (
+            _reference(COMMAND_PALETTE),
+            ReferenceCommand(
+                "Menu", "Application", "Open Projects, Settings, Help, Theme, or Quit."
+            ),
         ),
     ),
     (
@@ -407,34 +471,34 @@ SHORTCUT_GROUPS: tuple[tuple[str, tuple[ReferenceCommand, ...]], ...] = (
         tuple(
             map(
                 _reference,
-                (NEW_PROJECT, REFRESH, SETTINGS, VERIFY, CHECK_CHANGES, OPEN, BACK),
+                (NEW_PROJECT, REFRESH, OPEN, BACK),
             )
         ),
     ),
     (
         "Setup and review",
-        tuple(map(_reference, (BACK, CANCEL, CONFIRM, PARENT_FOLDER, HOME_FOLDER))),
+        tuple(map(_reference, (BACK, CANCEL))),
     ),
     (
         "Progress",
-        tuple(map(_reference, (CANCEL_JOB, DETACH_JOB))),
+        (ReferenceCommand("Menu", "Actions", "Cancel or detach explicitly."),),
     ),
     (
         "Clarifications",
-        tuple(map(_reference, (PREVIOUS, NEXT, CHECK_CHANGES, OPEN))),
+        (ReferenceCommand("Menu", "Actions", "Use visible clarification controls."),),
     ),
     (
         "Results and recovery",
         tuple(
             map(
                 _reference,
-                (CHECK_CHANGES, REPORT, FAILURES, RETRY, OPEN, BACK, CLOSE),
+                (RETRY, OPEN, BACK, CLOSE),
             )
         ),
     ),
     (
         "Settings",
-        tuple(map(_reference, (BACK, REFRESH, SAVE, CONFIRM, CANCEL))),
+        tuple(map(_reference, (BACK, REFRESH, SAVE, CANCEL))),
     ),
 )
 
@@ -443,9 +507,9 @@ def shortcut_reference_text() -> str:
     """Render the canonical command registry as an SSH-safe text reference."""
 
     lines = [
-        "Commands shown in the footer are available on the current screen.",
-        "F1-F3 are global and safe while typing; ? opens help outside text fields.",
-        "On a dialog, F2 or F3 dismisses the dialog first; press again to navigate.",
+        "The footer shows keyboard commands available on the current screen.",
+        "Menu shows the current screen's visible actions plus application commands.",
+        "Tab moves focus; Enter activates the focused control; Esc goes back once.",
         "",
     ]
     for group_name, commands in SHORTCUT_GROUPS:

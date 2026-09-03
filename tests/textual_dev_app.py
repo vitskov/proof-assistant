@@ -125,7 +125,7 @@ class ResponsiveFoundationApp(App[None]):
                     yield Button("Restore role")
                 with Horizontal(id="role-content"):
                     yield OptionList(
-                        Option("Author clarification       Opus    High"),
+                        Option("Author clarification       Fable   Extra high"),
                         Option("Scan / triage diagnostics  Opus    High"),
                         Option("Primary prove agent        Best    High"),
                         Option("Sketch agent               Sonnet  Medium"),

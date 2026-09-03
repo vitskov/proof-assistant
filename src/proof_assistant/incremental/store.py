@@ -9,7 +9,7 @@ from typing import Any, cast
 
 from .models import ClaimState, LeanDeclaration, ManuscriptEdge, Snapshot, SourceObject
 
-DATABASE_SCHEMA_VERSION = 4
+DATABASE_SCHEMA_VERSION = 5
 FAILURE_SCOPES = frozenset({"RUN", "BATCH", "CLAIM", "COMPONENT"})
 FAILURE_KINDS = frozenset(
     {
@@ -22,6 +22,7 @@ FAILURE_KINDS = frozenset(
         "UNKNOWN",
     }
 )
+CLARIFICATION_ORIGINS = frozenset({"HOST_POLICY", "PROOF_WORKER", "LEGACY_UNKNOWN"})
 
 
 def _row(cursor: sqlite3.Cursor) -> sqlite3.Row | None:
@@ -192,7 +193,17 @@ CREATE TABLE IF NOT EXISTS clarifications (
     status TEXT NOT NULL,
     created_run INTEGER NOT NULL,
     resolved_run INTEGER,
-    resolution TEXT
+    resolution TEXT,
+    origin TEXT NOT NULL DEFAULT 'LEGACY_UNKNOWN'
+);
+
+CREATE TABLE IF NOT EXISTS clarification_analyses (
+    analysis_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    question_id TEXT NOT NULL,
+    evidence_sha256 TEXT NOT NULL,
+    status TEXT NOT NULL,
+    analysis_json TEXT NOT NULL,
+    UNIQUE(question_id, evidence_sha256)
 );
 
 CREATE TABLE IF NOT EXISTS run_claims (
@@ -221,6 +232,8 @@ CREATE INDEX IF NOT EXISTS claim_versions_snapshot ON claim_versions(snapshot_co
 CREATE INDEX IF NOT EXISTS clarification_open ON clarifications(status, claim_id);
 CREATE UNIQUE INDEX IF NOT EXISTS one_open_question_per_claim
 ON clarifications(claim_id) WHERE status = 'OPEN';
+CREATE INDEX IF NOT EXISTS clarification_analysis_lookup
+ON clarification_analyses(question_id, evidence_sha256);
 """
 
 MIGRATION_2_SQL = """
@@ -360,6 +373,15 @@ class StateStore:
             self.connection.execute(
                 "ALTER TABLE claim_versions "
                 "ADD COLUMN assistant_references_json TEXT NOT NULL DEFAULT '[]'"
+            )
+        clarification_columns = {
+            str(row[1])
+            for row in self.connection.execute("PRAGMA table_info(clarifications)")
+        }
+        if "origin" not in clarification_columns:
+            self.connection.execute(
+                "ALTER TABLE clarifications "
+                "ADD COLUMN origin TEXT NOT NULL DEFAULT 'LEGACY_UNKNOWN'"
             )
         if version < DATABASE_SCHEMA_VERSION:
             self.set_metadata("schema_version", str(DATABASE_SCHEMA_VERSION))
@@ -1448,9 +1470,12 @@ class StateStore:
         possible_resolutions: Sequence[str],
         blocking_claims: Sequence[str],
         run_id: int,
+        origin: str = "LEGACY_UNKNOWN",
     ) -> str:
         if self.claim_row(claim_id) is None:
             raise KeyError(f"Unknown claim: {claim_id}")
+        if origin not in CLARIFICATION_ORIGINS:
+            raise ValueError(f"Invalid clarification origin: {origin}")
         existing = self.connection.execute(
             "SELECT question_id FROM clarifications WHERE claim_id = ? AND status = 'OPEN'",
             (claim_id,),
@@ -1462,8 +1487,9 @@ class StateStore:
             """
             INSERT INTO clarifications(
                 question_id, claim_id, snapshot_commit, category, passage,
-                problem, resolutions_json, blocking_claims_json, status, created_run
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?)
+                problem, resolutions_json, blocking_claims_json, status, created_run,
+                origin
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?)
             """,
             (
                 question_id,
@@ -1475,6 +1501,7 @@ class StateStore:
                 self._json(tuple(possible_resolutions)),
                 self._json(tuple(blocking_claims)),
                 run_id,
+                origin,
             ),
         )
         return question_id
@@ -1496,8 +1523,23 @@ class StateStore:
         problem: str,
         possible_resolutions: Sequence[str],
         blocking_claims: Sequence[str],
+        origin: str | None = None,
     ) -> None:
         """Refresh deterministic facts for an existing policy question."""
+
+        if origin is not None and origin not in CLARIFICATION_ORIGINS:
+            raise ValueError(f"Invalid clarification origin: {origin}")
+        existing = self.connection.execute(
+            "SELECT origin FROM clarifications WHERE claim_id = ? AND status = 'OPEN'",
+            (claim_id,),
+        ).fetchone()
+        if (
+            origin is not None
+            and existing is not None
+            and str(existing["origin"]) != "LEGACY_UNKNOWN"
+            and str(existing["origin"]) != origin
+        ):
+            raise ValueError("Clarification origin is immutable")
 
         self.connection.execute(
             """
@@ -1516,6 +1558,42 @@ class StateStore:
                 claim_id,
             ),
         )
+
+    def clarification_analysis(
+        self, question_id: str, evidence_sha256: str
+    ) -> sqlite3.Row | None:
+        return _row(
+            self.connection.execute(
+                """
+                SELECT * FROM clarification_analyses
+                WHERE question_id = ? AND evidence_sha256 = ?
+                """,
+                (question_id, evidence_sha256),
+            )
+        )
+
+    def append_clarification_analysis(
+        self,
+        *,
+        question_id: str,
+        evidence_sha256: str,
+        status: str,
+        analysis: dict[str, Any],
+    ) -> sqlite3.Row:
+        """Persist one immutable analysis per question/evidence identity."""
+
+        self.connection.execute(
+            """
+            INSERT OR IGNORE INTO clarification_analyses(
+                question_id, evidence_sha256, status, analysis_json
+            ) VALUES (?, ?, ?, ?)
+            """,
+            (question_id, evidence_sha256, status, self._json(analysis)),
+        )
+        row = self.clarification_analysis(question_id, evidence_sha256)
+        if row is None:
+            raise RuntimeError("Clarification analysis was not persisted")
+        return row
 
     def question_row(self, question_id: str) -> sqlite3.Row | None:
         return _row(
