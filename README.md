@@ -1,14 +1,11 @@
 # Proof Assistant
 
-Proof Assistant is an interactive formal referee for mathematics manuscripts typeset in LaTeX. Point
+Proof Assistant is an interactive proof-checker for mathematics manuscripts typeset in LaTeX. Point
 it at a manuscript folder, describe what should be checked, and it builds a
 persistent Lean verification project. When the manuscript changes, it preserves
 valid work and revisits only the affected part of the proof graph.
 
-The normal interface is a terminal application. It guides you through starting
-or resuming a project, shows verification progress and findings, and presents
-clarification requests beside the exact highlighted LaTeX source that needs
-attention.
+The normal interface is a terminal application. 
 
 ## What it is for
 
@@ -24,10 +21,7 @@ attention.
 - Keep source snapshots, reports, questions, Lean code, and history together in
   one durable project.
 
-Lean—not the language model—decides whether formal evidence is accepted.
-Certification requires an independently built declaration with a proof body,
-recorded source and environment provenance, and no `sorry`, `admit`, or newly
-introduced project axiom.
+Lean decides whether formal evidence is accepted. Certification requires an independently built declaration with a proof body,recorded source and environment provenance.
 
 ## Quick start
 
