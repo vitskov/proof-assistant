@@ -91,7 +91,9 @@ have strict boundaries described in [Architecture](ARCHITECTURE.md).
   filesystem events alone cannot authorize import.
 - Confirmation must reject a stale source inventory or project generation.
 - Resume behavior comes from persisted state, not a remembered screen.
-- AI clarification presentation cannot alter deterministic question facts.
+- AI clarification analysis cannot alter deterministic question facts, resolve
+  a question, cite evidence outside its content-hashed packet, or run during
+  cache-only resume.
 - `proof_assistant.ai` owns provider selection, credential indirection,
   catalog provenance, task policy, and provider execution. Do not route around
   it through RepoProver's legacy provider client or a TUI-only setup path.
@@ -141,9 +143,9 @@ textual run --dev tests/textual_dev_app.py
 ```
 
 The fixture shows the eight-role Claude layout, including Fable / extra-high
-for the Independent prove agent, without connecting to a provider. Use it to
-inspect focus, resize behavior, and Textual log messages. Record diagnostics
-with:
+for Author clarification and the Independent prove agent, without connecting
+to a provider. Use it to inspect focus, resize behavior, and Textual log
+messages. Record diagnostics with:
 
 ```bash
 python -m textual_dev diagnose
@@ -172,8 +174,9 @@ Test the Textual app with its pilot/headless driver. Cover:
 7. rejection of Dropbox managed project destinations;
 8. a progress view that lists the main/input closure, shows every typed stage,
    and exposes selectable/copyable read-only text;
-9. clarification rendering with the actual multi-file source path and
-   highlighted lines;
+9. clarification rendering with the actual multi-file source path, highlighted
+   lines, immutable observed problem, origin, and evidence-grounded best-guess
+   analysis with provider/model/effort provenance;
 10. stable multi-file change detection and complete impact preview;
 11. explicit confirmation, plus rejection/recomputation of stale plans;
 12. no-change resume returning to the existing clarification screen;
@@ -182,9 +185,10 @@ Test the Textual app with its pilot/headless driver. Cover:
 15. an 80×24 terminal-native report viewer with rendered Markdown, a selectable
     source tab, no OS opener call, normalized load errors, and Back/Close
     navigation; and
-16. a permanent context-sensitive command footer, F1 shortcut reference,
-    editable-field-safe `?`, command palette, and WCAG-checked light/dark
-    semantic themes at both ordinary and 80×24 terminal sizes; and
+16. a permanent context-sensitive command footer; focusable and searchable
+    Menu; Ctrl+P activation; Esc focus restoration; no function-key,
+    unmodified-letter, bracket, Ctrl+Enter, or Vim/Emacs command aliases; and
+    WCAG-checked light/dark semantic themes at ordinary and 80×24 sizes; and
 17. all eight AI role rows at 120×40, explicit machine/project scope,
     provider-default and one-level Undo behavior, selection preservation, and
     removal of secret input values from the DOM when leaving the connection
@@ -257,7 +261,10 @@ artifacts, and temporary files before any authorized publication.
 
 Clarification-screen tests must verify that the exact segment is rendered
 inline as read-only, line-numbered, syntax-highlighted LaTeX at every supported
-terminal size. The TUI must not launch an editor. Installer tests must preserve
+terminal size. They must also verify evidence-ID validation, origin/hash/status
+matching, unavailable fallbacks, no provider call on resume, separation of the
+observed problem from generated prose, and exclusion of unrelated dependency
+diagnostics. The TUI must not launch an editor. Installer tests must preserve
 terminal-editor discovery and installation order (`nano`, `pico`, `micro`) on
 simulated Linux and macOS paths; they must never invoke a real package manager
 or modify shell files outside the test home.

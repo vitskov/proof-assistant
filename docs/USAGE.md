@@ -25,37 +25,38 @@ The welcome screen then offers **New project** and **Resume project**.
 ### Keyboard commands and themes
 
 The footer is permanent and changes with the active screen and focused control,
-so the relevant commands remain visible without memorization. Press **F1** at
-any time for a scrollable reference containing every application shortcut.
-The `?` key is an additional help shortcut when focus is not inside a text
-field; in an editor it remains normal text input.
+so the relevant commands remain visible without memorization. The focusable
+**Menu** control in the header and **Ctrl+P** both open a searchable command
+menu. With an empty search it shows the current screen's visible actions plus
+Help, Projects, Settings, Theme, and Quit. Closing it with **Esc** restores the
+exact screen and focused control from which it opened.
 
 The common vocabulary is consistent throughout the application:
 
-- **Esc** goes back or safely cancels a modal;
-- **F2** returns to the main menu without cancelling a backend verification;
-- **F3** opens machine settings from any ordinary screen;
-- **Ctrl+Enter** confirms or continues a reviewed form;
-- **Ctrl+S** saves settings;
-- **Ctrl+P** opens the searchable command palette;
-- **Ctrl+T** switches between **Proof Ink** (dark) and **Proof Paper** (light);
-  and
-- **Ctrl+Q** exits the application.
+- **Tab** and **Shift+Tab** move focus between controls;
+- **Enter** activates the focused control;
+- arrow keys navigate lists, tables, trees, and text;
+- **Esc** goes back once or safely cancels a modal;
+- **Ctrl+P** opens the command menu from anywhere;
+- **Ctrl+N**, **Ctrl+O**, and **Ctrl+R** provide New, Open, and Refresh/Retry
+  where the footer shows them;
+- **Ctrl+S** saves settings; and
+- **Ctrl+A**, followed by the terminal's copy command, selects and copies a
+  focused text pane.
 
-Letter shortcuts follow the visible action name on their current screen, such
-as **N** for New, **R** for Refresh/Retry, **S** for Settings, **V** for Verify,
-and **O** for Open. The F1 reference documents navigation and less frequent
-contextual commands as well.
+Help, Projects, Settings, Theme, Quit, and less frequent screen actions are in
+**Menu**. Proof Assistant intentionally avoids function keys, unmodified letter
+commands, bracket navigation, `Ctrl+Enter`, and Vim/Emacs command conventions.
 
 On the welcome screen, the first resumable project receives focus after the
-catalog loads, so **Enter** opens it directly. **O** opens the project in the
+catalog loads, so **Enter** opens it directly. **Ctrl+O** opens the project in the
 focused row, or the most recently active resumable project when focus is
 elsewhere.
 
-F2/F3 are cancel-first on a modal dialog: the first press dismisses the dialog
-without accepting it, and a second press performs the navigation. Settings is
-an overlay, so closing it restores the exact prior screen. Leaving a progress
-screen detaches only the TUI observer; the detached backend job continues.
+Global menu navigation is cancel-first on a modal dialog: dismiss the modal
+with **Esc**, then choose the destination from **Menu**. Settings is an overlay,
+so closing it restores the exact prior screen. Leaving a progress screen
+detaches only the TUI observer; the detached backend job continues.
 
 ## Start a project
 
@@ -244,18 +245,34 @@ without duplicating the same content in a second pane.
 
 The clarification screen displays:
 
+- a compact **Best current guess** banner above the source and diagnosis panes;
 - the affected claim and question category;
 - the actual relative and absolute input-file path;
 - a line-numbered, syntax-highlighted LaTeX excerpt;
 - highlighted source lines requiring attention;
-- the reason the verifier cannot safely guess;
+- the immutable observed reason verification stopped;
+- the question origin: proof worker, host policy, or legacy/unknown;
+- the AI-assisted hypothesis, confidence, evidence-backed reasoning,
+  alternatives, uncertainties, and recommended author check;
+- the provider, model, and reasoning effort used for that analysis;
 - possible resolutions; and
 - the blocked portion of the proof tree.
 
 The deterministic backend chooses the source file, byte/line span, quotation,
-claim, diagnostics, and affected graph. An isolated AI presentation pass may
-make the wording clearer, but cannot change those facts. Invalid presentation
-output falls back to a deterministic explanation.
+claim, observed problem, diagnostics, and affected graph. For a newly generated
+clarification it also builds a deterministic evidence packet containing the
+question, full relevant claims/proofs, direct dependency endpoints and paths,
+certificates, diagnostics, and failure artifacts. An isolated, tool-free AI
+turn uses the exact clarification-role provider/model/effort frozen into that
+verification job. Every factual reasoning statement must cite an evidence ID.
+The resulting hypothesis is advisory: it is not a Lean result, proof,
+certificate, or confirmed statement of author intent.
+
+Presentation and analysis output are schema- and provenance-validated before
+they are displayed or loaded. Unknown evidence IDs, mismatched evidence hashes,
+and malformed stored rows are rejected. In that case the screen preserves the
+authoritative observed problem and says that the best current guess is
+unavailable instead of inventing one.
 
 The exact affected segment stays on the clarification screen as read-only,
 line-numbered, syntax-highlighted LaTeX, with the relevant lines emphasized.
@@ -304,6 +321,13 @@ The project database, not the TUI widget tree, is authoritative. On resume:
 | interrupted run | recovery/retry |
 | provider or Lean failure | diagnostic/retry |
 | legacy verification worker still active | attached coarse progress/status |
+
+Resume is cache-only for clarification analysis: it validates and displays the
+analysis already bound to that question and evidence, but never starts a paid
+AI turn merely because the project was opened. A historical clarification that
+predates stored analysis therefore shows **Best current guess unavailable**.
+If the external manuscript changed, Change Review takes precedence so the user
+reviews the actual new source before returning to or superseding the question.
 
 The welcome screen uses the same backend project classifier as creation. It
 shows resumable projects, legacy projects needing a main-file choice,
@@ -361,7 +385,8 @@ evidence is preserved; the TUI never edits project metadata itself.
 
 ## AI provider settings
 
-Press **F3**, then open **Verification AI**. This destination is split into
+Open **Menu** (or press **Ctrl+P**), choose **Settings**, then open
+**Verification AI**. This destination is split into
 **Role assignments**, **Provider connection**, and **Provider diagnostics**, so
 the complete role team is not buried below connection and diagnostic controls.
 Provider connection shows the machine-wide primary driver,

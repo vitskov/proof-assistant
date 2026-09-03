@@ -3,7 +3,7 @@
 ## Source of truth
 
 - Status: Implemented responsive baseline and living design contract
-- Last refreshed: 2026-09-01
+- Last refreshed: 2026-09-03
 - Primary product surfaces: terminal project catalog, project creation, project
   dashboard, live verification, author clarification, findings and failure
   analysis, report viewing, and machine/project settings.
@@ -105,17 +105,18 @@ layout rule.
 
 Keep global navigation stable:
 
-- `F1` Help
-- `F2` Main menu
-- `F3` Settings
-- `Ctrl+P` Commands
-- `Ctrl+T` Theme
+- the visible, focusable **Menu** control in the header;
+- `Ctrl+P` as the only global keyboard binding;
+- Help, Projects, Settings, Theme, and Quit as named Menu destinations; and
+- live actions from the current screen above those application destinations.
 
-Do not add more global function-key destinations without a strong product-level
-reason. Screen-specific tasks belong in the visible workspace and command
-palette. During first-run AI onboarding, `F2` cannot bypass the readiness gate;
-it explains what remains incomplete. `Ctrl+Q` may still exit the application
-without saving or starting a project.
+The Menu is searchable, opens with the current focus as its return point, and
+restores that exact screen/focus when dismissed with `Esc`. Screen-specific
+tasks belong in the visible workspace and Menu. Do not introduce function-key,
+unmodified-letter, bracket, `Ctrl+Enter`, or Vim/Emacs command aliases. During
+first-run AI onboarding, Projects and Settings cannot bypass the readiness
+gate; the current screen explains what remains incomplete. Quit remains an
+explicit Menu action.
 
 ### Navigation depth
 
@@ -182,9 +183,9 @@ First-run navigation contract:
 
 - `Esc` returns to the previous onboarding step but cannot leave an unready
   setup for the main menu.
-- `F2` explains that one ready primary provider must be saved before starting a
-  project.
-- `Ctrl+Q` exits without treating onboarding as complete.
+- Choosing **Projects** or **Settings** from Menu explains that one ready
+  primary provider and a reviewed eight-role team must be saved first.
+- **Quit** exits without treating onboarding as complete.
 - Refresh/recheck preserves the selected provider and current step.
 - An install, authentication, catalog, or network failure stays on the Connect
   step, keeps the safe next action visible, and exposes copyable details without
@@ -365,7 +366,7 @@ At 140 columns and wider:
  │ Runtime        │ [Use Claude recommendations]                            │
  │ Advanced       ├ Verification team ───────────────┬ Selected role ──────┤
  │                │ Role             Model   Effort  State  │ Independent  │
- │                │ Clarification    Opus    High    Recomm.│ Rechecks the │
+ │                │ Clarification    Fable   X-high  Recomm.│ Rechecks the │
  │                │ Diagnostics      Opus    High    Recomm.│ main proof.  │
  │                │ Sketch           Sonnet  Medium  Recomm.│              │
  │                │ Primary proof    Best    High    Recomm.│ Model Fable  │
@@ -394,7 +395,7 @@ snapshot review is:
 
 | Stable `TaskKind` | Display role | Model | Effort |
 | --- | --- | --- | --- |
-| `clarification` | Author clarification | `opus` | High |
+| `clarification` | Author clarification | `fable` | Extra high (`xhigh`) |
 | `diagnostic` | Scan / triage diagnostics | `opus` | High |
 | `proof` | Primary prove agent | `best` | High |
 | `sketch` | Sketch agent | `sonnet` | Medium |
@@ -460,20 +461,29 @@ primary proof; do not expose “Duplicate proof” as a competing display name.
 ### Clarification reference layout
 
 - Persistent context: project, question number/count, affected file and lines.
+- A compact **Best current guess** banner is always visible above the main
+  workspace. It either shows the confidence-rated AI-assisted hypothesis or an
+  honest unavailable state; it always says that the hypothesis is not a Lean
+  result or confirmed author intent.
 - The exact source segment is a single inline, read-only, syntax-highlighted
   LaTeX view. Clarification never suspends the TUI or launches an editor.
-- Wide: exact source context and requested resolution side by side.
-- Compact: **Source** and **Question / response** peer views; changing questions
-  preserves the active view when possible.
+- Wide: exact source context and **Diagnosis & options** side by side.
+- Compact: **Source context** and **Diagnosis & options** peer views; changing
+  questions preserves the active view when possible.
+- Diagnosis begins with the immutable observed problem and question origin,
+  then shows the hypothesis, evidence IDs, alternatives, uncertainties,
+  recommended author check, and provider/model/effort provenance. Generated
+  prose never replaces the observed problem.
 - Previous/Next and **Check manuscript changes** remain fixed. Long source and
   explanation content scroll inside the workspace, not the page.
 
 ```text
  laplacians / Clarification 2 of 3              theorem.tex:118-126
- ┌ Source context ─────────────────┬ Requested resolution ────────────────┐
- │ 118 theorem ...                 │ Is compactness assumed here?         │
- │ 119 ...                         │                                      │
- │                                 │ Edit the manuscript, then check.      │
+ Best current guess · Confidence: High · interpretation only
+ ┌ Source context ─────────────────┬ Diagnosis & options ─────────────────┐
+ │ 118 theorem ...                 │ Why verification stopped             │
+ │ 119 ...                         │ Best current guess [E-...]           │
+ │                                 │ Model and effort provenance          │
  └─────────────────────────────────┴──────────────────────────────────────┘
  [Previous] [Next]                              [Check manuscript changes]
 ```

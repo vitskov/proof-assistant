@@ -87,16 +87,17 @@ CLI, copy its native login step, or choose an API credential source. A CLI
 install requires review and explicit approval, and the Copilot quota-consuming
 account probe is never sent without separate consent.
 
-Later, press **F3**, choose **Verification AI**, and move among **Role
-assignments**, **Provider connection**, and **Provider diagnostics**. Role
-assignments shows the complete eight-role verification team with a model and
-reasoning effort for each role. Its scope switch makes **Machine defaults** and
-**This project** explicit. **Apply provider defaults** fills all eight
-assignments for the selected provider, and **Undo defaults** restores the
-previous draft before you save. Claude Code defaults use Fable with extra-high
-effort for the **Independent prove agent** when the installed CLI advertises
-that capability. Credentials remain machine-owned, and each submitted job
-freezes its resolved role map.
+Later, open **Menu** (or press **Ctrl+P**), choose **Settings → Verification
+AI**, and move among **Role assignments**, **Provider connection**, and
+**Provider diagnostics**. Role assignments shows the complete eight-role
+verification team with a model and reasoning effort for each role. Its scope
+switch makes **Machine defaults** and **This project** explicit. **Apply
+provider defaults** fills all eight assignments for the selected provider, and
+**Undo defaults** restores the previous draft before you save. When the
+installed Claude Code CLI supports it, Claude defaults use Fable with
+extra-high effort for both **Author clarification** and the **Independent prove
+agent**. Credentials remain machine-owned, and each submitted job freezes its
+resolved role map.
 See
 [AI providers and first-time setup](docs/AI_PROVIDERS.md).
 
@@ -109,13 +110,14 @@ project defaults to:
 $HOME/proof-assistant/<project-name>
 ```
 
-Every screen keeps its current keyboard commands in a compact footer. Press
-**F1** for the complete command reference, **F2** for the main menu, **F3** for
-machine settings, **Ctrl+P** for the searchable command palette, and **Ctrl+T**
-to switch between the warm **Proof Ink** dark
-theme and **Proof Paper** light theme. Setup and settings screens consistently
-use **Esc** to go back, **Ctrl+Enter** to continue, and **Ctrl+S** to save when
-those actions are available.
+Every screen keeps its current keyboard commands in a compact footer. Open the
+visible **Menu** control or press **Ctrl+P** for a searchable list containing
+the current screen's actions plus Help, Projects, Settings, Theme, and Quit.
+Use **Tab** or **Shift+Tab** to move focus, arrow keys within lists and text,
+**Enter** to activate the focused control, **Esc** to go back once, and
+**Ctrl+S** to save settings. Common project actions also use **Ctrl+N**,
+**Ctrl+O**, and **Ctrl+R** where shown. Proof Assistant does not require
+function keys, unmodified letter commands, or Vim/Emacs command conventions.
 
 The project list is reconciled by the backend. Resumable projects have a
 **Resume** action and a guarded **Delete project** action; older projects
@@ -128,9 +130,8 @@ recoverable location. The authoritative manuscript source is never moved or
 changed.
 
 After the project list loads, its first resumable project is focused: press
-**Enter** to open it. Press **O** from anywhere on the welcome screen to open
-the focused project, with the most recently active resumable project as the
-fallback.
+**Enter** to open it. **Ctrl+O** opens the focused project, with the most
+recently active resumable project as the fallback.
 
 ## Select a manuscript and task
 
@@ -181,10 +182,14 @@ shows its exact persisted reason and supporting log paths. A copyable text
 outline is always available. The uncommon case of an actual dependency cycle
 uses a cycle-safe component/edge view instead of pretending that the graph is a
 tree. If clarification is needed, the TUI identifies the actual input
-file and source lines, explains the question, and waits while you edit the
-original source folder. It then detects all stable changes, previews their
-proof-graph impact, and starts the next iteration only after your explicit
-confirmation.
+file and source lines and shows an evidence-grounded **Best current guess** for
+why verification stopped. The hypothesis includes confidence, cited evidence,
+alternatives, uncertainty, the recommended author check, and the exact
+provider/model/effort used. It is clearly separated from the immutable observed
+problem and is never presented as a Lean result or confirmed author intent.
+Proof Assistant then waits while you edit the original source folder, detects
+all stable changes, previews their proof-graph impact, and starts the next
+iteration only after your explicit confirmation.
 
 While verification runs, the progress screen names the selected main file and
 every resolved input, explains the current preparation/proof/certification

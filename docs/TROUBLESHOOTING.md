@@ -87,7 +87,20 @@ choose another managed-project path if the directory is unrelated.
 
 That is expected when the external manuscript has not changed. Proof Assistant
 does not regenerate the question or start a redundant run; it returns to the
-persisted clarification screen.
+persisted clarification screen. Resume also does not make a paid AI request.
+It validates and displays the evidence-bound **Best current guess** recorded
+when the clarification was created.
+
+If the screen says **Best current guess unavailable**, the question may predate
+clarification analysis or its stored analysis may have failed strict
+schema/provenance validation. The immutable observed problem, exact source, and
+blocked claims remain authoritative. Do not infer that an unavailable
+hypothesis resolved the question, and do not edit the managed database.
+
+If the external manuscript changed after the question was created, **Resume**
+opens Change Review first. This is intentional: review or reject the current
+source differences before Proof Assistant returns to or supersedes the old
+clarification.
 
 Edit the exact external file shown. Do not edit `$PROJECT/manuscript` or the
 generated clarification report. After the source stabilizes, review the full

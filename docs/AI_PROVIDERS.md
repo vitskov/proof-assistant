@@ -57,14 +57,13 @@ turn has three peer views:
 3. **Provider diagnostics** — exact sanitized status, catalog provenance, and
    resolved task-policy detail.
 
-Press **F3** from an ordinary screen to open Settings and **F2** to return to
-the main menu. These are global shortcuts. On a modal dialog, the first F2/F3
-press dismisses the dialog; press the key again to navigate. Opening Settings
-from a running verification preserves the exact progress screen and its TUI
-observer. Closing Settings restores them. Choosing the main menu detaches only
-that TUI observer; it does not cancel the backend job. If background work
-finishes while Settings is open, the result waits behind the overlay until it
-closes.
+Open the visible **Menu** control or press **Ctrl+P**, then choose Settings or
+Projects. On a modal dialog, dismiss the modal with **Esc** before global
+navigation. Opening Settings from a running verification preserves the exact
+progress screen and its TUI observer. Closing Settings restores them. Choosing
+Projects detaches only that TUI observer; it does not cancel the backend job.
+If background work finishes while Settings is open, the result waits behind the
+overlay until it closes.
 
 ## Command-line setup
 
@@ -134,12 +133,13 @@ explicitly requests Fable and can fail when the account is not entitled.
 Fable support requires Claude Code 2.1.170 or newer. Anthropic describes Fable
 as the option for the hardest and longest-running work; it can require usage
 credits and is not available to every account or organization. Proof Assistant
-therefore reserves `fable` for the hardest independent proof attempt and uses
-`best` for the primary proof lane. The packaged Claude role defaults are:
+therefore prefers `fable` for author clarification and the hardest independent
+proof attempt, while using `best` for the primary proof lane. The packaged
+Claude role defaults are:
 
 | Role shown in Settings | Model | Effort |
 |---|---|---|
-| Author clarification | `opus` | `high` |
+| Author clarification | `fable` | `xhigh` (Extra high) |
 | Scan / triage diagnostics | `opus` | `high` |
 | Primary prove agent | `best` | `high` |
 | Sketch agent | `sonnet` | `medium` |
@@ -237,12 +237,13 @@ maintenance    review      duplicate_proof  reporting
 
 Automatic policy prefers a stronger available model for clarification,
 diagnosis, proof, review, and duplicate proof; a lighter model for reporting;
-and a middle-tier model for sketching and maintenance. The normal recommended
-difficulty is `high`, with `xhigh` for the independent proof recheck,
-`medium` for sketch/maintenance, and `low` for reporting. If a model lacks the
-preferred level, the resolver chooses the nearest role-appropriate advertised
-level and never selects `none` automatically. These are Proof Assistant
-policies, not provider promises.
+and a middle-tier model for sketching and maintenance. The recommended
+difficulty is `xhigh` for clarification and the independent proof recheck,
+`high` for diagnosis, primary proof, and review, `medium` for sketch and
+maintenance, and `low` for reporting. If a model lacks the preferred level,
+the resolver chooses the nearest role-appropriate advertised level and never
+selects `none` automatically. These are Proof Assistant policies, not provider
+promises.
 
 The UI displays all eight rows together: author clarification; scan / triage
 diagnostics; primary prove agent; sketch agent; maintain / fix agent; math and
@@ -291,6 +292,9 @@ defaults** to remove the override. The override is stored in
 `.repoprover/verification-settings.json`; it never contains credentials. It is
 resolved when a verification is submitted, and the resulting settings are
 frozen in the durable job, so changing the panel does not mutate a running job.
+Clarification analysis and its optional narrator use the same frozen
+clarification-role assignment; Proof Assistant does not cross providers or
+silently borrow a different role's model for that question.
 If a saved model later disappears, a CLI is downgraded, or authentication
 expires, Settings keeps the stored revision visible and allows **Use machine
 defaults**; Proof Assistant blocks a new run instead of silently substituting a

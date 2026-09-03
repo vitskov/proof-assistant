@@ -104,8 +104,12 @@ internally. Do not reintroduce a user-facing external task-file workflow.
   them through structured claim data, verify any referenced relationship, and
   never treat the comment itself as a premise, proof, or certificate.
 - Unsuccessful proof search is not evidence of falsity.
-- Clarification presentation may improve wording but cannot change the selected
-  source path/span, quotation, diagnostics, claim, or affected proof graph.
+- Clarification analysis may explain why verification stopped but cannot change
+  the selected source path/span, quotation, immutable observed problem,
+  diagnostics, claim, or affected proof graph. It must use the job's frozen
+  clarification-role assignment, run without tools, and cite only evidence IDs
+  in the host-built packet. Resume is cache-only; never make an unrequested
+  provider call while loading a question.
 
 ## Safe workflow
 

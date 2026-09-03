@@ -188,10 +188,28 @@ changed question source object deterministically supersedes the old question.
 The new snapshot, graph slice, and formal type decide what is reused. Questions
 never disappear merely because a later agent is silent.
 
-The source file, excerpt span, question category, diagnostics, and blocked
-claims come from persisted deterministic data. A separately isolated AI
-presentation pass may improve wording, but its output is schema-validated and
-cannot change those facts.
+The source file, excerpt span, question category, immutable observed problem,
+origin, diagnostics, and blocked claims come from persisted deterministic data.
+For each newly generated question, the host also builds a content-hashed
+evidence packet from the question, exact source context, relevant full
+claims/proofs, dependency endpoints and paths, certificates, diagnostics, and
+failure artifacts. `%% assistant:` content is labeled
+`AUTHOR_ADVISORY_NON_PROOF` inside that packet.
+
+One isolated, tool-free AI turn uses the clarification-role provider, model,
+and effort frozen into the verification job to propose the best current
+explanation. It must return a strict schema, and every factual reasoning item
+must cite an evidence ID from the packet. The TUI presents the hypothesis,
+confidence, alternatives, uncertainties, author check, and model provenance
+separately from the observed problem, with an explicit warning that the
+hypothesis is not a Lean result or confirmed author intent.
+
+Analyses are append-only by question and evidence hash. Every persisted row is
+revalidated when loaded; a malformed row, status mismatch, changed origin/hash,
+or unknown evidence citation becomes a sanitized unavailable analysis. Resume
+is cache-only and never triggers an AI request, so older questions that predate
+this record type honestly display **Best current guess unavailable** until a
+fresh verification produces a new clarification.
 
 ## Claim states and authority
 

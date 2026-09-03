@@ -74,9 +74,11 @@ Bare `proof-assistant` (or `proof-assistant tui`) launches the TUI.
 First startup probes the machine-wide primary AI driver through the workflow
 service. If its revision is zero and it is not ready, the TUI requires provider
 setup before new project work. Provider status DTOs contain no secret values.
-**F2** returns to the main menu and **F3** opens Settings from every ordinary
-screen; modal navigation is cancel-first, and leaving progress detaches only
-the observer rather than cancelling the backend job.
+The focusable header **Menu** and global **Ctrl+P** command open a searchable,
+screen-aware action list. Navigation otherwise uses desktop-style focus,
+Enter, arrows, Escape, and shown Ctrl shortcuts, without function keys or
+Vim/Emacs command aliases. Modal navigation is cancel-first, and leaving
+progress detaches only the observer rather than cancelling the backend job.
 
 For a new project it selects an external source folder, creates a managed
 project outside Dropbox, and creates a project-owned `VERIFY.yaml`. The user
@@ -90,11 +92,14 @@ The backend persists the most recently explicitly selected folder in
 with home as the fallback. The preference file must remain outside Dropbox and
 managed projects; the selected manuscript source itself may be in Dropbox.
 
-If verification needs clarification, show the actual input file and exact
-highlighted LaTeX span. The user edits the external source. Detect all stable
-multi-file changes, stage/re-hash them, calculate proof-tree impact, and require
-explicit confirmation before the next iteration. Revalidate the source
-inventory at confirmation time.
+If verification needs clarification, show the actual input file, exact
+highlighted LaTeX span, immutable observed problem, and an evidence-cited best
+guess from the frozen clarification-role model. Keep that hypothesis explicitly
+separate from Lean evidence and author intent. Resume validates the stored
+analysis without making an AI request. The user edits the external source.
+Detect all stable multi-file changes, stage/re-hash them, calculate proof-tree
+impact, and require explicit confirmation before the next iteration. Revalidate
+the source inventory at confirmation time.
 
 Resume routing is based on persistent backend state:
 
@@ -146,9 +151,11 @@ project-local worker catalog, never the interactive user's production catalog.
 Secrets remain in the child environment and are never serialized into the
 durable launch command.
 
-AI may improve clarification wording under a validated schema, but the host
-owns the claim, source path/span, quotation, diagnostics, affected graph, and
-possible-resolution facts. Invalid output falls back deterministically.
+AI may explain a clarification under a validated, evidence-cited schema, but
+the host owns the immutable observed problem, claim, source path/span,
+quotation, diagnostics, affected graph, and possible-resolution facts.
+Malformed, mismatched, or forged analysis becomes an unavailable presentation
+rather than trusted prose.
 
 ## Concurrency contract
 

@@ -60,9 +60,13 @@ management only through workflow contracts.
 ### `proof_assistant.presentation`
 
 Builds source-location, excerpt, affected-tree, clarification, and findings view
-models. An optional isolated AI presenter may improve prose only within a
-strict output schema. Deterministic facts remain host-owned, and a deterministic
-fallback is always available.
+models. Clarification presentation keeps the detector's immutable observed
+problem separate from generated prose. A deterministic evidence builder binds
+the question to relevant source, claim/proof, dependency, certificate,
+diagnostic, and failure-artifact records. An optional isolated, tool-free AI
+analyzer may produce a cited hypothesis within a strict output schema.
+Deterministic facts remain host-owned, and a deterministic fallback is always
+available.
 
 ### `proof_assistant.ai`
 
@@ -146,8 +150,13 @@ implicit meaning or mutable UI objects.
   deterministic primary incident. `load_failure_report` constructs it inside
   the backend. The TUI must not query SQLite, infer graph reachability, choose a
   blocker, or recalculate strongly connected components.
-- `ClarificationView` binds an exact persisted question to source path/span,
-  quoted text, diagnostics, possible resolutions, and blocked claims.
+- `ClarificationPresentation` binds an exact persisted question to source
+  path/span, quoted text, immutable observed problem, origin, diagnostics,
+  possible resolutions, and blocked claims. Its optional
+  `ClarificationAnalysis` contains a confidence-rated hypothesis, reasoning
+  whose evidence IDs must exist in the bound `ClarificationEvidencePacket`,
+  alternatives, uncertainties, recommended author check, and exact
+  provider/model/effort provenance.
 - `ResumeDecision` is derived from project state, open questions, source
   stability, run status, and writer ownership—not from the last visible screen.
 
@@ -214,9 +223,11 @@ deterministic host: snapshot -> index -> graph -> scheduler -> certificate DB
 ```
 
 AI performs semantic interpretation, correspondence proposals, diagnostics,
-proof search, and optionally user-facing clarification phrasing. Host code
+proof search, and evidence-grounded clarification hypotheses. Host code
 controls source identity, graph updates, invalidation, scheduling, state
-transitions, provenance, and presentation facts. Lean is the proof authority.
+transitions, provenance, evidence identity, and presentation facts. A
+clarification hypothesis cannot resolve a question or create evidence. Lean is
+the proof authority.
 
 After a proposal, the host merges only assigned claim modules, runs an
 independent `lake build`, inspects elaborated declarations through Lean's
@@ -304,6 +315,14 @@ an old failed run never substitutes the current claim state or a later version
 of the proof graph. Insertion/completion timing from parallel workers is not a
 causal ordering contract; the primary blocker is selected by deterministic
 target/path/incident ordering.
+
+Clarification origin is immutable, and clarification analyses are append-only
+by question/evidence identity. Available analyses are accepted only when their
+schema, database status, origin, evidence hash, and every cited evidence ID
+match the current deterministic packet. Invalid stored content is reduced to a
+sanitized unavailable state. Resume validates the cache but does not invoke an
+AI provider; analysis is generated only in the fresh verification path using
+the clarification-role assignment frozen into that job.
 
 The backend emits a tree outline whenever the frozen dependency graph is
 acyclic. A shared prerequisite may occur under more than one parent, but a
