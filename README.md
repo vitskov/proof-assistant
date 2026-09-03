@@ -5,7 +5,23 @@ it at a manuscript folder, describe what should be checked, and it builds a
 persistent Lean verification project. When the manuscript changes, it preserves
 valid work and revisits only the affected part of the proof graph.
 
-The normal interface is a terminal application. 
+The normal interface is a terminal application that can run locally on macOS or
+Linux, or remotely over SSH. On macOS, [iTerm2](https://iterm2.com/downloads.html)
+is recommended for a more responsive interface.
+
+At its core, Proof Assistant is powered by
+[RepoProver](https://github.com/facebookresearch/repoprover), the multi-agent
+Lean formalization framework developed by researchers at FAIR, Meta, for the
+[Automatic Textbook Formalization](https://github.com/facebookresearch/repoprover/blob/main/auto_textbook_formalization.pdf)
+project. RepoProver supplies the central proof-agent scaffolding and Lean tools;
+Proof Assistant builds an interactive, incremental manuscript-verification
+workflow around them.
+
+## Quick links
+
+1. [What is it for?](#what-it-is-for)
+2. [Installation](#installation)
+3. [Batteries not included](#batteries-not-included)
 
 ## What it is for
 
@@ -21,9 +37,11 @@ The normal interface is a terminal application.
 - Keep source snapshots, reports, questions, Lean code, and history together in
   one durable project.
 
-Lean decides whether formal evidence is accepted. Certification requires an independently built declaration with a proof body,recorded source and environment provenance.
+Lean decides whether formal evidence is accepted. Certification requires an
+independently built declaration with a proof body, recorded source and
+environment provenance.
 
-## Quick start
+## Installation
 
 Proof Assistant supports macOS 12+ on Intel or Apple Silicon and Linux with
 glibc 2.31+. Git, `curl`, and a native C compiler are required.
@@ -47,6 +65,22 @@ only when all three are absent. See
 [Installation](docs/INSTALLATION.md) for requirements, locations, and the few
 supported overrides.
 
+## Batteries not included
+
+Proof Assistant does not include access to an AI provider. Effective formal
+verification needs a capable paid AI plan with enough usage for sustained proof
+work. In practice, the two most common choices are paid plans from Anthropic
+and OpenAI; depending on how you connect, usage may come from a provider
+subscription or a separately billed API account.
+
+For eligible researchers, Anthropic's limited
+[Claude Team plan for scientists](https://claude.com/programs/team-plan-for-scientists#pricing)
+is an example of a heavily subsidized plan for verified academic and nonprofit
+research groups. Availability, verification, promotional periods, and final
+pricing are determined by Anthropic.
+
+## Configure verification AI
+
 On first launch, Proof Assistant checks its machine-wide primary AI driver. If
 it is not ready, **Set up verification AI** opens a focused **Choose provider →
 Connect provider → Review eight-role team** flow. You can inspect or install a
@@ -66,6 +100,8 @@ that capability. Credentials remain machine-owned, and each submitted job
 freezes its resolved role map.
 See
 [AI providers and first-time setup](docs/AI_PROVIDERS.md).
+
+## Create or resume a project
 
 The welcome screen then offers **New project** and **Resume project**. A new
 project defaults to:
@@ -96,6 +132,8 @@ After the project list loads, its first resumable project is focused: press
 **Enter** to open it. Press **O** from anywhere on the welcome screen to open
 the focused project, with the most recently active resumable project as the
 fallback.
+
+## Select a manuscript and task
 
 Select an existing folder containing the LaTeX source, then choose **Continue:
 inspect source**. **Browse folders** opens an SSH-safe terminal picker with
