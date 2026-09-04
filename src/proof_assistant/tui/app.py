@@ -369,6 +369,7 @@ class ProofAssistantApp(App[None], inherit_bindings=False):
         background: $proof-input-background;
         border: tall $proof-panel-border;
     }
+    #ai-primary-driver { margin-bottom: 0; }
     Input:focus, Select:focus { border: tall $proof-focus; }
     #source-folder-controls { height: auto; }
     #source-folder-controls Input { width: 1fr; }
@@ -498,12 +499,12 @@ class ProofAssistantApp(App[None], inherit_bindings=False):
         height: 1fr; min-height: 7;
         background: $proof-warning-background; color: $proof-warning-text;
     }
-    AIInstallConfirmationScreen, AIAccountVerificationConfirmationScreen,
+    AIInstallConfirmationScreen,
     UnsavedAISettingsConfirmationScreen, ProjectInheritanceConfirmationScreen,
     DestructiveSettingsConfirmationScreen, UnsavedSettingsConfirmationScreen {
         align: center middle; background: $proof-overlay;
     }
-    #ai-install-dialog, #ai-account-check-dialog {
+    #ai-install-dialog {
         width: 96%; max-width: 104; height: 92%; max-height: 32;
         border: round $warning; background: $proof-dialog-background; padding: 1 2;
     }
@@ -627,9 +628,10 @@ class ProofAssistantApp(App[None], inherit_bindings=False):
             notice="AI provider setup finished loading. Close Settings to continue.",
         ):
             return
-        # Revision zero identifies setup that has never been confirmed. A later
-        # outage must not hide durable projects or their reports from the user.
-        if not snapshot.primary_ready and snapshot.settings.revision == 0:
+        # Every new install gets an explicit provider choice, even when a native
+        # CLI is already logged in. Legacy provider settings use the same safe
+        # recovery path without being overwritten until the user saves.
+        if snapshot.settings.revision == 0 or snapshot.selection_required:
             self.switch_screen(AIProviderSettingsScreen(snapshot, first_run=True))
             return
         if isinstance(self.screen, WelcomeScreen):
@@ -730,10 +732,7 @@ class ProofAssistantApp(App[None], inherit_bindings=False):
             return
         if isinstance(self.screen, AIProviderSettingsScreen):
             if self.screen.first_run and not self.screen.first_run_navigation_ready:
-                notice = (
-                    "Finish primary AI setup and review the complete eight-role "
-                    "team before leaving."
-                )
+                notice = "Choose and save a connected AI provider before leaving."
                 self.screen.clear_transient_secrets()
                 self.screen.show_notice(notice, error=True)
                 return
@@ -770,8 +769,8 @@ class ProofAssistantApp(App[None], inherit_bindings=False):
             if self.screen.first_run:
                 self.screen.clear_transient_secrets()
                 self.screen.show_notice(
-                    "Finish first-run provider setup here; machine Settings opens "
-                    "after the complete role team is ready.",
+                    "Finish first-run provider setup here. Proof Assistant applies "
+                    "the complete recommended role preset automatically.",
                     error=True,
                 )
                 return

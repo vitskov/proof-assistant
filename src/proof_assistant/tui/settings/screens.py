@@ -66,10 +66,11 @@ from proof_assistant.tui.settings.components import (
     driver_label,
 )
 from proof_assistant.workflow.contracts import (
+    DISPATCHED_AI_TASKS,
+    SUPPORTED_DRIVERS,
     BenchmarkKind,
     BenchmarkResult,
     ConcurrencySettingsView,
-    CredentialSource,
     Difficulty,
     DriverId,
     DriverStatus,
@@ -82,7 +83,6 @@ from proof_assistant.workflow.contracts import (
     ProjectVerificationSettingsSnapshot,
     ProviderConfig,
     ProviderSetupSnapshot,
-    SecretSubmission,
     SettingsChangePreview,
     SettingsScopeKind,
     TaskKind,
@@ -95,12 +95,6 @@ if TYPE_CHECKING:
 
 
 _DRIVER_LABELS = DRIVER_LABELS
-_API_DRIVERS = {
-    DriverId.OPENAI_API,
-    DriverId.ANTHROPIC_API,
-    DriverId.GEMINI_API,
-}
-_AUTO_MODEL = "__proof_assistant_auto_model__"
 _ROLE_LABELS = ROLE_LABELS
 
 
@@ -122,7 +116,8 @@ def _provider_summary(snapshot: ProviderSetupSnapshot) -> str:
         "",
     ]
     for status in snapshot.statuses:
-        preference = snapshot.settings.config.preference_for(status.driver)
+        if status.driver not in SUPPORTED_DRIVERS:
+            continue
         catalog = status.catalog
         primary = " [PRIMARY]" if status.driver is snapshot.primary_driver else ""
         lines.extend(
@@ -132,7 +127,6 @@ def _provider_summary(snapshot: ProviderSetupSnapshot) -> str:
                 f"  Transport: {status.transport.value}",
                 f"  Installation: {status.installation.value}",
                 f"  Authentication: {status.authentication.value}",
-                f"  Credential source: {preference.credential_source.value}",
                 f"  Executable: {status.executable or 'not applicable / not found'}",
                 f"  Version: {status.version or 'not available'}",
                 f"  Catalog: {catalog.source.value if catalog else 'unavailable'}",
@@ -420,60 +414,6 @@ class AIInstallConfirmationScreen(ModalScreen[bool]):
             self.action_confirm()
 
 
-class AIAccountVerificationConfirmationScreen(ModalScreen[bool]):
-    """Explicit consent for Copilot's necessarily billable account probe."""
-
-    BINDINGS = [CANCEL.binding()]
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="ai-account-check-dialog"):
-            body = VerticalScroll(id="ai-account-check-body")
-            body.styles.height = "1fr"
-            with body:
-                yield CopyableText("Verify GitHub Copilot account?", classes="title")
-                yield CopyableText(
-                    "GitHub Copilot CLI has no documented non-billable authentication "
-                    "status command. This check sends one tiny harmless model request "
-                    "through the backend. It may count against your Copilot allowance. "
-                    "It is never run automatically.",
-                    classes="warning",
-                )
-            with Horizontal(classes="toolbar"):
-                yield Button(
-                    "Cancel — send nothing",
-                    id="ai-account-check-cancel",
-                    variant="primary",
-                )
-                yield Button(
-                    "Send one tiny request",
-                    id="ai-account-check-confirm",
-                    variant="warning",
-                )
-        yield CommandFooter()
-
-    def on_mount(self) -> None:
-        self.set_timer(0.01, self._focus_cancel)
-
-    def _focus_cancel(self) -> None:
-        nodes = self.query("#ai-account-check-cancel").nodes
-        if not nodes:
-            self.set_timer(0.01, self._focus_cancel)
-            return
-        nodes[0].focus()
-
-    def action_cancel(self) -> None:
-        self.dismiss(False)
-
-    def action_confirm(self) -> None:
-        self.dismiss(True)
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "ai-account-check-cancel":
-            self.action_cancel()
-        elif event.button.id == "ai-account-check-confirm":
-            self.action_confirm()
-
-
 class UnsavedAISettingsConfirmationScreen(ModalScreen[str | None]):
     """Three-way guard for a dirty role-team draft."""
 
@@ -712,11 +652,10 @@ class AIProviderSettingsScreen(NoticeScreen):
         self._machine_connection_dirty = False
         self._machine_save_in_flight = False
         self._project_save_in_flight = False
-        self._credential_mutation_in_flight = False
         self._project_customizing = False
         self._machine_detail_open = False
         self._project_detail_open = False
-        self._first_run_team_reviewed = not first_run
+        self._first_run_saved = not first_run
         self._pending_navigation: Callable[[], None] | None = None
         self._active_scope = SettingsScopeKind.MACHINE
         self._machine_undo_drafts: dict[TaskKind, tuple[str, Difficulty]] | None = None
@@ -764,12 +703,11 @@ class AIProviderSettingsScreen(NoticeScreen):
             (
                 Option("1  Choose provider", id="choose"),
                 Option("2  Connect provider", id="connection"),
-                Option("3  Review eight-role team", id="roles"),
             )
             if self.first_run
             else (
-                Option("1  Role assignments", id="roles"),
-                Option("2  Connections & credentials", id="connection"),
+                Option("1  Provider & role preset", id="roles"),
+                Option("2  Provider connection", id="connection"),
                 Option("3  Provider diagnostics", id="diagnostics"),
             )
         )
@@ -778,15 +716,18 @@ class AIProviderSettingsScreen(NoticeScreen):
         with ResponsivePage(id="page", classes="settings-shell"):
             with PageHeader(id="ai-settings-header"):
                 yield CopyableText(
-                    "Set up verification AI" if self.first_run else "Verification AI",
+                    "Choose your verification provider"
+                    if self.first_run
+                    else "Verification AI",
                     classes="title",
                 )
                 yield CopyableText(
-                    "Choose a provider, connect it, then review the complete eight-role "
-                    "team before continuing."
+                    "Choose Codex CLI or Claude CLI. Proof Assistant automatically "
+                    "assigns a recommended model and reasoning effort to every role; "
+                    "you can customize them later."
                     if self.first_run
-                    else "Assign a provider model and reasoning level to every "
-                    "verification role. Credentials remain machine-owned.",
+                    else "Choose Codex CLI or Claude CLI. A complete recommended role "
+                    "preset is applied automatically; role-by-role tuning is optional.",
                     classes="muted",
                 )
             with PageWorkspace(id="ai-settings-workspace"):
@@ -795,19 +736,19 @@ class AIProviderSettingsScreen(NoticeScreen):
                     if self.first_run:
                         with VerticalScroll(id="choose-page", classes="settings-page"):
                             yield CopyableText(
-                                "Step 1 of 3 · Choose a provider", classes="section"
+                                "Step 1 of 2 · Choose a provider", classes="section"
                             )
                             yield CopyableText(
-                                "Choose the provider that will own the complete "
-                                "verification team. The next step checks its local "
-                                "connection and authentication.",
+                                "Selecting a provider loads its complete eight-role "
+                                "preset. If its CLI is already connected, one action "
+                                "saves the preset and finishes setup.",
                                 classes="muted",
                             )
                             yield Label("Provider")
                             yield Select(
                                 tuple(
                                     (_driver_label(driver), driver.value)
-                                    for driver in DriverId
+                                    for driver in SUPPORTED_DRIVERS
                                 ),
                                 value=configured_driver.value,
                                 allow_blank=False,
@@ -818,8 +759,7 @@ class AIProviderSettingsScreen(NoticeScreen):
                     with VerticalScroll(id="roles-page", classes="settings-page"):
                         if self.first_run:
                             yield CopyableText(
-                                "Step 3 of 3 · Review the eight-role team",
-                                classes="section",
+                                "Recommended role preset", classes="section"
                             )
                         yield SettingsScopeSelector(
                             scope=SettingsScopeKind.MACHINE,
@@ -831,12 +771,19 @@ class AIProviderSettingsScreen(NoticeScreen):
                             id="ai-scope-control",
                             disabled=self.project is None,
                         )
+                        if not self.first_run:
+                            yield CopyableText(
+                                "Choose a provider and its complete recommended preset "
+                                "loads automatically. Most users can save without "
+                                "changing the role-by-role controls below.",
+                                classes="muted",
+                            )
                         with Vertical(id="machine-ai-role-editor"):
                             yield Label("AI provider for machine defaults")
                             yield Select(
                                 tuple(
                                     (_driver_label(driver), driver.value)
-                                    for driver in DriverId
+                                    for driver in SUPPORTED_DRIVERS
                                 ),
                                 value=configured_driver.value,
                                 allow_blank=False,
@@ -845,7 +792,7 @@ class AIProviderSettingsScreen(NoticeScreen):
                             )
                             with ResponsiveToolbar():
                                 yield Button(
-                                    "Use provider defaults for all 8 roles",
+                                    "Reset to recommended preset",
                                     id="ai-use-recommended",
                                     disabled=snapshot is None,
                                 )
@@ -909,7 +856,7 @@ class AIProviderSettingsScreen(NoticeScreen):
                                 yield Select(
                                     tuple(
                                         (_driver_label(driver), driver.value)
-                                        for driver in DriverId
+                                        for driver in SUPPORTED_DRIVERS
                                     ),
                                     value=configured_driver.value,
                                     allow_blank=False,
@@ -923,7 +870,7 @@ class AIProviderSettingsScreen(NoticeScreen):
                                         disabled=True,
                                     )
                                     yield Button(
-                                        "Use provider defaults for all 8 roles",
+                                        "Reset to recommended preset",
                                         id="project-ai-use-recommended",
                                         disabled=True,
                                     )
@@ -1002,9 +949,9 @@ class AIProviderSettingsScreen(NoticeScreen):
                     with VerticalScroll(id="connection-page", classes="settings-page"):
                         yield CopyableText(
                             (
-                                "Step 2 of 3 · Connect the provider"
+                                "Step 2 of 2 · Connect the provider"
                                 if self.first_run
-                                else "Connections & credentials"
+                                else "Provider connection"
                             ),
                             classes="section",
                         )
@@ -1013,7 +960,7 @@ class AIProviderSettingsScreen(NoticeScreen):
                             yield Select(
                                 tuple(
                                     (_driver_label(driver), driver.value)
-                                    for driver in DriverId
+                                    for driver in SUPPORTED_DRIVERS
                                 ),
                                 value=configured_driver.value,
                                 allow_blank=False,
@@ -1021,71 +968,17 @@ class AIProviderSettingsScreen(NoticeScreen):
                                 disabled=snapshot is None,
                             )
                             yield ProviderConnectionRoster(id="ai-provider-roster")
-                        yield CopyableText(
-                            "Advanced provider fallback", classes="section"
-                        )
-                        yield Label("Fallback model for this provider")
-                        yield Select(
-                            (("Automatic task-specific choice", _AUTO_MODEL),),
-                            value=_AUTO_MODEL,
-                            allow_blank=False,
-                            id="ai-provider-model",
-                            disabled=snapshot is None,
-                        )
-                        yield Label("Fallback reasoning / difficulty")
-                        yield Select(
-                            (("Auto", "auto"),),
-                            value="auto",
-                            allow_blank=False,
-                            id="ai-provider-difficulty",
-                            disabled=snapshot is None,
-                        )
-                        yield Label("API credential source")
-                        yield Select(
-                            (
-                                (
-                                    "Environment variable",
-                                    CredentialSource.ENVIRONMENT.value,
-                                ),
-                                (
-                                    "OS credential store / keyring",
-                                    CredentialSource.CREDENTIAL_STORE.value,
-                                ),
-                            ),
-                            value=CredentialSource.ENVIRONMENT.value,
-                            allow_blank=False,
-                            id="ai-credential-source",
-                            disabled=True,
-                        )
                         yield TextArea(
                             "Select a provider to see its exact authentication next step.",
                             read_only=True,
                             soft_wrap=False,
                             id="ai-auth-next-step",
                         )
-                        yield Vertical(id="ai-api-key-slot")
                         with ResponsiveToolbar():
-                            yield Button(
-                                "Store key securely",
-                                id="store-ai-key",
-                                disabled=True,
-                            )
-                            yield Button(
-                                "Remove stored key",
-                                id="delete-ai-key",
-                                disabled=True,
-                                variant="warning",
-                            )
                             yield Button(
                                 "Review installation…",
                                 id="install-ai-driver",
                                 disabled=True,
-                            )
-                            yield Button(
-                                "Verify Copilot account…",
-                                id="verify-ai-account",
-                                disabled=True,
-                                variant="warning",
                             )
                     with VerticalScroll(id="diagnostics-page", classes="settings-page"):
                         yield TextArea(
@@ -1117,14 +1010,14 @@ class AIProviderSettingsScreen(NoticeScreen):
                     )
                     yield Button("Recheck", id="recheck-ai-providers")
                 yield Button(
-                    "Save machine team" if not self.first_run else "Save team",
+                    "Save provider & preset" if not self.first_run else "Save preset",
                     id="save-ai-settings",
                     variant="success",
                     disabled=snapshot is None,
                 )
                 if self.project is not None:
                     yield Button(
-                        "Save project team",
+                        "Save project provider & preset",
                         id="save-project-ai",
                         variant="success",
                         disabled=True,
@@ -1199,8 +1092,7 @@ class AIProviderSettingsScreen(NoticeScreen):
             detail.body.styles.height = "auto"
         self.query_one(
             "#ai-provider-roster", ProviderConnectionRoster
-        ).styles.height = 9
-        self.query_one("#ai-api-key-slot", Vertical).styles.height = 3
+        ).styles.height = 5
 
     def _enable_provider_controls(self) -> None:
         self._provider_controls_ready = True
@@ -1212,18 +1104,6 @@ class AIProviderSettingsScreen(NoticeScreen):
                 or "roles-page"
             )
             destination = event.option.id
-            if (
-                self.first_run
-                and destination == "roles"
-                and (self.snapshot is None or not self.snapshot.primary_ready)
-            ):
-                event.option_list.highlighted = 0 if current == "choose-page" else 1
-                self.show_notice(
-                    "Connect and save the selected provider before reviewing its "
-                    "eight-role team.",
-                    error=True,
-                )
-                return
             if current != f"{destination}-page" and self._displayed_scope_is_dirty():
                 self._request_navigation(
                     lambda: self._show_ai_view(destination),
@@ -1249,6 +1129,17 @@ class AIProviderSettingsScreen(NoticeScreen):
             "project-ai-role-roster",
             "ai-provider-roster",
         }:
+            return
+        # Cursor motion is an editing gesture only while the roster owns focus.
+        # Programmatic row rebuilds also emit highlight messages and must not
+        # overwrite a choice made in the adjacent detail controls.
+        if not event.data_table.has_focus:
+            return
+        # Rebuilding a DataTable can leave an older RowHighlighted message in
+        # Textual's queue. Only the event for the table's current cursor may
+        # drive the paired Select; otherwise a stale highlight can undo a role
+        # the user just chose from the detail controls.
+        if event.cursor_row != event.data_table.cursor_row:
             return
         if event.data_table.id == "ai-provider-roster":
             if self._ignore_provider_highlight is not None:
@@ -1282,19 +1173,10 @@ class AIProviderSettingsScreen(NoticeScreen):
         switcher = self.query_one("#ai-settings-pages", ContentSwitcher)
         target = f"{view}-page"
         if switcher.current == target:
-            if view == "connection":
-                self._mount_secret_input()
-            elif view == "roles":
-                self._mark_first_run_team_reviewed()
             self._sync_save_action_visibility(view)
             self._sync_first_run_actions(view)
             return
-        self._remove_secret_input()
         switcher.current = target
-        if view == "connection":
-            self._mount_secret_input()
-        elif view == "roles":
-            self._mark_first_run_team_reviewed()
         self._sync_save_action_visibility(view)
         self._sync_first_run_actions(view)
 
@@ -1323,98 +1205,77 @@ class AIProviderSettingsScreen(NoticeScreen):
         save = self.query_one("#save-ai-settings", Button)
         finish = self.query_one("#ai-setup-continue", Button)
         back.disabled = view == "choose"
-        back.display = view in {"choose", "connection", "roles"}
+        back.display = view in {"choose", "connection"}
         next_button.display = view in {"choose", "connection"}
-        next_button.label = (
-            "Continue to connection" if view == "choose" else "Save and review team"
+        driver = (
+            self._selected_driver()
+            if self.snapshot is not None
+            else DriverId.CODEX_CLI
         )
-        next_button.disabled = self.snapshot is None
-        save.display = view == "roles"
-        finish.display = view == "roles"
+        ready = bool(
+            self.snapshot is not None and _status_for(self.snapshot, driver).ready
+        )
+        preset_ready = self._role_team_is_valid(driver, self._machine_role_drafts)
+        next_button.label = (
+            f"Use {_driver_label(driver)}"
+            if view == "choose" and ready
+            else "Continue to connection"
+            if view == "choose"
+            else "Save and continue"
+        )
+        next_button.disabled = self.snapshot is None or (ready and not preset_ready)
+        save.display = False
+        finish.display = False
 
     def _first_run_next(self) -> None:
         switcher = self.query_one("#ai-settings-pages", ContentSwitcher)
+        snapshot = self.snapshot
+        if snapshot is None:
+            return
         if switcher.current == "choose-page":
+            driver = self._selected_driver()
+            if _status_for(snapshot, driver).ready:
+                if not self._role_team_is_valid(driver, self._machine_role_drafts):
+                    self.show_notice(
+                        "The recommended role preset is still loading. Please wait.",
+                        error=True,
+                    )
+                    return
+                self._pending_navigation = self.proof_app.finish_main_menu_navigation
+                if not self._save_settings():
+                    self._pending_navigation = None
+                return
             self.query_one("#ai-settings-nav", OptionList).highlighted = 1
             self._show_ai_view("connection")
             return
-        if switcher.current != "connection-page" or self.snapshot is None:
+        if switcher.current != "connection-page":
             return
         driver = self._selected_driver()
-        if not _status_for(self.snapshot, driver).ready:
+        if not _status_for(snapshot, driver).ready:
             self.show_notice(
                 f"{_driver_label(driver)} is not connected yet. Complete the "
                 "authentication step or installation, then Recheck.",
                 error=True,
             )
             return
-        self._save_settings()
+        if not self._role_team_is_valid(driver, self._machine_role_drafts):
+            self.show_notice(
+                "The recommended role preset is still loading. Please wait.",
+                error=True,
+            )
+            return
+        self._pending_navigation = self.proof_app.finish_main_menu_navigation
+        if not self._save_settings():
+            self._pending_navigation = None
 
     def _first_run_back(self) -> None:
         switcher = self.query_one("#ai-settings-pages", ContentSwitcher)
-        if switcher.current == "roles-page":
-            self.query_one("#ai-settings-nav", OptionList).highlighted = 1
-            self._show_ai_view("connection")
-        elif switcher.current == "connection-page":
+        if switcher.current == "connection-page":
             self.query_one("#ai-settings-nav", OptionList).highlighted = 0
             self._show_ai_view("choose")
 
-    def _mark_first_run_team_reviewed(self) -> None:
-        if not self.first_run:
-            return
-        self._first_run_team_reviewed = True
-        if self.snapshot is not None and self.snapshot.primary_ready:
-            self.query_one("#ai-setup-continue", Button).disabled = False
-
-    def _mount_secret_input(
-        self, preserved: tuple[str, str, str] | None = None
-    ) -> None:
-        if self.query("#ai-api-key").nodes:
-            return
-        slot = self.query_one("#ai-api-key-slot", Vertical)
-        slot.mount(
-            Input(
-                placeholder="Paste key; cleared immediately after Store",
-                password=True,
-                id="ai-api-key",
-                disabled=True,
-            )
-        )
-        self.call_after_refresh(self._finish_secret_input_mount, preserved)
-
-    def _finish_secret_input_mount(
-        self, preserved: tuple[str, str, str] | None
-    ) -> None:
-        """Render the new secret field without replacing a newer control edit."""
-
-        live_draft = (
-            preserved if preserved is not None else self._connection_control_draft()
-        )
-        self._render_selected_provider(live_draft)
-
-    def _connection_control_draft(self) -> tuple[str, str, str]:
-        model = self.query_one("#ai-provider-model", Select).value
-        difficulty = self.query_one("#ai-provider-difficulty", Select).value
-        source = self.query_one("#ai-credential-source", Select).value
-        return (
-            _AUTO_MODEL if model is Select.NULL else str(model),
-            Difficulty.AUTO.value if difficulty is Select.NULL else str(difficulty),
-            CredentialSource.ENVIRONMENT.value
-            if source is Select.NULL
-            else str(source),
-        )
-
-    def _remove_secret_input(self) -> None:
-        for key_input in self.query("#ai-api-key").nodes:
-            if isinstance(key_input, Input):
-                key_input.value = ""
-                key_input.disabled = True
-                key_input.remove()
-
     def clear_transient_secrets(self) -> None:
-        """Clear one-shot credentials before any settings navigation boundary."""
-
-        self._remove_secret_input()
+        """Compatibility hook; supported CLI providers keep credentials in their CLI."""
 
     @property
     def first_run_navigation_ready(self) -> bool:
@@ -1424,7 +1285,7 @@ class AIProviderSettingsScreen(NoticeScreen):
             self.first_run
             and self.snapshot is not None
             and self.snapshot.primary_ready
-            and self._first_run_team_reviewed
+            and self._first_run_saved
         )
 
     def on_unmount(self) -> None:
@@ -1528,7 +1389,7 @@ class AIProviderSettingsScreen(NoticeScreen):
     def _request_navigation(
         self, destination: Callable[[], None], *, dirty: bool | None = None
     ) -> None:
-        """Guard a navigation boundary without retaining credential input."""
+        """Guard a navigation boundary when provider settings are unsaved."""
 
         self.clear_transient_secrets()
         scope = self._displayed_settings_scope()
@@ -1552,17 +1413,6 @@ class AIProviderSettingsScreen(NoticeScreen):
                 )
                 if not started:
                     self._pending_navigation = None
-            elif (
-                self.query_one("#ai-settings-pages", ContentSwitcher).current
-                == "connection-page"
-            ):
-                # The old secret was destroyed before opening the dialog. Return
-                # to a fresh empty one-shot field when editing continues.
-                preserved = self._connection_control_draft()
-                self.call_after_refresh(
-                    self._mount_secret_input,
-                    preserved,
-                )
 
         self.proof_app.push_screen(dialog, callback=after_choice)
 
@@ -1573,30 +1423,12 @@ class AIProviderSettingsScreen(NoticeScreen):
             destination()
 
     def request_main_menu(self) -> None:
-        if self._credential_mutation_in_flight:
-            self.show_notice(
-                "Wait for the credential change to finish before leaving Settings.",
-                error=True,
-            )
-            return
         self._request_navigation(self.proof_app.finish_main_menu_navigation)
 
     def request_quit(self) -> None:
-        if self._credential_mutation_in_flight:
-            self.show_notice(
-                "Wait for the credential change to finish before quitting.",
-                error=True,
-            )
-            return
         self._request_navigation(self.proof_app.exit)
 
     def request_settings_home(self) -> None:
-        if self._credential_mutation_in_flight:
-            self.show_notice(
-                "Wait for the credential change to finish before changing pages.",
-                error=True,
-            )
-            return
         self._request_navigation(
             lambda: self.proof_app.show_settings(project=self.project)
         )
@@ -1699,10 +1531,9 @@ class AIProviderSettingsScreen(NoticeScreen):
 
     def action_back(self) -> None:
         if self.first_run:
-            if self.snapshot is None or not self.snapshot.primary_ready:
-                self.clear_transient_secrets()
+            if not self.first_run_navigation_ready:
                 self.show_notice(
-                    "Choose a ready primary AI driver before continuing to new projects.",
+                    "Choose and save Codex CLI or Claude CLI before continuing.",
                     error=True,
                 )
                 return
@@ -1735,8 +1566,6 @@ class AIProviderSettingsScreen(NoticeScreen):
         if not self._provider_controls_ready and event.select.id in {
             "ai-primary-driver",
             "ai-configure-driver",
-            "ai-provider-model",
-            "ai-provider-difficulty",
         }:
             return
         if event.select.id == "settings-scope":
@@ -1800,22 +1629,6 @@ class AIProviderSettingsScreen(NoticeScreen):
                 self.query_one("#save-ai-settings", Button).disabled = True
                 self._render_machine_role_choices()
                 self._load_recommended_role_policies(driver, project=False)
-        elif event.select.id == "ai-provider-model" and self.snapshot is not None:
-            self._machine_draft_generation += 1
-            self._render_difficulties()
-            self._machine_connection_dirty = (
-                self._machine_connection_dirty
-                or self._connection_controls_differ_from_saved()
-            )
-        elif (
-            event.select.id in {"ai-provider-difficulty", "ai-credential-source"}
-            and self.snapshot is not None
-        ):
-            self._machine_draft_generation += 1
-            self._machine_connection_dirty = (
-                self._machine_connection_dirty
-                or self._connection_controls_differ_from_saved()
-            )
         elif event.select.id == "ai-role-task" and self.snapshot is not None:
             self._render_machine_role_choices()
         elif event.select.id == "ai-role-model" and self.snapshot is not None:
@@ -1865,12 +1678,6 @@ class AIProviderSettingsScreen(NoticeScreen):
             self.action_refresh()
         elif button_id == "install-ai-driver":
             self._preview_install()
-        elif button_id == "verify-ai-account":
-            self._review_account_verification()
-        elif button_id == "store-ai-key":
-            self._store_credential()
-        elif button_id == "delete-ai-key":
-            self._review_delete_credential()
         elif button_id == "save-project-ai":
             self._save_project_settings()
         elif button_id == "customize-project-ai":
@@ -1944,7 +1751,7 @@ class AIProviderSettingsScreen(NoticeScreen):
         label = _driver_label(driver)
         self.query_one(
             f"{prefix}-use-recommended", Button
-        ).label = f"Use recommended {label} defaults for all 8 roles"
+        ).label = f"Reset to recommended {label} preset"
         self.query_one(
             f"{prefix}-manage-connection", Button
         ).label = f"Manage {label} connection"
@@ -1994,6 +1801,8 @@ class AIProviderSettingsScreen(NoticeScreen):
             "Scope: unsaved project-specific provider and role team\n"
             f"Status: {status}\n"
             f"Selected provider: {driver.value}\n"
+            "Applies to the next verification run. A current run keeps its saved "
+            "provider and role team.\n"
             f"Unsaved role assignments for the next run:\n{role_lines}"
         )
 
@@ -2011,6 +1820,10 @@ class AIProviderSettingsScreen(NoticeScreen):
         self.query_one("#save-ai-settings", Button).disabled = not (
             status.ready and self._role_team_is_valid(driver, self._machine_role_drafts)
         )
+        if self.first_run:
+            current = self.query_one("#ai-settings-pages", ContentSwitcher).current
+            if current is not None:
+                self._sync_first_run_actions(current.removesuffix("-page"))
 
     def _refresh_project_role_actions(self) -> None:
         snapshot = self.snapshot
@@ -2043,28 +1856,7 @@ class AIProviderSettingsScreen(NoticeScreen):
         self._show_ai_view("connection")
 
     def _connection_controls_differ_from_saved(self) -> bool:
-        snapshot = self.snapshot
-        if snapshot is None or not self.query("#ai-provider-model").nodes:
-            return False
-        driver = self._selected_driver()
-        preference = snapshot.settings.config.preference_for(driver)
-        model = self.query_one("#ai-provider-model", Select).value
-        difficulty = self.query_one("#ai-provider-difficulty", Select).value
-        source = self.query_one("#ai-credential-source", Select).value
-        model_value = None if model == _AUTO_MODEL else str(model)
-        source_dirty = (
-            driver in _API_DRIVERS
-            and source is not Select.NULL
-            and str(source) != preference.credential_source.value
-        )
-        return (
-            (model is not Select.NULL and model_value != preference.model)
-            or (
-                difficulty is not Select.NULL
-                and str(difficulty) != preference.difficulty.value
-            )
-            or source_dirty
-        )
+        return False
 
     def refresh_setup(self) -> None:
         self._setup_load_generation += 1
@@ -2108,7 +1900,7 @@ class AIProviderSettingsScreen(NoticeScreen):
         ):
             return
         if request_generation is None:
-            # A save, account check, or credential mutation supersedes older reads.
+            # A completed save supersedes older setup reads.
             self._setup_load_generation += 1
 
         preserve_machine_draft = self._machine_draft_is_dirty()
@@ -2122,16 +1914,6 @@ class AIProviderSettingsScreen(NoticeScreen):
         connection_dirty = self._machine_connection_dirty
         primary = self.query_one("#ai-primary-driver", Select).value
         configure = self.query_one("#ai-configure-driver", Select).value
-        model = self.query_one("#ai-provider-model", Select).value
-        difficulty = self.query_one("#ai-provider-difficulty", Select).value
-        credential_source = self.query_one("#ai-credential-source", Select).value
-        preserved_connection = (
-            _AUTO_MODEL if model is Select.NULL else str(model),
-            Difficulty.AUTO.value if difficulty is Select.NULL else str(difficulty),
-            CredentialSource.ENVIRONMENT.value
-            if credential_source is Select.NULL
-            else str(credential_source),
-        )
         self._record_setup(
             snapshot,
             self._policies,
@@ -2152,7 +1934,7 @@ class AIProviderSettingsScreen(NoticeScreen):
             self._machine_role_drafts = machine_roles
             self._machine_undo_drafts = machine_undo
             self._machine_connection_dirty = connection_dirty
-            self._render_selected_provider(preserved_connection)
+            self._render_selected_provider()
             self._render_machine_role_choices()
             self.query_one("#ai-undo-recommended", Button).disabled = (
                 machine_undo is None
@@ -2788,6 +2570,8 @@ class AIProviderSettingsScreen(NoticeScreen):
                     else Difficulty.AUTO
                 ),
                 state=("Custom" if self._machine_undo_drafts is not None else "Ready")
+                if valid and task in DISPATCHED_AI_TASKS
+                else "Reserved"
                 if valid
                 else "Awaiting assignment",
             )
@@ -2812,6 +2596,8 @@ class AIProviderSettingsScreen(NoticeScreen):
             effort=effort,
             state=(
                 "Complete machine assignment"
+                if valid and selected in DISPATCHED_AI_TASKS
+                else "Configured — not currently dispatched"
                 if valid
                 else "Awaiting assignment for selected provider"
             ),
@@ -2832,6 +2618,8 @@ class AIProviderSettingsScreen(NoticeScreen):
                     else Difficulty.AUTO
                 ),
                 state=("Inherited" if inherited else "Project custom")
+                if valid and task in DISPATCHED_AI_TASKS
+                else "Reserved"
                 if valid
                 else "Awaiting assignment",
             )
@@ -2855,6 +2643,8 @@ class AIProviderSettingsScreen(NoticeScreen):
             model=model,
             effort=effort,
             state=("Inherited" if inherited else "Complete project assignment")
+            if valid and selected in DISPATCHED_AI_TASKS
+            else "Configured — not currently dispatched"
             if valid
             else "Awaiting assignment for selected provider",
         )
@@ -3117,11 +2907,12 @@ class AIProviderSettingsScreen(NoticeScreen):
                 primary=status.driver is snapshot.primary_driver,
             )
             for status in snapshot.statuses
+            if status.driver in SUPPORTED_DRIVERS
         )
         if provider_rows != self._provider_roster_signature:
             roster_driver = (
                 DriverId(previous_driver)
-                if previous_driver in {driver.value for driver in DriverId}
+                if previous_driver in {driver.value for driver in SUPPORTED_DRIVERS}
                 else snapshot.primary_driver
             )
             self._ignore_provider_highlight = roster_driver
@@ -3137,7 +2928,7 @@ class AIProviderSettingsScreen(NoticeScreen):
             configure.disabled = False
             configure.value = (
                 previous_driver
-                if previous_driver in {driver.value for driver in DriverId}
+                if previous_driver in {driver.value for driver in SUPPORTED_DRIVERS}
                 else snapshot.primary_driver.value
             )
         self._last_configure_driver = DriverId(str(configure.value))
@@ -3145,7 +2936,7 @@ class AIProviderSettingsScreen(NoticeScreen):
         self._refresh_machine_role_actions()
         continue_button = self.query_one("#ai-setup-continue", Button)
         continue_button.disabled = self.first_run and (
-            not snapshot.primary_ready or not self._first_run_team_reviewed
+            not snapshot.primary_ready or not self._first_run_saved
         )
         self.query_one("#ai-provider-back", Button).disabled = False
         self._render_selected_provider()
@@ -3155,159 +2946,23 @@ class AIProviderSettingsScreen(NoticeScreen):
         self.call_after_refresh(self._enable_provider_controls)
         self.show_notice(snapshot.detail, error=not snapshot.primary_ready)
 
-    def _render_selected_provider(
-        self,
-        preserved: tuple[str, str, str] | None = None,
-    ) -> None:
+    def _render_selected_provider(self) -> None:
         snapshot = self.snapshot
         if snapshot is None or not self.query("#ai-configure-driver").nodes:
             return
         driver = self._selected_driver()
         status = _status_for(snapshot, driver)
-        preference = snapshot.settings.config.preference_for(driver)
-        catalog = status.catalog
-        options: list[tuple[str, str]] = [
-            ("Automatic task-specific choice", _AUTO_MODEL)
-        ]
-        if catalog is not None:
-            options.extend(
-                (f"{model.display_name} [{model.model_id}]", model.model_id)
-                for model in catalog.models
-            )
-        if preference.model is not None and preference.model not in {
-            value for _, value in options
-        }:
-            options.append(
-                (
-                    f"{preference.model} [configured; not in current catalog]",
-                    preference.model,
-                )
-            )
-        if (
-            preserved is not None
-            and preserved[0] != _AUTO_MODEL
-            and preserved[0] not in {value for _, value in options}
-        ):
-            options.append(
-                (
-                    f"{preserved[0]} [unsaved draft; not in current catalog]",
-                    preserved[0],
-                )
-            )
-        model_select = self.query_one("#ai-provider-model", Select)
-        with self.prevent(Select.Changed):
-            model_select.set_options(options)
-            model_select.disabled = False
-            model_select.value = (
-                preserved[0]
-                if preserved is not None
-                else preference.model or _AUTO_MODEL
-            )
-
-        credential_select = self.query_one("#ai-credential-source", Select)
-        is_api = driver in _API_DRIVERS
-        credential_select.disabled = not is_api
-        if is_api:
-            source_value = (
-                preserved[2]
-                if preserved is not None
-                else preference.credential_source.value
-            )
-            with self.prevent(Select.Changed):
-                credential_select.value = (
-                    source_value
-                    if source_value
-                    in {
-                        CredentialSource.ENVIRONMENT.value,
-                        CredentialSource.CREDENTIAL_STORE.value,
-                    }
-                    else CredentialSource.ENVIRONMENT.value
-                )
-        key_nodes = self.query("#ai-api-key").nodes
-        if key_nodes and isinstance(key_nodes[0], Input):
-            key_nodes[0].value = ""
-            key_nodes[0].disabled = not is_api
-        self.query_one("#store-ai-key", Button).disabled = not is_api
-        self.query_one("#delete-ai-key", Button).disabled = not is_api
-
         installation = status.installation.value
         self.query_one("#install-ai-driver", Button).disabled = not (
             status.transport.value == "cli" and installation in {"missing", "broken"}
         )
-        self.query_one("#verify-ai-account", Button).disabled = not (
-            driver is DriverId.COPILOT_CLI
-            and installation == "installed"
-            and status.authentication.value == "unknown"
-        )
         self.query_one("#ai-auth-next-step", TextArea).text = (
             f"Provider: {_driver_label(driver)}\n"
             f"Authentication status: {status.authentication.value}\n"
-            f"Configured credential source: {preference.credential_source.value}\n"
-            f"Executable: {status.executable or 'not applicable / not found'}\n"
+            f"Executable: {status.executable or 'not found'}\n"
             f"Version: {status.version or 'not available'}\n"
             f"Next step: {status.detail or 'none'}"
         )
-        self._render_difficulties(
-            preserved_difficulty=(preserved[1] if preserved is not None else None)
-        )
-
-    def _render_difficulties(self, preserved_difficulty: str | None = None) -> None:
-        snapshot = self.snapshot
-        if snapshot is None or not self.query("#ai-provider-model").nodes:
-            return
-        driver = self._selected_driver()
-        status = _status_for(snapshot, driver)
-        preference = snapshot.settings.config.preference_for(driver)
-        selected = self.query_one("#ai-provider-model", Select).value
-        difficulties: tuple[Difficulty, ...] = ()
-        if status.catalog is not None and selected is not Select.NULL:
-            descriptor = next(
-                (
-                    model
-                    for model in status.catalog.models
-                    if model.model_id == str(selected)
-                ),
-                None,
-            )
-            if descriptor is not None:
-                difficulties = descriptor.difficulties
-        if not difficulties and status.catalog is not None and status.catalog.models:
-            # With automatic model choice, only offer values valid for every
-            # candidate the backend may select. Choosing an explicit model below
-            # exposes that model's complete exact set.
-            first_model, *remaining_models = status.catalog.models
-            common = list(first_model.difficulties)
-            for candidate in remaining_models:
-                common = [
-                    difficulty
-                    for difficulty in common
-                    if difficulty in candidate.difficulties
-                ]
-            difficulties = tuple(common)
-        if not difficulties:
-            difficulties = (preference.difficulty,)
-        options = tuple(
-            (difficulty.value.replace("xhigh", "Extra high").title(), difficulty.value)
-            for difficulty in difficulties
-        )
-        if preserved_difficulty is not None and preserved_difficulty not in {
-            value for _, value in options
-        }:
-            options = (
-                *options,
-                (
-                    preserved_difficulty.replace("xhigh", "Extra high").title()
-                    + " [unsaved draft]",
-                    preserved_difficulty,
-                ),
-            )
-        difficulty_select = self.query_one("#ai-provider-difficulty", Select)
-        with self.prevent(Select.Changed):
-            difficulty_select.set_options(options)
-            difficulty_select.disabled = False
-            allowed = {value for _, value in options}
-            desired = preserved_difficulty or preference.difficulty.value
-            difficulty_select.value = desired if desired in allowed else options[0][1]
 
     def _machine_draft_signature(self) -> tuple[object, ...]:
         def value(selector: str) -> str | None:
@@ -3317,9 +2972,6 @@ class AIProviderSettingsScreen(NoticeScreen):
         return (
             value("#ai-primary-driver"),
             value("#ai-configure-driver"),
-            value("#ai-provider-model"),
-            value("#ai-provider-difficulty"),
-            value("#ai-credential-source"),
             tuple(
                 (
                     task.value,
@@ -3357,29 +3009,6 @@ class AIProviderSettingsScreen(NoticeScreen):
                 )
                 self._refresh_machine_role_actions()
                 return False
-            driver = self._selected_driver()
-            model_value = _select_value(self.query_one("#ai-provider-model", Select))
-            difficulty_value = _select_value(
-                self.query_one("#ai-provider-difficulty", Select)
-            )
-            preference = snapshot.settings.config.preference_for(driver)
-            source = preference.credential_source
-            if driver in _API_DRIVERS:
-                source = CredentialSource(
-                    _select_value(self.query_one("#ai-credential-source", Select))
-                )
-            updated_preference = replace(
-                preference,
-                credential_source=source,
-                model=None if model_value == _AUTO_MODEL else model_value,
-                difficulty=Difficulty(difficulty_value),
-            )
-            drivers = tuple(
-                updated_preference if item.driver is driver else item
-                for item in snapshot.settings.config.drivers
-            )
-            if not any(item.driver is driver for item in drivers):
-                drivers = (*drivers, updated_preference)
             missing_roles = set(TaskKind) - set(self._machine_role_drafts)
             if missing_roles:
                 raise ValueError(
@@ -3389,7 +3018,6 @@ class AIProviderSettingsScreen(NoticeScreen):
             config: ProviderConfig = replace(
                 snapshot.settings.config,
                 primary_driver=primary,
-                drivers=drivers,
                 tasks=tuple(
                     TaskPreference(
                         task=task,
@@ -3468,11 +3096,7 @@ class AIProviderSettingsScreen(NoticeScreen):
         self._machine_undo_drafts = None
         self._record_setup_and_reload(snapshot)
         if self.first_run:
-            self.query_one("#ai-settings-nav", OptionList).highlighted = 2
-            self._show_ai_view("roles")
-            self.show_notice(
-                "Provider saved. Review the complete eight-role team, then Continue."
-            )
+            self._first_run_saved = True
         self._finish_pending_navigation()
 
     def _preview_install(self) -> None:
@@ -3527,192 +3151,6 @@ class AIProviderSettingsScreen(NoticeScreen):
     def _installation_finished(self, result: InstallResult) -> None:
         self.show_notice(result.detail, error=not result.succeeded)
         self.refresh_setup()
-
-    def _review_account_verification(self) -> None:
-        if self._selected_driver() is not DriverId.COPILOT_CLI:
-            self.show_notice(
-                "Only Copilot needs an explicit model-request account check.",
-                error=True,
-            )
-            return
-        dialog = AIAccountVerificationConfirmationScreen()
-
-        def after_review(accepted: bool | None) -> None:
-            if accepted:
-                self._verify_account()
-            else:
-                self.show_notice("Copilot account check canceled; no request was sent.")
-
-        self.proof_app.push_screen(dialog, callback=after_review)
-
-    def _verify_account(self) -> None:
-        driver = DriverId.COPILOT_CLI
-        self.show_notice("Sending the one explicitly approved tiny Copilot request…")
-
-        def verify() -> None:
-            try:
-                snapshot = self.proof_app.service.verify_ai_driver_account(
-                    driver, consent=True
-                )
-            except Exception as exc:
-                self.proof_app.call_from_thread(
-                    self.show_notice,
-                    f"Copilot account check failed: {exc}",
-                    error=True,
-                )
-                return
-            self.proof_app.call_from_thread(self._record_setup_and_reload, snapshot)
-
-        self.run_worker(verify, thread=True, exclusive=True, group="ai-account-check")
-
-    def _store_credential(self) -> None:
-        driver = self._selected_driver()
-        if driver not in _API_DRIVERS:
-            self.show_notice("CLI authentication is owned by its CLI.", error=True)
-            return
-        key_input = self.query_one("#ai-api-key", Input)
-        if self._credential_mutation_in_flight:
-            key_input.value = ""
-            self.show_notice(
-                "A credential change is already in progress; no second key was "
-                "submitted.",
-                error=True,
-            )
-            return
-        credential = key_input.value.strip()
-        key_input.value = ""
-        if not credential:
-            self.show_notice("Paste a non-empty API key before storing it.", error=True)
-            return
-        submission: SecretSubmission | None = SecretSubmission(credential)
-        credential = ""
-        self._set_credential_mutation_busy(True)
-        self.show_notice(
-            "Sending the one-shot credential submission to the backend keyring…"
-        )
-
-        def store() -> None:
-            nonlocal submission
-            try:
-                if submission is None:
-                    raise RuntimeError("credential submission is no longer available")
-                snapshot = self.proof_app.service.store_ai_credential(
-                    driver,
-                    CredentialSource.CREDENTIAL_STORE,
-                    submission,
-                )
-            except Exception as exc:
-                self.proof_app.call_from_thread(
-                    self._credential_mutation_failed,
-                    f"Credential was not stored: {exc}",
-                )
-                return
-            finally:
-                submission = None
-            self.proof_app.call_from_thread(
-                self._credential_mutation_finished, snapshot
-            )
-
-        self.run_worker(store, thread=True, exclusive=True, group="ai-credential")
-
-    def _review_delete_credential(self) -> None:
-        if self._credential_mutation_in_flight:
-            self.show_notice(
-                "Wait for the current credential change to finish before removing "
-                "the stored key.",
-                error=True,
-            )
-            return
-        driver = self._selected_driver()
-        if driver not in _API_DRIVERS:
-            self.show_notice("CLI authentication is owned by its CLI.", error=True)
-            return
-        self.clear_transient_secrets()
-        dialog = DestructiveSettingsConfirmationScreen(
-            f"Remove {_driver_label(driver)} credential?",
-            "This deletes the stored key for "
-            f"{_driver_label(driver)} from the OS credential store. The key value "
-            "is never displayed or retained by this dialog.",
-            "Remove stored key",
-        )
-
-        def after_confirmation(accepted: bool | None) -> None:
-            if accepted:
-                self._delete_credential(driver)
-            else:
-                self._mount_secret_input()
-                self.show_notice("Credential removal canceled; the stored key remains.")
-
-        self.proof_app.push_screen(dialog, callback=after_confirmation)
-
-    def _delete_credential(self, driver: DriverId) -> None:
-        if self._credential_mutation_in_flight:
-            self.show_notice("A credential change is already in progress.", error=True)
-            return
-        self._set_credential_mutation_busy(True)
-        self.show_notice("Removing the provider key from the backend keyring…")
-
-        def delete() -> None:
-            try:
-                snapshot = self.proof_app.service.delete_ai_credential(
-                    driver,
-                    CredentialSource.CREDENTIAL_STORE,
-                )
-            except Exception as exc:
-                self.proof_app.call_from_thread(
-                    self._credential_mutation_failed,
-                    f"Credential was not removed: {exc}",
-                )
-                return
-            self.proof_app.call_from_thread(
-                self._credential_mutation_finished, snapshot
-            )
-
-        self.run_worker(delete, thread=True, exclusive=True, group="ai-credential")
-
-    def _set_credential_mutation_busy(self, busy: bool) -> None:
-        self._credential_mutation_in_flight = busy
-        for selector in ("#ai-primary-driver", "#ai-configure-driver"):
-            nodes = self.query(selector).nodes
-            if nodes and isinstance(nodes[0], Select):
-                nodes[0].disabled = busy
-        navigation = self.query("#ai-settings-nav").nodes
-        if navigation and isinstance(navigation[0], OptionList):
-            navigation[0].disabled = busy
-        for selector in (
-            "#store-ai-key",
-            "#delete-ai-key",
-            "#install-ai-driver",
-            "#verify-ai-account",
-            "#ai-first-run-back",
-            "#ai-first-run-next",
-            "#ai-provider-back",
-            "#ai-setup-continue",
-        ):
-            nodes = self.query(selector).nodes
-            if nodes and isinstance(nodes[0], Button):
-                nodes[0].disabled = busy
-        key_nodes = self.query("#ai-api-key").nodes
-        if key_nodes and isinstance(key_nodes[0], Input):
-            key_nodes[0].disabled = busy
-
-    def _credential_mutation_failed(self, message: str) -> None:
-        self._set_credential_mutation_busy(False)
-        self._render_selected_provider()
-        current_view = self.query_one("#ai-settings-pages", ContentSwitcher).current
-        if current_view is not None:
-            self._sync_first_run_actions(current_view.removesuffix("-page"))
-        self.show_notice(message, error=True)
-
-    def _credential_mutation_finished(self, snapshot: ProviderSetupSnapshot) -> None:
-        # Keep the application-level sanitized cache authoritative even if a
-        # lifecycle edge unmounted this page before the backend write completed.
-        self.proof_app.record_ai_setup(snapshot)
-        if not self.is_mounted:
-            return
-        self._set_credential_mutation_busy(False)
-        self._record_setup_and_reload(snapshot)
-
 
 class SettingsHomeScreen(NoticeScreen):
     """Machine settings landing page with distinct modern and legacy routes."""
@@ -3821,14 +3259,13 @@ class SettingsHomeScreen(NoticeScreen):
                         ):
                             yield CopyableText("Verification AI", classes="section")
                             yield CopyableText(
-                                "Choose a provider, connect its account, and assign "
-                                "a model and reasoning level to each of the eight "
-                                "verification roles.",
+                                "Choose Codex CLI or Claude CLI. Proof Assistant loads "
+                                "a complete recommended role preset automatically.",
                                 classes="muted",
                             )
                             yield CopyableText(
-                                "Role policies may use machine defaults or this "
-                                "project's overrides; credentials remain machine-owned.",
+                                "Most users only choose a provider. Per-role models and "
+                                "reasoning levels remain available for advanced tuning.",
                                 classes="settings-category-state",
                             )
                             yield Button(

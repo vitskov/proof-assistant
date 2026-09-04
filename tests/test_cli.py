@@ -266,3 +266,25 @@ def test_ai_status_for_one_driver_does_not_probe_every_provider(
     assert "selected ready: yes" in output
     assert "claude_cli" in output
     assert "openai_api" not in output
+
+
+def test_ai_cli_only_exposes_tested_providers():
+    from proof_assistant.cli import build_parser
+
+    parser = build_parser()
+    for command in ("status", "models", "select", "install"):
+        for driver in ("codex_cli", "claude_cli"):
+            argv = ["ai", command]
+            if command == "status":
+                argv.extend(("--driver", driver))
+            else:
+                argv.append(driver)
+            assert parser.parse_args(argv).ai_command == command
+    for command in ("credential", "verify-account"):
+        with pytest.raises(SystemExit):
+            parser.parse_args(["ai", command])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["ai", "select", "codex_cli", "--model", "custom"])
+    for driver in ("copilot_cli", "openai_api", "anthropic_api", "gemini_api"):
+        with pytest.raises(SystemExit):
+            parser.parse_args(["ai", "select", driver])

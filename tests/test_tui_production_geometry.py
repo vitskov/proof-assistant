@@ -5,12 +5,11 @@ from dataclasses import replace
 from textual.containers import VerticalScroll
 from textual.widgets import Button, ContentSwitcher, OptionList, Select
 
-from proof_assistant.ai import TaskKind
+from proof_assistant.ai import DriverId, TaskKind
 from proof_assistant.tui import ProofAssistantApp
 from proof_assistant.tui.layout import ActionBar, PageWorkspace
 from proof_assistant.tui.screens import ClarificationScreen, ProgressScreen
 from proof_assistant.tui.settings import (
-    AIAccountVerificationConfirmationScreen,
     AIInstallConfirmationScreen,
     AIProviderSettingsScreen,
     ConcurrencyResourcesScreen,
@@ -26,6 +25,7 @@ from tests.test_tui import FakeWorkflowService, clarification
 from tests.test_tui_providers import (
     ProviderWorkflowFake,
     _snapshot,
+    _status,
     async_test,
     wait_for,
 )
@@ -119,9 +119,16 @@ async def test_production_ai_role_editor_is_reachable_at_every_supported_size() 
 
 @async_test
 async def test_first_run_wizard_keeps_each_step_and_actions_visible_at_80x24() -> None:
-    service = ProviderWorkflowFake(_snapshot())
+    snapshot = _snapshot(
+        ready=False,
+        statuses=(
+            _status(DriverId.CODEX_CLI, installed=False),
+            _status(DriverId.CLAUDE_CLI),
+        ),
+    )
+    service = ProviderWorkflowFake(snapshot)
     app = ProofAssistantApp(service)  # type: ignore[arg-type]
-    screen = AIProviderSettingsScreen(_snapshot(), first_run=True)
+    screen = AIProviderSettingsScreen(snapshot, first_run=True)
 
     async with app.run_test(size=(80, 24)) as pilot:
         app.switch_screen(screen)
@@ -154,17 +161,11 @@ async def test_first_run_wizard_keeps_each_step_and_actions_visible_at_80x24() -
         assert_regions_do_not_overlap(workspace, actions)
         assert_inside_viewport(app, screen.query_one("#ai-first-run-next", Button))
 
-        screen.query_one("#ai-first-run-next", Button).press()
-        await wait_for(pilot, lambda: pages.current == "roles-page")
-        await wait_for(
-            pilot,
-            lambda: screen.query_one("#ai-role-roster", RoleRoster).row_count
-            == len(TaskKind),
-        )
-        assert navigation.highlighted == 2
+        screen.query_one("#ai-first-run-back", Button).press()
+        await wait_for(pilot, lambda: pages.current == "choose-page")
+        assert navigation.highlighted == 0
         assert_regions_do_not_overlap(workspace, actions)
-        assert_inside_viewport(app, screen.query_one("#save-ai-settings", Button))
-        assert_inside_viewport(app, screen.query_one("#ai-setup-continue", Button))
+        assert_inside_viewport(app, screen.query_one("#ai-first-run-next", Button))
 
 
 @async_test
@@ -175,36 +176,24 @@ async def test_long_confirmation_bodies_scroll_without_hiding_modal_actions() ->
         detail=(service.plan.detail + " long diagnostic context") * 20,
         commands=service.plan.commands * 12,
     )
-    for modal in (
-        AIInstallConfirmationScreen(plan),
-        AIAccountVerificationConfirmationScreen(),
-    ):
-        app = ProofAssistantApp(service)  # type: ignore[arg-type]
-        async with app.run_test(size=(80, 24)) as pilot:
-            await wait_for(
-                pilot, lambda: app.screen.__class__.__name__ == "WelcomeScreen"
-            )
-            app.push_screen(modal)
-            await wait_for(pilot, lambda: app.screen is modal)
-            await pilot.pause()
+    modal = AIInstallConfirmationScreen(plan)
+    app = ProofAssistantApp(service)  # type: ignore[arg-type]
+    async with app.run_test(size=(80, 24)) as pilot:
+        await wait_for(pilot, lambda: app.screen.__class__.__name__ == "WelcomeScreen")
+        app.push_screen(modal)
+        await wait_for(pilot, lambda: app.screen is modal)
+        await pilot.pause()
 
-            if isinstance(modal, AIInstallConfirmationScreen):
-                body = modal.query_one("#ai-install-body", VerticalScroll)
-                buttons = (
-                    modal.query_one("#ai-install-cancel", Button),
-                    modal.query_one("#ai-install-confirm", Button),
-                )
-                assert body.max_scroll_y > 0
-            else:
-                body = modal.query_one("#ai-account-check-body", VerticalScroll)
-                buttons = (
-                    modal.query_one("#ai-account-check-cancel", Button),
-                    modal.query_one("#ai-account-check-confirm", Button),
-                )
-            assert_inside_viewport(app, body)
-            for button in buttons:
-                assert_inside_viewport(app, button)
-                assert body.region.bottom <= button.region.y
+        body = modal.query_one("#ai-install-body", VerticalScroll)
+        buttons = (
+            modal.query_one("#ai-install-cancel", Button),
+            modal.query_one("#ai-install-confirm", Button),
+        )
+        assert body.max_scroll_y > 0
+        assert_inside_viewport(app, body)
+        for button in buttons:
+            assert_inside_viewport(app, button)
+            assert body.region.bottom <= button.region.y
 
 
 @async_test

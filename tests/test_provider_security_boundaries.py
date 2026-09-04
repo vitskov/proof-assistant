@@ -129,25 +129,23 @@ def test_machine_config_rejects_ignored_or_camel_case_secret_fields(
 def test_sanitized_setup_contract_has_no_credential_value_slot() -> None:
     model = ModelDescriptor("account-model", "Account model")
     catalog = ModelCatalog(
-        driver=DriverId.OPENAI_API,
+        driver=DriverId.CODEX_CLI,
         models=(model,),
         source=DiscoverySource.LIVE_ACCOUNT,
         contract_approved=True,
     )
     status = DriverStatus(
-        driver=DriverId.OPENAI_API,
-        transport=DriverTransport.API,
-        installation=InstallationState.NOT_APPLICABLE,
+        driver=DriverId.CODEX_CLI,
+        transport=DriverTransport.CLI,
+        installation=InstallationState.INSTALLED,
         authentication=AuthenticationState.AUTHENTICATED,
         catalog=catalog,
     )
-    settings = MachineProviderSettings(
-        config=ProviderConfig(primary_driver=DriverId.OPENAI_API)
-    )
+    settings = MachineProviderSettings(config=ProviderConfig())
     snapshot = ProviderSetupSnapshot(
         settings=settings,
         statuses=(status,),
-        primary_driver=DriverId.OPENAI_API,
+        primary_driver=DriverId.CODEX_CLI,
         primary_ready=True,
         detail="ready",
     )
@@ -323,14 +321,11 @@ def test_model_catalog_rejects_impossible_provenance_states() -> None:
 
 def test_cli_has_no_api_key_command_line_argument() -> None:
     parser = build_parser()
-    credential = parser.parse_args(["ai", "credential", "openai_api", "--stdin"])
-    assert not any(
-        name in vars(credential)
-        for name in ("api_key", "credential", "password", "secret", "token")
-    )
+    with pytest.raises(SystemExit):
+        parser.parse_args(["ai", "credential", "codex_cli", "--stdin"])
     with pytest.raises(SystemExit):
         parser.parse_args(
-            ["ai", "credential", "openai_api", "--api-key", "must-not-parse"]
+            ["ai", "select", "codex_cli", "--api-key", "must-not-parse"]
         )
 
 

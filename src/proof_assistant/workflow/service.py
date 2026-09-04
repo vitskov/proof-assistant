@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import TypeVar
 
 from ..ai import (
+    SUPPORTED_DRIVERS,
     CredentialSource,
     Difficulty,
     DriverId,
@@ -401,6 +402,12 @@ class ProofAssistantWorkflow:
         selected_driver = (
             self._provider_service.config_store.load().config.primary_driver
         )
+        if selected_driver not in SUPPORTED_DRIVERS:
+            choices = ", ".join(driver.value for driver in SUPPORTED_DRIVERS)
+            raise ValueError(
+                f"Unsupported AI provider {selected_driver.value!r}; "
+                f"choose one of: {choices}"
+            )
         policies = self.ai_task_policies()
         policy_drivers = {policy.driver for policy in policies}
         if policy_drivers != {selected_driver}:
@@ -444,6 +451,12 @@ class ProofAssistantWorkflow:
     def _validate_project_ai_override(
         self, override: ProjectAIOverride, *, require_complete: bool = False
     ) -> None:
+        if override.ai_driver not in SUPPORTED_DRIVERS:
+            choices = ", ".join(driver.value for driver in SUPPORTED_DRIVERS)
+            raise ValueError(
+                f"Unsupported AI provider {override.ai_driver.value!r}; "
+                f"choose one of: {choices}"
+            )
         if require_complete and not override.complete:
             missing = sorted(
                 task.value
@@ -493,6 +506,12 @@ class ProofAssistantWorkflow:
             )
         role_drivers = {DriverId(role.ai_driver) for role in settings.role_settings}
         selected_driver = DriverId(settings.ai_driver)
+        if selected_driver not in SUPPORTED_DRIVERS:
+            choices = ", ".join(driver.value for driver in SUPPORTED_DRIVERS)
+            raise ValueError(
+                f"Unsupported AI provider {selected_driver.value!r}; "
+                f"choose one of: {choices}"
+            )
         if role_drivers != {selected_driver}:
             raise ValueError(
                 "New verification jobs require one selected provider for every role"
@@ -540,6 +559,18 @@ class ProofAssistantWorkflow:
             else self._base_verification_settings()
         )
         validation_error = None
+        if override is not None and override.ai_driver not in SUPPORTED_DRIVERS:
+            effective = machine_settings or self._machine_verification_settings()
+            return ProjectVerificationSettingsSnapshot(
+                project_path=store.project_path,
+                revision=revision,
+                override=override,
+                effective=effective,
+                validation_error=(
+                    "The saved project provider is no longer available. Choose "
+                    "Codex CLI or Claude CLI, or reset to machine defaults."
+                ),
+            )
         if override is not None:
             try:
                 recommended = (
@@ -701,6 +732,8 @@ class ProofAssistantWorkflow:
         """Resolve configured policies or clean recommendations for one provider."""
 
         settings = self._provider_service.config_store.load()
+        if driver is None and settings.config.primary_driver not in SUPPORTED_DRIVERS:
+            driver = DriverId.CODEX_CLI
         if driver is not None:
             return self._provider_service.recommend_driver_task_policies(
                 driver, settings=settings

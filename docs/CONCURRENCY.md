@@ -64,8 +64,7 @@ contracts.
 ### AI admission
 
 Every managed AI turn uses the same machine-wide AI resource namespace,
-regardless of whether it uses Codex, Claude, Copilot, OpenAI, Anthropic, or
-Gemini.
+regardless of whether it uses Codex CLI or Claude CLI.
 Proof, sketching, maintenance, clarification, diagnosis, review, reporting, and
 duplicate proof attempts cannot each create their own independent allowance.
 A reviewer therefore consumes one of the same slots as a prover.

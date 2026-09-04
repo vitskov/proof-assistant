@@ -59,6 +59,12 @@ def test_config_round_trip_is_atomic_private_and_revisioned(tmp_path):
             else item.model,
         )
         for item in initial.config.drivers
+    ) + (
+        DriverPreference(
+            driver=DriverId.ANTHROPIC_API,
+            credential_source=CredentialSource.CREDENTIAL_STORE,
+            model="claude-opus-4-6",
+        ),
     )
     config = ProviderConfig(
         primary_driver=DriverId.ANTHROPIC_API,

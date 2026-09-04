@@ -8,8 +8,8 @@ This index separates ordinary use from implementation and maintenance details.
    validation, and upgrades.
 2. [Usage guide](USAGE.md) — select a main LaTeX file, then use the TUI to
    verify, clarify, edit, and resume a persistent project.
-3. [AI providers and first-time setup](AI_PROVIDERS.md) — connect Codex,
-   Claude, Copilot, OpenAI, Anthropic, or Gemini without exposing credentials.
+3. [Verification AI setup](AI_PROVIDERS.md) — connect Codex CLI or Claude CLI
+   and apply the recommended eight-role preset.
 4. [Project task and scope](TASK_FILES.md) — the default task, the built-in task
    editor, targets, modes, and policies.
 5. [Troubleshooting and operations](TROUBLESHOOTING.md) — quiet runs, stopped

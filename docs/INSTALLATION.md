@@ -52,11 +52,10 @@ command archives that fallback too. The next launch recreates defaults even if
 the same app version is already installed, so running the installer again is
 optional for a settings-only reset.
 
-This does not delete managed projects, project-specific AI overrides,
-credentials stored by the OS keyring, or the Lean/Mathlib cache. Use **Use
-machine defaults** inside a project to remove that project's override. The
-backup can be restored if the reset was unintended, or deleted after the fresh
-setup is verified.
+This does not delete managed projects, project-specific AI overrides, native
+CLI login sessions, or the Lean/Mathlib cache. Use **Use machine defaults**
+inside a project to remove that project's override. The backup can be restored
+if the reset was unintended, or deleted after the fresh setup is verified.
 
 ### What an upgrade downloads
 
@@ -81,8 +80,7 @@ already available.
 Git, `curl`, and a working native C compiler are required. On macOS,
 install Apple's Command Line Tools if `cc` is unavailable. On Linux, install
 the compiler toolchain supplied by the distribution. At least one supported AI
-provider is required before verification: Codex, Claude Code, or Copilot CLI,
-or an OpenAI, Anthropic, or Gemini API credential.
+provider is required before verification: Codex CLI or Claude CLI.
 
 The installer also ensures that a basic terminal editor is available. It checks
 for `nano`, `pico`, and `micro`, in that order. If none is present, it attempts
@@ -177,6 +175,6 @@ proof-assistant ai status
 
 `compiler-check` must report successful standard-C, Lean-header, and execution
 probes. Provider login remains inside the native CLI; Proof Assistant never
-reads a CLI authentication store or copies its credentials. Continue with
-[AI providers and first-time setup](AI_PROVIDERS.md) if `ai status` reports
+reads a CLI authentication store or copies its login state. Continue with
+[Verification AI setup](AI_PROVIDERS.md) if `ai status` reports
 that no provider is ready.

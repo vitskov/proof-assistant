@@ -91,15 +91,20 @@ class VerifyOptions:
     concurrency: ConcurrencyRuntimeSpec = field(default_factory=ConcurrencyRuntimeSpec)
 
     def validate(self) -> None:
-        from ..ai import DriverId
+        from ..ai import SUPPORTED_DRIVERS, DriverId
 
         try:
-            DriverId(self.ai_driver)
+            driver = DriverId(self.ai_driver)
         except ValueError as exc:
-            choices = ", ".join(driver.value for driver in DriverId)
+            choices = ", ".join(driver.value for driver in SUPPORTED_DRIVERS)
             raise ValueError(
                 f"Unknown AI driver {self.ai_driver!r}; choose one of: {choices}"
             ) from exc
+        if driver not in SUPPORTED_DRIVERS:
+            choices = ", ".join(item.value for item in SUPPORTED_DRIVERS)
+            raise ValueError(
+                f"Unsupported AI driver {self.ai_driver!r}; choose one of: {choices}"
+            )
         if not self.model:
             raise ValueError("An explicit AI model is required")
         if not 1 <= self.jobs <= 128:

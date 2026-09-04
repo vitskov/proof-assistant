@@ -214,7 +214,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 )
                 print(f"  {model_id(entry)} [{efforts}]")
         print("authentication/backend status: app-server responded successfully")
-        print("NOTE: this package did not inspect OAuth tokens or OPENAI_API_KEY.")
+        print("NOTE: this package did not inspect provider authentication files or tokens.")
         return 0
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
@@ -1648,49 +1648,13 @@ def cmd_ai_models(args: argparse.Namespace) -> int:
 
 
 def cmd_ai_select(args: argparse.Namespace) -> int:
-    from dataclasses import replace
-
-    from .ai import Difficulty, DriverId, TaskPreference
+    from .ai import DriverId
 
     service = _ai_provider_service()
     driver = DriverId(args.driver)
     current = service.config_store.load()
-    preferences = tuple(
-        replace(
-            item,
-            model=(args.model if args.model is not None else item.model),
-            difficulty=(
-                Difficulty(args.difficulty)
-                if args.difficulty is not None
-                else item.difficulty
-            ),
-        )
-        if item.driver is driver
-        else item
-        for item in current.config.drivers
-    )
-    candidate = replace(
-        current.config,
-        primary_driver=driver,
-        drivers=preferences,
-    )
     try:
-        policies = service.recommend_driver_task_policies(
-            driver,
-            settings=replace(current, config=candidate),
-        )
-        candidate = replace(
-            candidate,
-            tasks=tuple(
-                TaskPreference(
-                    task=policy.task,
-                    driver=driver,
-                    model=policy.model,
-                    difficulty=policy.difficulty,
-                )
-                for policy in policies
-            ),
-        )
+        candidate = service.recommended_driver_config(driver, settings=current)
         service.validate_config(candidate)
         service.config_store.save(candidate, expected_revision=current.revision)
         snapshot = service.get_setup_snapshot()
@@ -1722,79 +1686,6 @@ def cmd_ai_install(args: argparse.Namespace) -> int:
     print(f"authentication: {result.status.authentication.value}")
     print(result.status.detail)
     return 0 if result.succeeded else 2
-
-
-def cmd_ai_credential(args: argparse.Namespace) -> int:
-    import getpass
-    from dataclasses import replace
-
-    from .ai import (
-        CredentialSource,
-        DriverId,
-        SecretSubmission,
-    )
-
-    service = _ai_provider_service()
-    driver = DriverId(args.driver)
-    if args.delete:
-        try:
-            removed = service.delete_credential(
-                driver, CredentialSource.CREDENTIAL_STORE
-            )
-        except Exception as exc:
-            print(f"ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
-            return 2
-        print("credential removed" if removed else "no stored credential was present")
-        return 0
-    value = (
-        sys.stdin.readline().rstrip("\r\n")
-        if args.stdin
-        else getpass.getpass("API key (stored in the OS keyring): ")
-    )
-    try:
-        service.store_credential(
-            driver,
-            CredentialSource.CREDENTIAL_STORE,
-            SecretSubmission(value),
-        )
-        current = service.config_store.load()
-        preferences = tuple(
-            replace(item, credential_source=CredentialSource.CREDENTIAL_STORE)
-            if item.driver is driver
-            else item
-            for item in current.config.drivers
-        )
-        service.config_store.save(
-            replace(current.config, drivers=preferences),
-            expected_revision=current.revision,
-        )
-        status = service.inspect_driver(driver)
-    except Exception as exc:
-        print(f"ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
-        return 2
-    print(f"credential status: {status.authentication.value}")
-    print(status.detail)
-    return 0 if status.ready else 3
-
-
-def cmd_ai_verify_account(args: argparse.Namespace) -> int:
-    from .ai import DriverId
-
-    if not args.yes:
-        print(
-            "No request sent. Re-run with --yes to authorize one tiny Copilot "
-            "request for entitlement verification."
-        )
-        return 3
-    service = _ai_provider_service()
-    try:
-        status = service.verify_cli_account(DriverId(args.driver), consent=True)
-    except Exception as exc:
-        print(f"ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
-        return 2
-    print(f"authentication: {status.authentication.value}")
-    print(status.detail)
-    return 0 if status.ready else 3
 
 
 def _add_concurrency_arguments(parser: argparse.ArgumentParser) -> None:
@@ -1842,14 +1733,9 @@ def build_parser() -> argparse.ArgumentParser:
     tui = sub.add_parser("tui", help="Launch the interactive Proof Assistant")
     tui.set_defaults(func=cmd_tui)
 
-    ai_drivers = (
-        "codex_cli",
-        "claude_cli",
-        "copilot_cli",
-        "openai_api",
-        "anthropic_api",
-        "gemini_api",
-    )
+    from .ai import SUPPORTED_DRIVERS
+
+    ai_drivers = tuple(driver.value for driver in SUPPORTED_DRIVERS)
     ai = sub.add_parser(
         "ai",
         aliases=("setup",),
@@ -1870,45 +1756,17 @@ def build_parser() -> argparse.ArgumentParser:
         "select", help="Select the machine-wide primary driver and defaults"
     )
     ai_select.add_argument("driver", choices=ai_drivers)
-    ai_select.add_argument("--model")
-    ai_select.add_argument(
-        "--difficulty",
-        choices=("auto", "none", "low", "medium", "high", "xhigh", "max"),
-    )
     ai_select.set_defaults(func=cmd_ai_select)
     ai_install = ai_sub.add_parser(
         "install", help="Preview or explicitly approve a user-local CLI install"
     )
-    ai_install.add_argument(
-        "driver", choices=("codex_cli", "claude_cli", "copilot_cli")
-    )
+    ai_install.add_argument("driver", choices=ai_drivers)
     ai_install.add_argument(
         "--yes",
         action="store_true",
         help="Approve the exact printed install plan",
     )
     ai_install.set_defaults(func=cmd_ai_install)
-    ai_credential = ai_sub.add_parser(
-        "credential", help="Store or remove an API key in the OS keyring"
-    )
-    ai_credential.add_argument(
-        "driver", choices=("openai_api", "anthropic_api", "gemini_api")
-    )
-    ai_credential.add_argument(
-        "--stdin",
-        action="store_true",
-        help="Read one key from stdin instead of a hidden terminal prompt",
-    )
-    ai_credential.add_argument("--delete", action="store_true")
-    ai_credential.set_defaults(func=cmd_ai_credential)
-    ai_verify = ai_sub.add_parser(
-        "verify-account",
-        help="Explicitly verify Copilot entitlement with one tiny request",
-    )
-    ai_verify.add_argument("driver", choices=("copilot_cli",))
-    ai_verify.add_argument("--yes", action="store_true")
-    ai_verify.set_defaults(func=cmd_ai_verify_account)
-
     worker = sub.add_parser("_project-worker", help=argparse.SUPPRESS)
     worker.add_argument("--project", required=True)
     worker.add_argument("--job-id", required=True)
@@ -2069,14 +1927,7 @@ def build_parser() -> argparse.ArgumentParser:
     manuscript_verify.add_argument("--model", required=True)
     manuscript_verify.add_argument(
         "--ai-driver",
-        choices=(
-            "codex_cli",
-            "claude_cli",
-            "copilot_cli",
-            "openai_api",
-            "anthropic_api",
-            "gemini_api",
-        ),
+        choices=ai_drivers,
         default="codex_cli",
         help="AI driver used by proof agents (default: codex_cli)",
     )

@@ -59,6 +59,43 @@ def test_cli_exposes_incremental_command_family(command, function_name):
     assert args.func.__name__ == function_name
 
 
+@pytest.mark.parametrize("driver", ("codex_cli", "claude_cli"))
+def test_manuscript_verify_accepts_supported_ai_drivers(driver):
+    args = build_parser().parse_args(
+        [
+            "manuscript",
+            "verify",
+            "--project",
+            "p",
+            "--model",
+            "model",
+            "--ai-driver",
+            driver,
+        ]
+    )
+
+    assert args.ai_driver == driver
+
+
+@pytest.mark.parametrize(
+    "driver", ("copilot_cli", "openai_api", "anthropic_api", "gemini_api")
+)
+def test_manuscript_verify_rejects_unsupported_ai_drivers(driver):
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(
+            [
+                "manuscript",
+                "verify",
+                "--project",
+                "p",
+                "--model",
+                "model",
+                "--ai-driver",
+                driver,
+            ]
+        )
+
+
 def test_public_project_commands_do_not_accept_external_task_files():
     parser = build_parser()
     with pytest.raises(SystemExit):
@@ -114,6 +151,8 @@ def test_logical_parallelism_is_bounded_and_batches_are_deterministic():
     VerifyOptions(model="model", jobs=3).validate()
     with pytest.raises(ValueError, match="between 1 and 128"):
         VerifyOptions(model="model", jobs=129).validate()
+    with pytest.raises(ValueError, match="Unsupported AI driver"):
+        VerifyOptions(model="model", ai_driver="openai_api").validate()
 
 
 def test_cli_exposes_independent_concurrency_overrides():

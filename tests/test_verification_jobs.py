@@ -182,12 +182,10 @@ class _FakeDetachedProcesses:
 def test_start_is_detached_idempotent_and_conflicts_on_different_request(
     tmp_path, monkeypatch
 ):
-    credential_sentinel = "must-not-appear-in-persisted-worker-command"
-    monkeypatch.setenv("OPENAI_API_KEY", credential_sentinel)
     provider_config = tmp_path / "separate-provider-state" / "selected.json"
     provider_store = MachineProviderConfigStore(provider_config)
     provider_store.save(
-        ProviderConfig(primary_driver=DriverId.ANTHROPIC_API), expected_revision=0
+        ProviderConfig(primary_driver=DriverId.CLAUDE_CLI), expected_revision=0
     )
     service, project = _workflow(tmp_path, provider_config_path=provider_config)
     processes = _FakeDetachedProcesses()
@@ -197,13 +195,13 @@ def test_start_is_detached_idempotent_and_conflicts_on_different_request(
     )
     try:
         first = service.start_verification(
-            project, None, _settings(driver=DriverId.ANTHROPIC_API)
+            project, None, _settings(driver=DriverId.CLAUDE_CLI)
         )
         replacement_client = ProofAssistantWorkflow(
             catalog_root=tmp_path / "catalog", use_codex_clarification=False
         )
         attached = replacement_client.start_verification(
-            project, None, _settings(driver=DriverId.ANTHROPIC_API)
+            project, None, _settings(driver=DriverId.CLAUDE_CLI)
         )
 
         assert first.started is True
@@ -231,18 +229,14 @@ def test_start_is_detached_idempotent_and_conflicts_on_different_request(
         assert detached._provider_service.config_store.path == provider_config.resolve()
         assert (
             detached._provider_service.config_store.load().config.primary_driver
-            is DriverId.ANTHROPIC_API
+            is DriverId.CLAUDE_CLI
         )
         assert first.job.launch_command == command
-        assert credential_sentinel not in command
-        assert credential_sentinel not in first.job.launch_command
         assert first.job.worker_log_path is not None
 
         with pytest.raises(VerificationJobConflictError) as raised:
             service.start_verification(
-                project,
-                None,
-                _settings(driver=DriverId.ANTHROPIC_API, model="different"),
+                project, None, _settings(driver=DriverId.CLAUDE_CLI, model="different"),
             )
         assert raised.value.observation.job.job_id == first.job.job_id
     finally:

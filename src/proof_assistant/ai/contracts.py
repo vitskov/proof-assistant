@@ -35,6 +35,9 @@ class DriverId(StrEnum):
     GEMINI_API = "gemini_api"
 
 
+SUPPORTED_DRIVERS = (DriverId.CODEX_CLI, DriverId.CLAUDE_CLI)
+
+
 class DriverTransport(StrEnum):
     CLI = "cli"
     API = "api"
@@ -161,6 +164,7 @@ class ProviderSetupSnapshot:
     primary_driver: DriverId
     primary_ready: bool
     detail: str
+    selection_required: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,18 +207,9 @@ class ProviderConfig:
         default_factory=lambda: tuple(
             DriverPreference(
                 driver=driver,
-                credential_source=(
-                    CredentialSource.NONE
-                    if driver
-                    in {
-                        DriverId.CODEX_CLI,
-                        DriverId.CLAUDE_CLI,
-                        DriverId.COPILOT_CLI,
-                    }
-                    else CredentialSource.ENVIRONMENT
-                ),
+                credential_source=CredentialSource.NONE,
             )
-            for driver in DriverId
+            for driver in SUPPORTED_DRIVERS
         )
     )
     tasks: tuple[TaskPreference, ...] = ()

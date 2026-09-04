@@ -9,6 +9,7 @@ from .config import (
     default_provider_config_path,
 )
 from .contracts import (
+    SUPPORTED_DRIVERS,
     AuthenticationState,
     CommandSpec,
     CredentialSource,
@@ -95,6 +96,7 @@ __all__ = [
     "ProviderSetupSnapshot",
     "SecretSubmission",
     "SetupActionState",
+    "SUPPORTED_DRIVERS",
     "ShellPathManager",
     "SubprocessCommandRunner",
     "SystemExecutableResolver",

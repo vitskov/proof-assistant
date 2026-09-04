@@ -94,8 +94,8 @@ have strict boundaries described in [Architecture](ARCHITECTURE.md).
 - AI clarification analysis cannot alter deterministic question facts, resolve
   a question, cite evidence outside its content-hashed packet, or run during
   cache-only resume.
-- `proof_assistant.ai` owns provider selection, credential indirection,
-  catalog provenance, task policy, and provider execution. Do not route around
+- `proof_assistant.ai` owns provider selection, CLI readiness, catalog
+  provenance, task policy, and provider execution. Do not route around
   it through RepoProver's legacy provider client or a TUI-only setup path.
 
 Favor contract tests at each boundary and integration tests that use fakes only
@@ -112,16 +112,14 @@ proof-assistant smoke --model MODEL --effort EFFORT
 proof-assistant ai status
 ```
 
-Run smoke once with `OPENAI_API_KEY` removed to demonstrate that the existing
-Codex login is sufficient for the Codex compatibility path. Provider setup and
-execution tests must fake CLI/HTTP/keyring boundaries by default; do not consume
-Copilot quota or API credits in an ordinary test suite. A real provider test
-requires explicit authorization and must record which provider traffic it used.
+Provider setup and execution tests must fake CLI process boundaries by default.
+A real provider test requires explicit authorization and must record whether it
+used Codex CLI or Claude CLI.
 
 Provider regression coverage must prove that settings cannot contain secrets,
-credential submissions are one-shot/redacted, model catalogs retain their
-live-versus-fallback source, install plans require exact consent, and all
-provider tool calls return through the common host admission boundary.
+model catalogs retain their live-versus-fallback source, install plans require
+exact consent, and all provider tool calls return through the common host
+admission boundary.
 
 ## TUI and workflow acceptance
 
@@ -139,13 +137,13 @@ textual console
 
 ```bash
 # Terminal 2, from the repository root
-PYTHONPATH=. textual run --dev tests/textual_dev_settings_app.py
+PYTHONPATH=src:. textual run --dev tests/textual_dev_settings_app.py
 ```
 
 The fixture opens the production provider-settings screen over a deterministic
-service, including the provider switch, one-click defaults, and Fable /
-extra-high for Author clarification and the Independent prove agent. It does
-not connect to a provider. Use it to inspect focus, resize behavior, and
+service, including the provider switch, one-click defaults, Sonnet / medium for
+Author clarification, and Fable / extra-high for the Independent prove agent.
+It does not connect to a provider. Use it to inspect focus, resize behavior, and
 Textual log messages. Record diagnostics with:
 
 ```bash

@@ -23,7 +23,7 @@ ProviderWorkflowFake = _provider_test_support.ProviderWorkflowFake
 _snapshot = _provider_test_support._snapshot
 
 _CLAUDE_DEFAULTS = {
-    TaskKind.CLARIFICATION: ("fable", Difficulty.XHIGH),
+    TaskKind.CLARIFICATION: ("sonnet", Difficulty.MEDIUM),
     TaskKind.DIAGNOSTIC: ("opus", Difficulty.HIGH),
     TaskKind.PROOF: ("best", Difficulty.HIGH),
     TaskKind.SKETCH: ("sonnet", Difficulty.MEDIUM),

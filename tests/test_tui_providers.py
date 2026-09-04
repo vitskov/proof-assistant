@@ -14,7 +14,6 @@ from textual.widgets import (
     Button,
     ContentSwitcher,
     DataTable,
-    Input,
     OptionList,
     Select,
     Static,
@@ -23,9 +22,9 @@ from textual.widgets import (
 from textual.widgets.select import InvalidSelectValueError
 
 from proof_assistant.ai import (
+    SUPPORTED_DRIVERS,
     AuthenticationState,
     CommandSpec,
-    CredentialSource,
     Difficulty,
     DiscoverySource,
     DriverId,
@@ -39,7 +38,6 @@ from proof_assistant.ai import (
     ModelDescriptor,
     ProviderConfig,
     ProviderSetupSnapshot,
-    SecretSubmission,
     SetupActionState,
     TaskKind,
     TaskModelPolicy,
@@ -48,7 +46,6 @@ from proof_assistant.tui import ProofAssistantApp
 from proof_assistant.tui.commands import AppHeader
 from proof_assistant.tui.screens import WelcomeScreen
 from proof_assistant.tui.settings import (
-    AIAccountVerificationConfirmationScreen,
     AIInstallConfirmationScreen,
     AIProviderSettingsScreen,
     ProjectInheritanceConfirmationScreen,
@@ -175,30 +172,6 @@ def _catalog(driver: DriverId) -> ModelCatalog:
                 ("haiku", "Haiku"),
             )
         ),
-        DriverId.COPILOT_CLI: (
-            ModelDescriptor("auto", "Automatic", (Difficulty.AUTO,)),
-        ),
-        DriverId.OPENAI_API: (
-            ModelDescriptor(
-                "gpt-5.6-sol",
-                "GPT-5.6 Sol",
-                (Difficulty.AUTO, Difficulty.HIGH, Difficulty.XHIGH),
-            ),
-        ),
-        DriverId.ANTHROPIC_API: (
-            ModelDescriptor(
-                "claude-opus-4-6",
-                "Claude Opus 4.6",
-                (Difficulty.AUTO, Difficulty.HIGH, Difficulty.XHIGH),
-            ),
-        ),
-        DriverId.GEMINI_API: (
-            ModelDescriptor(
-                "gemini-2.5-pro",
-                "Gemini 2.5 Pro",
-                (Difficulty.AUTO, Difficulty.HIGH),
-            ),
-        ),
     }[driver]
     return ModelCatalog(
         driver,
@@ -215,11 +188,7 @@ def _status(
     installed: bool = True,
     authentication: AuthenticationState = AuthenticationState.AUTHENTICATED,
 ) -> DriverStatus:
-    cli = driver in {
-        DriverId.CODEX_CLI,
-        DriverId.CLAUDE_CLI,
-        DriverId.COPILOT_CLI,
-    }
+    cli = driver in SUPPORTED_DRIVERS
     installation = (
         InstallationState.INSTALLED
         if cli and installed
@@ -258,25 +227,7 @@ def _snapshot(
 ) -> ProviderSetupSnapshot:
     return ProviderSetupSnapshot(
         MachineProviderSettings(revision, config or ProviderConfig()),
-        statuses
-        or tuple(
-            _status(
-                driver,
-                authentication=(
-                    AuthenticationState.UNKNOWN
-                    if driver is DriverId.COPILOT_CLI
-                    else AuthenticationState.REQUIRED
-                    if driver
-                    in {
-                        DriverId.OPENAI_API,
-                        DriverId.ANTHROPIC_API,
-                        DriverId.GEMINI_API,
-                    }
-                    else AuthenticationState.AUTHENTICATED
-                ),
-            )
-            for driver in DriverId
-        ),
+        statuses or tuple(_status(driver) for driver in SUPPORTED_DRIVERS),
         primary,
         ready,
         "Primary AI driver is ready." if ready else "Primary AI driver needs setup.",
@@ -293,17 +244,13 @@ class ProviderWorkflowFake:
         self.project_resets: list[tuple[Path, int]] = []
         self.install_previews: list[DriverId] = []
         self.install_calls: list[tuple[InstallPlan, str]] = []
-        self.credential_calls: list[tuple[DriverId, CredentialSource]] = []
-        self.credential_deleted: list[tuple[DriverId, CredentialSource]] = []
-        self.secret_was_received = False
-        self.account_verifications: list[DriverId] = []
         self.recommended_defaults_started = threading.Event()
         self.recommended_defaults_release: threading.Event | None = None
         self.recommended_defaults_started_by_driver = {
-            driver: threading.Event() for driver in DriverId
+            driver: threading.Event() for driver in SUPPORTED_DRIVERS
         }
         self.recommended_defaults_completed_by_driver = {
-            driver: threading.Event() for driver in DriverId
+            driver: threading.Event() for driver in SUPPORTED_DRIVERS
         }
         self.recommended_defaults_release_by_driver: dict[
             DriverId, threading.Event
@@ -384,7 +331,7 @@ class ProviderWorkflowFake:
                 raise AssertionError("timed out waiting to release initial policies")
         selected_driver = driver or self.snapshot.primary_driver
         claude_defaults = {
-            TaskKind.CLARIFICATION: ("opus", Difficulty.HIGH),
+            TaskKind.CLARIFICATION: ("sonnet", Difficulty.MEDIUM),
             TaskKind.DIAGNOSTIC: ("opus", Difficulty.HIGH),
             TaskKind.PROOF: ("best", Difficulty.HIGH),
             TaskKind.SKETCH: ("sonnet", Difficulty.MEDIUM),
@@ -449,6 +396,7 @@ class ProviderWorkflowFake:
             settings=MachineProviderSettings(expected_revision + 1, config),
             primary_driver=config.primary_driver,
             primary_ready=_status_by_driver(self.snapshot, config.primary_driver).ready,
+            selection_required=False,
         )
         return self.snapshot
 
@@ -543,43 +491,6 @@ class ProviderWorkflowFake:
             "Installation and executable identity checks succeeded.",
         )
 
-    def verify_ai_driver_account(
-        self, driver: DriverId, *, consent: bool
-    ) -> ProviderSetupSnapshot:
-        assert consent is True
-        self.account_verifications.append(driver)
-        self.snapshot = _replace_status(self.snapshot, _status(driver))
-        return self.snapshot
-
-    def store_ai_credential(
-        self,
-        driver: DriverId,
-        source: CredentialSource,
-        credential: SecretSubmission,
-    ) -> ProviderSetupSnapshot:
-        assert "sk-test-never-retain" not in repr(credential)
-        self.secret_was_received = credential.consume() == "sk-test-never-retain"
-        self.credential_calls.append((driver, source))
-        preferences = tuple(
-            replace(item, credential_source=source) if item.driver is driver else item
-            for item in self.snapshot.settings.config.drivers
-        )
-        config = replace(self.snapshot.settings.config, drivers=preferences)
-        self.snapshot = replace(
-            _replace_status(self.snapshot, _status(driver)),
-            settings=MachineProviderSettings(
-                self.snapshot.settings.revision + 1, config
-            ),
-        )
-        return self.snapshot
-
-    def delete_ai_credential(
-        self, driver: DriverId, source: CredentialSource
-    ) -> ProviderSetupSnapshot:
-        self.credential_deleted.append((driver, source))
-        return self.snapshot
-
-
 class FailingClaudeDefaultsWorkflowFake(ProviderWorkflowFake):
     def ai_task_policies(
         self, driver: DriverId | None = None
@@ -609,23 +520,7 @@ def _replace_status(
 async def test_first_run_routes_to_setup_and_blocks_main_menu() -> None:
     statuses = tuple(
         _status(driver, installed=driver is not DriverId.CODEX_CLI)
-        if driver is DriverId.CODEX_CLI
-        else _status(
-            driver,
-            authentication=(
-                AuthenticationState.UNKNOWN
-                if driver is DriverId.COPILOT_CLI
-                else AuthenticationState.REQUIRED
-                if driver
-                in {
-                    DriverId.OPENAI_API,
-                    DriverId.ANTHROPIC_API,
-                    DriverId.GEMINI_API,
-                }
-                else AuthenticationState.AUTHENTICATED
-            ),
-        )
-        for driver in DriverId
+        for driver in SUPPORTED_DRIVERS
     )
     service = ProviderWorkflowFake(
         _snapshot(ready=False, revision=0, statuses=statuses)
@@ -642,17 +537,9 @@ async def test_first_run_routes_to_setup_and_blocks_main_menu() -> None:
             == "choose-page"
         )
         summary = screen.query_one("#ai-provider-summary", TextArea).text
-        assert all(
-            label in summary
-            for label in (
-                "OpenAI Codex CLI",
-                "Anthropic Claude Code CLI",
-                "GitHub Copilot CLI",
-                "OpenAI API",
-                "Anthropic API",
-                "Google Gemini API",
-            )
-        )
+        assert "OpenAI Codex CLI" in summary
+        assert "Anthropic Claude Code CLI" in summary
+        assert "API" not in summary
         assert "Available models and exact difficulties" in summary
         await settle_screen(pilot)
         app.action_main_menu()
@@ -660,7 +547,7 @@ async def test_first_run_routes_to_setup_and_blocks_main_menu() -> None:
             pilot,
             lambda: (
                 isinstance(app.screen, AIProviderSettingsScreen)
-                and "Finish primary AI setup" in notice_text(screen)
+                and "Choose and save a connected AI provider" in notice_text(screen)
             ),
         )
         app.action_global_settings()
@@ -676,21 +563,70 @@ async def test_first_run_routes_to_setup_and_blocks_main_menu() -> None:
 
 
 @async_test
+async def test_first_run_always_asks_for_provider_when_default_is_ready() -> None:
+    service = ProviderWorkflowFake(_snapshot(ready=True, revision=0))
+    app = ProofAssistantApp(service)  # type: ignore[arg-type]
+
+    async with app.run_test(size=(140, 48)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, AIProviderSettingsScreen))
+        screen = app.screen
+        assert isinstance(screen, AIProviderSettingsScreen)
+        assert screen.first_run
+        assert (
+            screen.query_one("#ai-settings-pages", ContentSwitcher).current
+            == "choose-page"
+        )
+        await wait_for(
+            pilot,
+            lambda: screen.query_one("#ai-first-run-next", Button).label.plain
+            == "Use OpenAI Codex CLI",
+        )
+
+
+@async_test
+async def test_legacy_provider_requires_explicit_choice_without_losing_revision() -> None:
+    snapshot = replace(
+        _snapshot(ready=False, revision=7),
+        selection_required=True,
+        detail="Choose a supported provider.",
+    )
+    service = ProviderWorkflowFake(snapshot)
+    app = ProofAssistantApp(service)  # type: ignore[arg-type]
+
+    async with app.run_test(size=(140, 48)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, AIProviderSettingsScreen))
+        screen = app.screen
+        assert isinstance(screen, AIProviderSettingsScreen)
+        await wait_for(
+            pilot,
+            lambda: set(screen._machine_role_drafts) == set(TaskKind),
+        )
+        screen.query_one("#ai-configure-driver", Select).value = (
+            DriverId.CLAUDE_CLI.value
+        )
+        await wait_for(
+            pilot,
+            lambda: screen._machine_role_drafts.get(TaskKind.PROOF)
+            == ("best", Difficulty.HIGH),
+        )
+        screen.query_one("#ai-first-run-next", Button).press()
+        await wait_for(pilot, lambda: bool(service.updates))
+
+        saved, expected_revision = service.updates[-1]
+        assert expected_revision == 7
+        assert saved.primary_driver is DriverId.CLAUDE_CLI
+        assert tuple(item.driver for item in saved.drivers) == SUPPORTED_DRIVERS
+        assert {item.task for item in saved.tasks} == set(TaskKind)
+        assert not service.snapshot.selection_required
+
+
+@async_test
 async def test_first_run_ready_alternate_provider_can_be_selected_and_saved() -> None:
     statuses = tuple(
         _status(driver, installed=False)
         if driver is DriverId.CODEX_CLI
-        else _status(
-            driver,
-            authentication=(
-                AuthenticationState.UNKNOWN
-                if driver is DriverId.COPILOT_CLI
-                else AuthenticationState.REQUIRED
-                if driver in _API_DRIVERS_FOR_TEST
-                else AuthenticationState.AUTHENTICATED
-            ),
-        )
-        for driver in DriverId
+        else _status(driver)
+        for driver in SUPPORTED_DRIVERS
     )
     service = ProviderWorkflowFake(
         _snapshot(ready=False, revision=0, statuses=statuses)
@@ -718,35 +654,20 @@ async def test_first_run_ready_alternate_provider_can_be_selected_and_saved() ->
                 == ("fable", Difficulty.XHIGH)
             ),
         )
-        assert screen.query_one("#ai-setup-continue", Button).disabled
-
-        screen.query_one("#ai-first-run-next", Button).press()
-        await wait_for(
-            pilot,
-            lambda: (
-                screen.query_one("#ai-settings-pages", ContentSwitcher).current
-                == "connection-page"
-            ),
-        )
         screen.query_one("#ai-first-run-next", Button).press()
         await wait_for(
             pilot,
             lambda: (
                 bool(service.updates)
-                and screen.snapshot is not None
-                and screen.snapshot.primary_ready
-                and not screen.query_one("#ai-setup-continue", Button).disabled
+                and isinstance(app.screen, WelcomeScreen)
             ),
         )
         assert service.snapshot.primary_driver is DriverId.CLAUDE_CLI
-        assert (
-            screen.query_one("#ai-settings-pages", ContentSwitcher).current
-            == "roles-page"
-        )
-        assert screen.query_one("#ai-settings-nav", OptionList).highlighted == 2
-        assert screen.query_one("#ai-role-roster", DataTable).row_count == len(TaskKind)
-        screen.query_one("#ai-setup-continue", Button).press()
-        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        saved, expected_revision = service.updates[-1]
+        assert expected_revision == 0
+        assert saved.primary_driver is DriverId.CLAUDE_CLI
+        assert {item.task for item in saved.tasks} == set(TaskKind)
+        assert all(item.driver is DriverId.CLAUDE_CLI for item in saved.tasks)
 
 
 @async_test
@@ -773,18 +694,26 @@ async def test_landing_and_revisioned_model_difficulty_update() -> None:
             pilot,
             lambda: not screen.query_one("#save-ai-settings", Button).disabled,
         )
-        await show_ai_settings_view(pilot, screen, "connection")
-        model = screen.query_one("#ai-provider-model", Select)
-        model.value = "gpt-5.6-sol"
-        await pilot.pause()
-        difficulty = screen.query_one("#ai-provider-difficulty", Select)
+        role = screen.query_one("#ai-role-task", Select)
+        role.value = TaskKind.DUPLICATE_PROOF.value
+        await wait_for(
+            pilot,
+            lambda: not screen.query_one("#ai-role-difficulty", Select).disabled,
+        )
+        difficulty = screen.query_one("#ai-role-difficulty", Select)
         assert_select_accepts(difficulty, {"auto", "high", "xhigh"})
         difficulty.value = "xhigh"
+        await wait_for(
+            pilot,
+            lambda: screen._machine_role_drafts[TaskKind.DUPLICATE_PROOF][1]
+            is Difficulty.XHIGH,
+        )
         screen._save_settings()
         await wait_for(pilot, lambda: bool(service.updates))
         config, revision = service.updates[-1]
         assert revision == 1
-        preference = config.preference_for(DriverId.CODEX_CLI)
+        preference = config.task_preference_for(TaskKind.DUPLICATE_PROOF)
+        assert preference is not None
         assert preference.model == "gpt-5.6-sol"
         assert preference.difficulty is Difficulty.XHIGH
         task_text = screen.query_one("#ai-task-policies", TextArea).text
@@ -809,11 +738,13 @@ async def test_provider_roster_selection_updates_connection_inspector() -> None:
         assert isinstance(screen, AIProviderSettingsScreen)
         await show_ai_settings_view(pilot, screen, "connection")
         roster = screen.query_one("#ai-provider-roster", DataTable)
-        await wait_for(pilot, lambda: roster.row_count == len(DriverId))
+        await wait_for(pilot, lambda: roster.row_count == len(SUPPORTED_DRIVERS))
 
         roster.focus()
         roster.move_cursor(
-            row=list(DriverId).index(DriverId.CLAUDE_CLI), column=0, animate=False
+            row=list(SUPPORTED_DRIVERS).index(DriverId.CLAUDE_CLI),
+            column=0,
+            animate=False,
         )
         await pilot.press("enter")
         await wait_for(
@@ -831,9 +762,9 @@ async def test_provider_roster_selection_updates_connection_inspector() -> None:
 
 @async_test
 async def test_every_provider_saves_a_complete_capability_valid_role_team() -> None:
-    for driver in DriverId:
+    for driver in SUPPORTED_DRIVERS:
         service = ProviderWorkflowFake(
-            _snapshot(statuses=tuple(_status(candidate) for candidate in DriverId))
+            _snapshot(statuses=tuple(_status(candidate) for candidate in SUPPORTED_DRIVERS))
         )
         app = ProofAssistantApp(service)  # type: ignore[arg-type]
         async with app.run_test(size=(140, 48)) as pilot:
@@ -936,7 +867,8 @@ async def test_provider_switch_and_one_click_defaults_are_visible_and_explicit()
                 ),
             )
             assert "Claude Code CLI" in defaults.label.plain
-            assert "all 8 roles" in defaults.label.plain
+            assert "recommended" in defaults.label.plain
+            assert "preset" in defaults.label.plain
             with pytest.raises(InvalidSelectValueError):
                 screen.query_one("#ai-role-model", Select).value = "gpt-5.6-sol"
             roster = screen.query_one("#ai-role-roster", DataTable)
@@ -1169,7 +1101,7 @@ async def test_claude_role_defaults_are_visible_and_one_role_can_be_overridden()
             ),
         )
         expected = {
-            TaskKind.CLARIFICATION: ("opus", Difficulty.HIGH),
+            TaskKind.CLARIFICATION: ("sonnet", Difficulty.MEDIUM),
             TaskKind.DIAGNOSTIC: ("opus", Difficulty.HIGH),
             TaskKind.PROOF: ("best", Difficulty.HIGH),
             TaskKind.SKETCH: ("sonnet", Difficulty.MEDIUM),
@@ -1185,6 +1117,16 @@ async def test_claude_role_defaults_are_visible_and_one_role_can_be_overridden()
         role_difficulty = screen.query_one("#ai-role-difficulty", Select)
         roster = screen.query_one("#ai-role-roster", DataTable)
         await wait_for(pilot, lambda: roster.row_count == len(TaskKind))
+        for task in TaskKind:
+            state = str(roster.get_row(task.value)[-1])
+            if task in {
+                TaskKind.CLARIFICATION,
+                TaskKind.DIAGNOSTIC,
+                TaskKind.PROOF,
+            }:
+                assert state == "Ready"
+            else:
+                assert state == "Reserved"
         roster.focus()
         for task, (model, difficulty) in expected.items():
             roster.move_cursor(row=list(TaskKind).index(task), column=0, animate=False)
@@ -1603,7 +1545,8 @@ async def test_stale_project_provider_defaults_cannot_overwrite_newer_provider()
         )
         defaults = screen.query_one("#project-ai-use-recommended", Button)
         assert "Claude Code CLI" in defaults.label.plain
-        assert "all 8 roles" in defaults.label.plain
+        assert "recommended" in defaults.label.plain
+        assert "preset" in defaults.label.plain
         roster = screen.query_one("#project-ai-role-roster", DataTable)
         assert all(
             "gpt-" not in " ".join(str(cell) for cell in roster.get_row(task.value))
@@ -1686,233 +1629,6 @@ async def test_initial_policy_load_cannot_overwrite_newer_provider_defaults() ->
             Difficulty.XHIGH,
         )
         assert screen._machine_draft_is_dirty()
-
-
-@async_test
-async def test_connection_draft_is_guarded_and_survives_status_reload() -> None:
-    service = ProviderWorkflowFake(_snapshot())
-    app = ProofAssistantApp(service)  # type: ignore[arg-type]
-
-    async with app.run_test(size=(120, 40)) as pilot:
-        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
-        app.show_ai_provider_settings()
-        await wait_for(pilot, lambda: isinstance(app.screen, AIProviderSettingsScreen))
-        screen = app.screen
-        assert isinstance(screen, AIProviderSettingsScreen)
-        await show_ai_settings_view(pilot, screen, "connection")
-        await wait_for(
-            pilot,
-            lambda: (
-                screen._provider_controls_ready
-                and not screen.query_one("#ai-provider-model", Select).disabled
-                and bool(screen.query("#ai-api-key").nodes)
-            ),
-        )
-        await pilot.pause()
-        model = screen.query_one("#ai-provider-model", Select)
-        model.value = "gpt-5.6-sol"
-        await wait_for(pilot, screen._machine_draft_is_dirty)
-
-        navigation = screen.query_one("#ai-settings-nav", OptionList)
-        navigation.highlighted = 2
-        navigation.focus()
-        await pilot.press("enter")
-        await wait_for(
-            pilot,
-            lambda: bool(app.screen.query("#ai-unsaved-continue").nodes),
-        )
-        assert (
-            screen.query_one("#ai-settings-pages", ContentSwitcher).current
-            == "connection-page"
-        )
-        app.screen.query_one("#ai-unsaved-continue", Button).press()
-        await wait_for(pilot, lambda: app.screen is screen)
-        assert model.value == "gpt-5.6-sol"
-
-        screen._record_setup_and_reload(service.snapshot)
-        await pilot.pause()
-        assert model.value == "gpt-5.6-sol"
-        assert screen._machine_draft_is_dirty()
-
-        base_revision = screen._machine_draft_base_revision
-        service.snapshot = replace(
-            service.snapshot,
-            settings=replace(
-                service.snapshot.settings,
-                revision=base_revision + 1,
-            ),
-        )
-        screen._record_setup_and_reload(service.snapshot)
-        await pilot.pause()
-        assert screen.snapshot is not None
-        assert screen.snapshot.settings.revision == base_revision + 1
-        assert screen._machine_draft_base_revision == base_revision
-        assert model.value == "gpt-5.6-sol"
-        screen.query_one("#save-ai-settings", Button).press()
-        await wait_for(
-            pilot,
-            lambda: (
-                not screen._machine_save_in_flight
-                and "revision changed" in notice_text(screen)
-            ),
-        )
-        assert service.updates == []
-
-        reads_before = service.setup_reads
-        screen.action_refresh()
-        await wait_for(
-            pilot,
-            lambda: bool(app.screen.query("#ai-unsaved-discard").nodes),
-        )
-        assert service.setup_reads == reads_before
-        app.screen.query_one("#ai-unsaved-discard", Button).press()
-        await wait_for(pilot, lambda: service.setup_reads > reads_before)
-        await wait_for(pilot, lambda: not screen._machine_draft_is_dirty())
-        assert model.value != "gpt-5.6-sol"
-
-
-@async_test
-async def test_project_connection_page_ctrl_s_saves_machine_settings() -> None:
-    project = Path("/test/project-connection-save")
-    service = ProviderWorkflowFake(_snapshot())
-    app = ProofAssistantApp(service)  # type: ignore[arg-type]
-
-    async with app.run_test(size=(120, 40)) as pilot:
-        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
-        app.show_ai_provider_settings(project=project)
-        await wait_for(pilot, lambda: isinstance(app.screen, AIProviderSettingsScreen))
-        screen = app.screen
-        assert isinstance(screen, AIProviderSettingsScreen)
-        await wait_for(pilot, lambda: screen.project_settings is not None)
-        screen.query_one("#settings-scope", Select).value = SettingsScopeKind.PROJECT
-        await wait_for(pilot, lambda: screen._active_scope is SettingsScopeKind.PROJECT)
-        screen.query_one("#project-ai-manage-connection", Button).press()
-        await wait_for(
-            pilot,
-            lambda: (
-                screen.query_one("#ai-settings-pages", ContentSwitcher).current
-                == "connection-page"
-            ),
-        )
-        await wait_for(
-            pilot,
-            lambda: (
-                screen._provider_controls_ready
-                and not screen.query_one("#ai-provider-model", Select).disabled
-            ),
-        )
-        screen.query_one("#ai-provider-model", Select).value = "gpt-5.6-terra"
-        screen.query_one("#ai-provider-difficulty", Select).value = "high"
-        await wait_for(pilot, screen._machine_draft_is_dirty)
-
-        await pilot.press("ctrl+s")
-        await wait_for(pilot, lambda: bool(service.updates))
-        assert service.project_updates == []
-        assert service.updates[-1][0].preference_for(DriverId.CODEX_CLI).model == (
-            "gpt-5.6-terra"
-        )
-
-
-@async_test
-async def test_project_connection_page_visible_save_button_saves_machine_settings() -> (
-    None
-):
-    project = Path("/test/project-connection-button-save")
-    service = ProviderWorkflowFake(_snapshot())
-    app = ProofAssistantApp(service)  # type: ignore[arg-type]
-
-    async with app.run_test(size=(120, 40)) as pilot:
-        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
-        app.show_ai_provider_settings(project=project)
-        await wait_for(pilot, lambda: isinstance(app.screen, AIProviderSettingsScreen))
-        screen = app.screen
-        assert isinstance(screen, AIProviderSettingsScreen)
-        await wait_for(pilot, lambda: screen.project_settings is not None)
-        screen.query_one("#settings-scope", Select).value = SettingsScopeKind.PROJECT
-        await wait_for(pilot, lambda: screen._active_scope is SettingsScopeKind.PROJECT)
-        screen.query_one("#project-ai-manage-connection", Button).press()
-        await wait_for(
-            pilot,
-            lambda: (
-                screen.query_one("#ai-settings-pages", ContentSwitcher).current
-                == "connection-page"
-            ),
-        )
-        await wait_for(
-            pilot,
-            lambda: (
-                screen._provider_controls_ready
-                and not screen.query_one("#ai-provider-model", Select).disabled
-                and bool(screen.query("#ai-api-key").nodes)
-            ),
-        )
-        await pilot.pause()
-        screen.query_one("#ai-provider-model", Select).value = "gpt-5.6-terra"
-        screen.query_one("#ai-provider-difficulty", Select).value = "high"
-        await wait_for(pilot, screen._machine_draft_is_dirty)
-
-        machine_save = screen.query_one("#save-ai-settings", Button)
-        project_save = screen.query_one("#save-project-ai", Button)
-        assert machine_save.display
-        assert not project_save.display
-        machine_save.press()
-        await wait_for(pilot, lambda: bool(service.updates))
-        assert service.project_updates == []
-        assert service.updates[-1][0].preference_for(DriverId.CODEX_CLI).model == (
-            "gpt-5.6-terra"
-        )
-
-
-@async_test
-async def test_project_connection_page_ctrl_q_guards_machine_settings() -> None:
-    project = Path("/test/project-connection-quit")
-    service = ProviderWorkflowFake(_snapshot())
-    app = ProofAssistantApp(service)  # type: ignore[arg-type]
-    quit_requested = asyncio.Event()
-    app.exit = lambda *args, **kwargs: quit_requested.set()  # type: ignore[method-assign]
-
-    async with app.run_test(size=(120, 40)) as pilot:
-        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
-        app.show_ai_provider_settings(project=project)
-        await wait_for(pilot, lambda: isinstance(app.screen, AIProviderSettingsScreen))
-        screen = app.screen
-        assert isinstance(screen, AIProviderSettingsScreen)
-        await wait_for(pilot, lambda: screen.project_settings is not None)
-        screen.query_one("#settings-scope", Select).value = SettingsScopeKind.PROJECT
-        await wait_for(pilot, lambda: screen._active_scope is SettingsScopeKind.PROJECT)
-        screen.query_one("#project-ai-manage-connection", Button).press()
-        await wait_for(
-            pilot,
-            lambda: (
-                screen.query_one("#ai-settings-pages", ContentSwitcher).current
-                == "connection-page"
-            ),
-        )
-        await wait_for(
-            pilot,
-            lambda: (
-                screen._provider_controls_ready
-                and not screen.query_one("#ai-provider-model", Select).disabled
-                and bool(screen.query("#ai-api-key").nodes)
-            ),
-        )
-        await pilot.pause()
-        screen.query_one("#ai-provider-model", Select).value = "gpt-5.6-terra"
-        screen.query_one("#ai-provider-difficulty", Select).value = "high"
-        await wait_for(pilot, screen._machine_draft_is_dirty)
-
-        await pilot.press("ctrl+q")
-        await wait_for(
-            pilot, lambda: isinstance(app.screen, UnsavedAISettingsConfirmationScreen)
-        )
-        assert not quit_requested.is_set()
-        dialog = app.screen
-        assert isinstance(dialog, UnsavedAISettingsConfirmationScreen)
-        assert dialog.scope_label == "machine"
-        dialog.query_one("#ai-unsaved-save", Button).press()
-        await wait_for(pilot, quit_requested.is_set)
-        assert service.project_updates == []
-        assert len(service.updates) == 1
 
 
 @async_test
@@ -2010,7 +1726,7 @@ async def test_provider_switch_preserves_overlapping_model_with_unsupported_effo
         replace(_status(driver), catalog=claude_catalog)
         if driver is DriverId.CLAUDE_CLI
         else _status(driver)
-        for driver in DriverId
+        for driver in SUPPORTED_DRIVERS
     )
     for project in (False, True):
         service = ProviderWorkflowFake(_snapshot(statuses=statuses))
@@ -2109,7 +1825,7 @@ async def test_project_save_backend_guard_rejects_provider_that_is_not_ready() -
         _status(driver, authentication=AuthenticationState.REQUIRED)
         if driver is DriverId.CLAUDE_CLI
         else _status(driver)
-        for driver in DriverId
+        for driver in SUPPORTED_DRIVERS
     )
     service = ProviderWorkflowFake(_snapshot(statuses=statuses))
     app = ProofAssistantApp(service)  # type: ignore[arg-type]
@@ -2138,7 +1854,7 @@ async def test_newer_f2_notice_survives_stale_defaults_completion() -> None:
         _status(driver, installed=False)
         if driver is DriverId.CODEX_CLI
         else _status(driver)
-        for driver in DriverId
+        for driver in SUPPORTED_DRIVERS
     )
     service = ProviderWorkflowFake(
         _snapshot(ready=False, revision=0, statuses=statuses)
@@ -2166,8 +1882,7 @@ async def test_newer_f2_notice_survives_stale_defaults_completion() -> None:
         await wait_for(
             pilot,
             lambda: (
-                "Finish primary AI setup and review the complete eight-role team"
-                in notice_text(screen)
+                "Choose and save a connected AI provider" in notice_text(screen)
             ),
         )
         service.recommended_defaults_release.set()
@@ -2178,10 +1893,7 @@ async def test_newer_f2_notice_survives_stale_defaults_completion() -> None:
                 == ("gpt-5.6-sol", Difficulty.HIGH)
             ),
         )
-        assert (
-            "Finish primary AI setup and review the complete eight-role team"
-            in notice_text(screen)
-        )
+        assert "Choose and save a connected AI provider" in notice_text(screen)
 
 
 @async_test
@@ -2245,19 +1957,18 @@ async def test_project_provider_override_is_isolated_and_can_reset_to_inheritanc
         project_role = screen.query_one("#project-ai-role", Select)
         project_roster = screen.query_one("#project-ai-role-roster", DataTable)
         await wait_for(pilot, lambda: project_roster.row_count == len(TaskKind))
-        project_roster.focus()
-        project_roster.move_cursor(
-            row=list(TaskKind).index(TaskKind.REPORTING), column=0, animate=False
-        )
-        await pilot.pause()
+        project_role.value = TaskKind.REPORTING.value
         await wait_for(
             pilot,
             lambda: (
                 project_role.value == TaskKind.REPORTING.value
                 and screen.query_one("#project-ai-role-model", Select).value == "haiku"
+                and not screen._rendering_role_controls
             ),
         )
-        screen.query_one("#project-ai-role-model", Select).value = "fable"
+        project_model = screen.query_one("#project-ai-role-model", Select)
+        assert not project_model.disabled
+        project_model.value = "fable"
         await wait_for(
             pilot,
             lambda: screen._project_role_drafts[TaskKind.REPORTING][0] == "fable",
@@ -2521,182 +2232,12 @@ async def test_later_provider_degradation_keeps_project_landing_accessible() -> 
 
 
 @async_test
-async def test_api_key_is_one_shot_and_never_remains_in_dom_or_screen_repr() -> None:
-    service = ProviderWorkflowFake(_snapshot())
-    app = ProofAssistantApp(service)  # type: ignore[arg-type]
-
-    async with app.run_test(size=(140, 48)) as pilot:
-        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
-        await settle_screen(pilot)
-        app.show_ai_provider_settings()
-        await wait_for(pilot, lambda: isinstance(app.screen, AIProviderSettingsScreen))
-        screen = app.screen
-        assert isinstance(screen, AIProviderSettingsScreen)
-        await wait_for(
-            pilot,
-            lambda: not screen.query_one("#ai-configure-driver", Select).disabled,
-        )
-        screen.query_one(
-            "#ai-configure-driver", Select
-        ).value = DriverId.OPENAI_API.value
-        await pilot.pause()
-        secret = "sk-test-never-retain"
-        key_input = screen.query_one("#ai-api-key", Input)
-        key_input.value = secret
-        screen._store_credential()
-        assert key_input.value == ""
-        await wait_for(pilot, lambda: service.secret_was_received)
-        assert service.credential_calls == [
-            (DriverId.OPENAI_API, CredentialSource.CREDENTIAL_STORE)
-        ]
-        displayed = "\n".join(
-            [node.value for node in screen.query(Input)]
-            + [node.text for node in screen.query(TextArea)]
-        )
-        assert secret not in displayed
-        assert secret not in repr(screen)
-        assert (
-            "credential_store" in screen.query_one("#ai-auth-next-step", TextArea).text
-        )
-        screen._review_delete_credential()
-        await wait_for(
-            pilot,
-            lambda: (
-                bool(app.screen.query("#settings-destructive-cancel").nodes)
-                and app.screen.focused
-                is app.screen.query_one("#settings-destructive-cancel", Button)
-            ),
-        )
-        assert service.credential_deleted == []
-        assert app.screen.focused is app.screen.query_one(
-            "#settings-destructive-cancel", Button
-        )
-        await pilot.press("enter")
-        await wait_for(pilot, lambda: app.screen is screen)
-        assert service.credential_deleted == []
-
-        screen._review_delete_credential()
-        await wait_for(
-            pilot,
-            lambda: bool(app.screen.query("#settings-destructive-cancel").nodes),
-        )
-        app.action_main_menu()
-        await wait_for(pilot, lambda: app.screen is screen)
-        assert service.credential_deleted == []
-
-        screen._review_delete_credential()
-        await wait_for(
-            pilot,
-            lambda: bool(app.screen.query("#settings-destructive-confirm").nodes),
-        )
-        app.screen.query_one("#settings-destructive-confirm", Button).press()
-        await wait_for(pilot, lambda: bool(service.credential_deleted))
-        assert service.credential_deleted == [
-            (DriverId.OPENAI_API, CredentialSource.CREDENTIAL_STORE)
-        ]
-
-
-@async_test
-async def test_api_key_is_destroyed_when_leaving_provider_connection() -> None:
-    service = ProviderWorkflowFake(_snapshot())
-    app = ProofAssistantApp(service)  # type: ignore[arg-type]
-
-    async with app.run_test(size=(120, 40)) as pilot:
-        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
-        app.show_ai_provider_settings()
-        await wait_for(pilot, lambda: isinstance(app.screen, AIProviderSettingsScreen))
-        screen = app.screen
-        assert isinstance(screen, AIProviderSettingsScreen)
-        await wait_for(pilot, lambda: bool(screen.query("#ai-settings-nav").nodes))
-        await show_ai_settings_view(pilot, screen, "connection")
-        screen.query_one(
-            "#ai-configure-driver", Select
-        ).value = DriverId.OPENAI_API.value
-        await wait_for(
-            pilot,
-            lambda: (
-                bool(screen.query("#ai-api-key").nodes)
-                and not screen.query_one("#ai-api-key", Input).disabled
-            ),
-        )
-        sentinel = "sk-navigation-secret-must-disappear"
-        screen.query_one("#ai-api-key", Input).value = sentinel
-
-        await show_ai_settings_view(pilot, screen, "roles")
-        await wait_for(pilot, lambda: not screen.query("#ai-api-key").nodes)
-        assert sentinel not in repr(screen)
-        assert all(sentinel not in node.value for node in screen.query(Input))
-
-        await show_ai_settings_view(pilot, screen, "connection")
-        await wait_for(pilot, lambda: bool(screen.query("#ai-api-key").nodes))
-        assert screen.query_one("#ai-api-key", Input).value == ""
-
-
-@async_test
-async def test_api_key_is_destroyed_across_back_and_global_navigation() -> None:
-    service = ProviderWorkflowFake(_snapshot())
-    app = ProofAssistantApp(service)  # type: ignore[arg-type]
-
-    async with app.run_test(size=(120, 40)) as pilot:
-        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
-
-        async def open_with_secret(
-            secret: str,
-        ) -> tuple[AIProviderSettingsScreen, Input]:
-            app.show_ai_provider_settings()
-            await wait_for(
-                pilot, lambda: isinstance(app.screen, AIProviderSettingsScreen)
-            )
-            screen = app.screen
-            assert isinstance(screen, AIProviderSettingsScreen)
-            await wait_for(pilot, lambda: bool(screen.query("#ai-settings-nav").nodes))
-            await show_ai_settings_view(pilot, screen, "connection")
-            screen.query_one(
-                "#ai-configure-driver", Select
-            ).value = DriverId.OPENAI_API.value
-            await wait_for(
-                pilot,
-                lambda: (
-                    bool(screen.query("#ai-api-key").nodes)
-                    and not screen.query_one("#ai-api-key", Input).disabled
-                ),
-            )
-            key_input = screen.query_one("#ai-api-key", Input)
-            key_input.value = secret
-            return screen, key_input
-
-        screen, retained_input = await open_with_secret("secret-back")
-        screen.action_back()
-        await wait_for(pilot, lambda: isinstance(app.screen, SettingsHomeScreen))
-        assert retained_input.value == ""
-
-        _screen, retained_input = await open_with_secret("secret-f2")
-        app.action_main_menu()
-        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
-        assert retained_input.value == ""
-
-        _screen, retained_input = await open_with_secret("secret-f3")
-        app.action_global_settings()
-        await wait_for(pilot, lambda: isinstance(app.screen, SettingsHomeScreen))
-        assert retained_input.value == ""
-
-
-@async_test
 async def test_install_plan_is_exact_cancel_first_and_only_backend_executes() -> None:
     statuses = tuple(
         _status(driver, installed=False)
         if driver is DriverId.CLAUDE_CLI
-        else _status(
-            driver,
-            authentication=(
-                AuthenticationState.UNKNOWN
-                if driver is DriverId.COPILOT_CLI
-                else AuthenticationState.REQUIRED
-                if driver in _API_DRIVERS_FOR_TEST
-                else AuthenticationState.AUTHENTICATED
-            ),
-        )
-        for driver in DriverId
+        else _status(driver)
+        for driver in SUPPORTED_DRIVERS
     )
     service = ProviderWorkflowFake(_snapshot(statuses=statuses))
     app = ProofAssistantApp(service)  # type: ignore[arg-type]
@@ -2747,71 +2288,6 @@ async def test_install_plan_is_exact_cancel_first_and_only_backend_executes() ->
         plan, token = service.install_calls[-1]
         assert plan.commands == service.plan.commands
         assert token == plan.consent_token == "consent-test-token"
-
-
-_API_DRIVERS_FOR_TEST = {
-    DriverId.OPENAI_API,
-    DriverId.ANTHROPIC_API,
-    DriverId.GEMINI_API,
-}
-
-
-@async_test
-async def test_copilot_account_check_is_never_automatic_and_requires_consent() -> None:
-    service = ProviderWorkflowFake(_snapshot())
-    app = ProofAssistantApp(service)  # type: ignore[arg-type]
-
-    async with app.run_test(size=(140, 48)) as pilot:
-        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
-        assert service.account_verifications == []
-        await settle_screen(pilot)
-        app.show_ai_provider_settings()
-        await wait_for(pilot, lambda: isinstance(app.screen, AIProviderSettingsScreen))
-        screen = app.screen
-        assert isinstance(screen, AIProviderSettingsScreen)
-        await wait_for(
-            pilot,
-            lambda: not screen.query_one("#ai-configure-driver", Select).disabled,
-        )
-        screen.query_one(
-            "#ai-configure-driver", Select
-        ).value = DriverId.COPILOT_CLI.value
-        await pilot.pause()
-        assert not screen.query_one("#verify-ai-account", Button).disabled
-        assert service.account_verifications == []
-
-        screen._review_account_verification()
-        await wait_for(
-            pilot,
-            lambda: (
-                isinstance(app.screen, AIAccountVerificationConfirmationScreen)
-                and bool(app.screen.query(".warning").nodes)
-            ),
-        )
-        warning = app.screen.query_one(".warning", TextArea).text
-        assert "one tiny harmless model request" in warning
-        assert "never run automatically" in warning
-        await wait_for(
-            pilot,
-            lambda: app.screen.query_one("#ai-account-check-cancel", Button).has_focus,
-        )
-        await pilot.press("enter")
-        await wait_for(pilot, lambda: isinstance(app.screen, AIProviderSettingsScreen))
-        assert service.account_verifications == []
-        await settle_screen(pilot)
-
-        screen = app.screen
-        assert isinstance(screen, AIProviderSettingsScreen)
-        screen._review_account_verification()
-        await wait_for(
-            pilot,
-            lambda: isinstance(app.screen, AIAccountVerificationConfirmationScreen),
-        )
-        dialog = app.screen
-        assert isinstance(dialog, AIAccountVerificationConfirmationScreen)
-        dialog.action_confirm()
-        await wait_for(pilot, lambda: bool(service.account_verifications))
-        assert service.account_verifications == [DriverId.COPILOT_CLI]
 
 
 @async_test
@@ -3064,76 +2540,6 @@ async def test_setup_refreshes_reject_out_of_order_and_pre_mutation_results() ->
 
 
 @async_test
-async def test_credential_store_serializes_backend_mutations() -> None:
-    service = ProviderWorkflowFake(_snapshot())
-    app = ProofAssistantApp(service)  # type: ignore[arg-type]
-    store_started = threading.Event()
-    store_release = threading.Event()
-    original_store = service.store_ai_credential
-
-    def blocking_store(
-        driver: DriverId,
-        source: CredentialSource,
-        credential: SecretSubmission,
-    ) -> ProviderSetupSnapshot:
-        store_started.set()
-        if not store_release.wait(timeout=5):
-            raise AssertionError("timed out waiting to release credential store")
-        return original_store(driver, source, credential)
-
-    service.store_ai_credential = blocking_store  # type: ignore[method-assign]
-
-    async with app.run_test(size=(140, 48)) as pilot:
-        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
-        app.show_ai_provider_settings()
-        await wait_for(pilot, lambda: isinstance(app.screen, AIProviderSettingsScreen))
-        screen = app.screen
-        assert isinstance(screen, AIProviderSettingsScreen)
-        await wait_for(
-            pilot,
-            lambda: not screen.query_one("#ai-configure-driver", Select).disabled,
-        )
-        await show_ai_settings_view(pilot, screen, "connection")
-        screen.query_one(
-            "#ai-configure-driver", Select
-        ).value = DriverId.OPENAI_API.value
-        await wait_for(
-            pilot,
-            lambda: (
-                bool(screen.query("#ai-api-key").nodes)
-                and not screen.query_one("#store-ai-key", Button).disabled
-                and not screen.query_one("#ai-api-key", Input).disabled
-            ),
-        )
-        key_input = screen.query_one("#ai-api-key", Input)
-        key_input.value = "sk-test-never-retain"
-        screen.query_one("#store-ai-key", Button).press()
-        await wait_for(pilot, store_started.is_set)
-
-        assert screen._credential_mutation_in_flight
-        assert screen.query_one("#store-ai-key", Button).disabled
-        assert screen.query_one("#delete-ai-key", Button).disabled
-        assert screen.query_one("#ai-configure-driver", Select).disabled
-        assert screen.query_one("#ai-settings-nav", OptionList).disabled
-
-        app.action_main_menu()
-        await wait_for(pilot, lambda: app.screen is screen)
-        app.action_global_settings()
-        await wait_for(pilot, lambda: app.screen is screen)
-
-        key_input.value = "second-secret-must-not-submit"
-        screen._store_credential()
-        assert key_input.value == ""
-        assert service.credential_calls == []
-
-        store_release.set()
-        await wait_for(pilot, lambda: not screen._credential_mutation_in_flight)
-        assert service.credential_calls == [
-            (DriverId.OPENAI_API, CredentialSource.CREDENTIAL_STORE)
-        ]
-
-
-@async_test
 async def test_project_discard_restores_inherited_read_only_editor_state() -> None:
     project = Path("/test/project-discard-inheritance")
     service = ProviderWorkflowFake(_snapshot())
@@ -3219,61 +2625,3 @@ async def test_degraded_provider_discard_keeps_machine_save_disabled() -> None:
         assert screen.query_one("#save-ai-settings", Button).disabled
         assert not screen._save_settings()
         assert service.updates == []
-
-
-@async_test
-async def test_continue_editing_remounts_an_empty_one_shot_secret_field() -> None:
-    service = ProviderWorkflowFake(_snapshot())
-    app = ProofAssistantApp(service)  # type: ignore[arg-type]
-
-    async with app.run_test(size=(140, 48)) as pilot:
-        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
-        app.show_ai_provider_settings()
-        await wait_for(pilot, lambda: isinstance(app.screen, AIProviderSettingsScreen))
-        screen = app.screen
-        assert isinstance(screen, AIProviderSettingsScreen)
-        await wait_for(pilot, lambda: set(screen._machine_role_drafts) == set(TaskKind))
-        await show_ai_settings_view(pilot, screen, "connection")
-        screen.query_one(
-            "#ai-configure-driver", Select
-        ).value = DriverId.OPENAI_API.value
-        await wait_for(
-            pilot,
-            lambda: (
-                bool(screen.query("#ai-api-key").nodes)
-                and not screen.query_one("#ai-api-key", Input).disabled
-            ),
-        )
-        old_input = screen.query_one("#ai-api-key", Input)
-        old_input.value = "secret-that-must-be-destroyed"
-        screen._machine_role_drafts[TaskKind.REPORTING] = (
-            "gpt-5.6-terra",
-            Difficulty.HIGH,
-        )
-
-        app.action_main_menu()
-        await wait_for(
-            pilot,
-            lambda: (
-                isinstance(app.screen, UnsavedAISettingsConfirmationScreen)
-                and bool(app.screen.query("#ai-unsaved-continue").nodes)
-            ),
-        )
-        app.screen.query_one("#ai-unsaved-continue", Button).press()
-        await wait_for(
-            pilot,
-            lambda: (
-                app.screen is screen
-                and bool(screen.query("#ai-api-key").nodes)
-                and not screen.query_one("#ai-api-key", Input).disabled
-            ),
-        )
-        new_input = screen.query_one("#ai-api-key", Input)
-        assert new_input is not old_input
-        assert new_input.value == ""
-        assert not new_input.disabled
-        screen.query_one("#store-ai-key", Button).press()
-        await wait_for(
-            pilot,
-            lambda: "Paste a non-empty API key" in notice_text(screen),
-        )

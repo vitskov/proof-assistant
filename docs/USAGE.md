@@ -15,10 +15,11 @@ proof-assistant
 ```
 
 `proof-assistant tui` is an explicit equivalent. On an unconfigured machine,
-the backend first checks the primary AI driver and opens the provider setup
-screen if it is not ready. Choose one of the CLI or API drivers, complete the
-displayed authentication step, and recheck. No project is created until one
-primary driver is ready. See [AI providers and first-time setup](AI_PROVIDERS.md).
+Proof Assistant always opens the provider setup screen. Choose Codex CLI or
+Claude CLI, and Proof Assistant loads that provider's complete recommended role
+preset. If needed, complete the displayed native login step and recheck. No
+project is created until one primary driver is ready. See
+[Verification AI setup](AI_PROVIDERS.md).
 
 The welcome screen then offers **New project** and **Resume project**.
 
@@ -386,47 +387,36 @@ make a deliberate selection from the backend-provided candidates, and review
 the resulting proof-impact plan before starting another iteration. Existing
 evidence is preserved; the TUI never edits project metadata itself.
 
-## AI provider settings
+## Verification AI settings
 
 Open **Menu** (or press **Ctrl+P**), choose **Settings**, then open
 **Verification AI**. This destination is split into
-**Role assignments**, **Connections & credentials**, and **Provider
-diagnostics**, so the complete role team is not buried below connection and
-diagnostic controls. Connections & credentials shows machine-owned
-installation/authentication state, credential source, and provider fallback.
-Provider diagnostics shows exact catalog provenance and resolved task-policy
-details. The connection view can review a missing CLI's exact user-local
-install plan, show copyable native login instructions, and submit an API key
-once to the OS keyring. It never reads a provider auth file or displays a
-stored key.
+**Role assignments**, **Provider connection**, and **Provider diagnostics**,
+so the complete role team is not buried below connection and diagnostic
+controls. Provider connection shows machine-owned installation and native
+login readiness for Codex CLI and Claude CLI. Provider diagnostics shows exact
+catalog provenance and resolved task-policy details. The connection view can
+review a missing CLI's exact user-local install plan and show copyable native
+login instructions. It never reads a provider authentication file.
 
-Automatic model discovery is live for Codex and the three API drivers when the
-configured account is reachable. Claude and Copilot CLI catalogs are explicitly
-labeled curated aliases because those CLIs do not document a noninteractive
-account model-list command. Copilot's authentication check also remains
-unknown until the user explicitly approves one tiny no-tools request; normal
-startup and refresh never send that request.
-
-Provider connections and credentials remain machine-owned. In **Role
-assignments**, an explicit scope switch selects **Machine defaults** or **This
-project**. Both scopes show all eight roles with separate model and reasoning
-effort values: author clarification, scan / triage diagnostics, primary prove,
-sketch, maintain / fix, math and engineering review, independent prove, and
-progress / reporting. The provider selector and **Use recommended _provider_
-defaults for all 8 roles** button are together above the roster. Changing the
-provider immediately removes the previous provider's rows and loads a complete
-recommended matrix for the new provider. Neutral placeholders remain visible
-while it loads, Save stays disabled, and stale or foreign model names never
-appear under the selected provider. The defaults button resets later
-same-provider customization; **Undo defaults** restores only that provider's
-previous complete draft. Role model and effort choices are limited to the
-selected provider's capabilities.
+In **Role assignments**, an explicit scope switch selects **Machine defaults**
+or **This project**. Both scopes show all eight roles with separate model and
+reasoning-effort values: author clarification, scan / triage diagnostics,
+primary prove, sketch, maintain / fix, math and engineering review, independent
+prove, and progress / reporting. Selecting Codex CLI or Claude CLI loads a
+complete recommended team automatically. The provider selector and **Reset to
+recommended preset** button are together above the roster. Changing provider
+immediately removes the previous provider's rows. Neutral placeholders remain
+visible while the new preset loads, Save stays disabled, and stale or foreign
+model names never appear under the selected provider. Most users should keep
+the preset; role model and effort choices remain available for advanced tuning
+and are limited to the selected provider's capabilities.
 In project scope, **Use machine defaults** removes the project override. The
 complete role map affects future submissions only and is frozen into each job,
 including the diagnostic and clarification roles. A selected driver still
 shares the same global AI admission controller with all other AI task classes. See
-[AI providers and first-time setup](AI_PROVIDERS.md) for commands, credential
-handling, model policy, and execution isolation.
+[Verification AI setup](AI_PROVIDERS.md) for the exact presets, commands, model
+policy, and execution isolation.
 
 ## Concurrency and machine resources
 

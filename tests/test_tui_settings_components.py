@@ -13,6 +13,7 @@ import textual
 from textual.app import App, ComposeResult
 
 import proof_assistant.tui.settings.components as components
+from proof_assistant.ai import SUPPORTED_DRIVERS
 from proof_assistant.ai.contracts import (
     Difficulty,
     DriverId,
@@ -65,17 +66,12 @@ def _provider_rows() -> tuple[ProviderConnectionRow, ...]:
     return tuple(
         ProviderConnectionRow(
             driver,
-            (
-                DriverTransport.CLI
-                if driver
-                in {DriverId.CODEX_CLI, DriverId.CLAUDE_CLI, DriverId.COPILOT_CLI}
-                else DriverTransport.API
-            ),
+            DriverTransport.CLI,
             "Connected",
             "Ready",
             primary=driver is DriverId.CLAUDE_CLI,
         )
-        for driver in reversed(tuple(DriverId))
+        for driver in reversed(SUPPORTED_DRIVERS)
     )
 
 
@@ -162,10 +158,6 @@ async def test_provider_roster_renders_every_provider_in_canonical_order() -> No
         assert [roster.get_row_at(index)[0] for index in range(roster.row_count)] == [
             "OpenAI Codex CLI",
             "Anthropic Claude Code CLI (primary)",
-            "GitHub Copilot CLI",
-            "OpenAI API",
-            "Anthropic API",
-            "Google Gemini API",
         ]
 
 
@@ -205,9 +197,9 @@ def test_role_draft_rejects_a_duplicate_task() -> None:
 def test_defaults_undo_restores_draft_before_latest_preview() -> None:
     original = ProviderDefaultsPreviewState.from_draft(_role_draft())
     claude = _role_draft(driver=DriverId.CLAUDE_CLI, effort=Difficulty.HIGH)
-    gemini = _role_draft(driver=DriverId.GEMINI_API, effort=Difficulty.XHIGH)
+    codex_xhigh = _role_draft(driver=DriverId.CODEX_CLI, effort=Difficulty.XHIGH)
 
-    restored = original.preview(claude).preview(gemini).undo()
+    restored = original.preview(claude).preview(codex_xhigh).undo()
 
     assert restored.draft == ProviderDefaultsPreviewState.from_draft(claude).draft
 

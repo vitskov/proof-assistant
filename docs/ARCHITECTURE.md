@@ -41,8 +41,8 @@ Owns the UI-neutral application state machine. Immutable contracts live in
 `inspect_project_destination`, `list_projects`, `create_project`,
 `select_project_main_file`, `resume_project`, `plan_changes`, and
 `confirm_and_verify`. It also owns the TUI-facing, sanitized provider operations
-(`get_ai_setup`, revision-checked settings updates, install-plan review,
-credential submission/deletion, and explicit account verification).
+(`get_ai_setup`, revision-checked settings updates, install-plan review, and
+CLI readiness checks).
 `CancellationFlag` and
 `StaleChangePlanError` make cancellation and stale confirmation explicit. The
 service maps persisted backend state to screens but contains no Textual imports.
@@ -71,14 +71,12 @@ available.
 ### `proof_assistant.ai`
 
 Owns provider-neutral contracts, machine-scoped provider configuration,
-credential indirection, executable/account inspection, model-catalog
-provenance, task/model policy, setup plans, and execution adapters. It supports
-Codex, Claude Code, and Copilot CLIs plus OpenAI, Anthropic, and Gemini APIs.
-The module does not decide claim state or certification.
+executable/account inspection, model-catalog provenance, task/model policy,
+setup plans, and execution adapters. Its public contract supports Codex CLI and
+Claude CLI. The module does not decide claim state or certification.
 
-Provider settings contain no secret values. API credentials are resolved just
-in time from the selected environment variable or OS keyring. CLI sessions use
-their native account login without Proof Assistant reading auth files.
+Provider settings contain no secret values. CLI sessions use their native
+account login without Proof Assistant reading authentication files.
 
 ### `proof_assistant.incremental`
 
@@ -237,14 +235,14 @@ dependencies and axioms, and only then changes a claim to `CERTIFIED`.
 ## AI providers and RepoProver boundary
 
 ```text
-machine provider policy + credential reference
+machine provider policy
     |
     v
 optional project provider + per-role model/difficulty matrix
     |
     v
-Proof Assistant AI adapter -> isolated CLI or provider-native API tool loop
-    |                                      |
+Proof Assistant AI adapter -> isolated CLI tool loop
+    |
     +------ allowlisted tool calls --------+
                        |
                        v
@@ -252,16 +250,15 @@ Proof Assistant AI adapter -> isolated CLI or provider-native API tool loop
 ```
 
 Proof Assistant reuses tested RepoProver prompts, dynamic-tool schemas, and tool
-handlers where appropriate. It does not adopt RepoProver's legacy raw API-key
-configuration, static model table, OpenAI-compatible provider client, retry
-policy, or research-deployment concurrency as an authoritative provider layer.
-Provider selection, credential indirection, catalog provenance, task policy,
-execution isolation, and admission have one source of truth in
-`proof_assistant.ai`.
+handlers where appropriate. It does not adopt RepoProver's legacy provider
+configuration, static model table, retry policy, or research-deployment
+concurrency as an authoritative provider layer. Provider selection, CLI
+readiness, catalog provenance, task policy, execution isolation, and admission
+have one source of truth in `proof_assistant.ai`.
 
-Machine policy owns provider installation, authentication, credentials, role
-defaults, and resource admission. A managed project may persist only one public
-provider plus a model/difficulty assignment for every `TaskKind` in
+Machine policy owns provider installation, authentication, role defaults, and
+resource admission. A managed project may persist only one public provider plus
+a model/difficulty assignment for every `TaskKind` in
 `.repoprover/verification-settings.json`. The workflow service validates that
 override against the current machine provider setup and approved catalog, then
 merges it with machine defaults when a verification is submitted. The resolved
@@ -283,23 +280,19 @@ aggregate modules.
 Codex uses the established isolated app-server adapter: child-only
 configuration disables apps, plugins, bundled/local skills, and configured MCP
 servers, then startup verifies the effective inventory and fails closed if an
-external capability remains. Claude and Copilot use ephemeral mode-`0600`
-prompt/tool/MCP files and are restricted to the supplied Proof Assistant MCP
-tools while their general shell/file mutation surface is disabled. Direct API
-drivers use provider-native function calling. In every case, dynamic tool
+external capability remains. Claude uses ephemeral mode-`0600` prompt/tool/MCP
+files and is restricted to the supplied Proof Assistant MCP tools while its
+general shell/file mutation surface is disabled. In both routes, dynamic tool
 requests return to the same allowlisted host and pass through Lean/build
 admission where applicable.
 
 CLI authentication stays inside the native provider CLI. Proof Assistant does
-not read `~/.codex/auth.json` or any Claude/Copilot credential store, print
-tokens, or convert a subscription login into an API key. API keys come only
-from the configured provider environment variable or OS keyring and never
-enter provider settings, project state, an argument vector, or a log.
+not read `~/.codex/auth.json` or Claude authentication files, print tokens, or
+copy a subscription login into provider settings, project state, an argument
+vector, or a log.
 
-Codex and Claude have non-billable status checks. Automatic Copilot inspection
-does not make a request; its optional tiny no-tools entitlement probe is a
-separate explicit-consent operation. Catalogs distinguish live account results
-from contract-approved curated fallbacks. See [AI providers and first-time
+Codex and Claude have non-billable status checks. Catalogs distinguish live
+account results from contract-approved curated fallbacks. See [Verification AI
 setup](AI_PROVIDERS.md).
 
 ## Persistence and recovery

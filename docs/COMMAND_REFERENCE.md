@@ -40,7 +40,7 @@ proof-assistant manuscript verify --project PROJECT [OPTIONS]
 
 Important options:
 
-- `--ai-driver codex_cli|claude_cli|copilot_cli|openai_api|anthropic_api|gemini_api`
+- `--ai-driver codex_cli|claude_cli`
   selects the proof-agent driver for this run;
 - `--model MODEL` and `--effort EFFORT` select the provider model/difficulty;
   inspect the exact catalog with `proof-assistant ai models DRIVER`;
@@ -83,51 +83,43 @@ Use these only when you understand their review/state consequences. The TUI
 routes ordinary clarification and source-change handling through higher-level
 workflow contracts.
 
-## AI provider setup
+## Verification AI setup
 
-Provider connections and credentials are machine-wide. The primary provider
-has an explicit model/difficulty assignment for every role. Existing projects
-may choose another ready provider and a complete per-role matrix for future runs
-from the project's **Settings** panel. `setup` is an alias for `ai`.
+Provider connections are machine-wide. Selecting Codex CLI or Claude CLI
+automatically creates an explicit model/difficulty assignment for every role.
+Existing projects may choose either ready provider and a complete per-role
+matrix for future runs from the project's **Settings** panel. `setup` is an
+alias for `ai`.
 
 ```bash
 proof-assistant ai status [--driver DRIVER]
 proof-assistant ai models DRIVER
-proof-assistant ai select DRIVER [--model MODEL] [--difficulty LEVEL]
+proof-assistant ai select DRIVER
 proof-assistant ai install CLI_DRIVER [--yes]
-proof-assistant ai credential API_DRIVER [--stdin | --delete]
-proof-assistant ai verify-account copilot_cli [--yes]
 ```
 
-Driver IDs are `codex_cli`, `claude_cli`, `copilot_cli`, `openai_api`,
-`anthropic_api`, and `gemini_api`. Difficulty values are `auto`, `none`, `low`,
-`medium`, `high`, `xhigh`, and `max`; each model accepts only the subset printed
-by its catalog.
+Driver IDs are `codex_cli` and `claude_cli`. Difficulty values are `auto`,
+`none`, `low`, `medium`, `high`, `xhigh`, and `max`; each model accepts only the
+subset printed by its catalog.
 
 - `ai status` probes install/auth/catalog readiness and prints only sanitized
   values.
 - `ai models` labels the catalog `live_account`, `curated_fallback`, or
   `unavailable`.
-- `ai select` persists the primary driver and optional provider-level fallback,
-  and regenerates a complete role-aware default matrix for that driver; use the
-  Settings panel to edit individual roles.
+- `ai select` persists the primary driver and regenerates its complete
+  recommended eight-role matrix; use the Settings panel only to edit individual
+  roles.
 - A project's Settings panel can persist or reset its own
-  provider plus per-role model/difficulty matrix; credentials stay
-  machine-owned and running jobs keep their submitted role settings.
+  provider plus per-role model/difficulty matrix. Running jobs keep their
+  submitted provider and role settings; changes apply to the next run.
 - `ai install` prints the exact allowlisted user-local plan and changes
   nothing unless `--yes` approves that plan.
-- `ai credential` uses a hidden prompt by default. `--stdin` consumes one line
-  for controlled automation; a key is never accepted in an argument. The value
-  goes to the OS keyring, not the provider settings file.
-- `ai verify-account copilot_cli` sends nothing unless `--yes` explicitly
-  approves one tiny no-tools entitlement request.
 
-Native CLI login remains separate: run `codex login`, `claude auth login`, or
-`copilot login` as directed, then recheck. API environment variables are
-`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, and `GEMINI_API_KEY`.
+Native CLI login remains separate: run `codex login` or `claude auth login` as
+directed, then recheck.
 
-See [AI providers and first-time setup](AI_PROVIDERS.md) for catalog,
-precedence, authentication, and isolation details.
+See [Verification AI setup](AI_PROVIDERS.md) for the recommended presets,
+catalog handling, authentication, and isolation details.
 
 ## Installation and Codex compatibility diagnostics
 

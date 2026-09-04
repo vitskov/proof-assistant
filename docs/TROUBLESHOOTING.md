@@ -162,21 +162,9 @@ Select an exact model/difficulty advertised for the chosen driver. A
 `curated_fallback` catalog is not proof that the configured account can use
 those models.
 
-For a CLI driver, run the native login command shown by `ai status` (`codex
-login`, `claude auth login`, or `copilot login`) and recheck. Proof Assistant
-never reads the CLI's auth files. Copilot normally remains `unknown` because it
-has no documented non-billable status command; use the separate explicit tiny
-probe only if you accept one account request:
-
-```bash
-proof-assistant ai verify-account copilot_cli --yes
-```
-
-For an API driver, select either its environment variable (`OPENAI_API_KEY`,
-`ANTHROPIC_API_KEY`, or `GEMINI_API_KEY`) or the OS keyring. Store a key with a
-hidden prompt via `proof-assistant ai credential DRIVER`; never place one in a
-project, provider JSON, task, or command argument. See [AI providers and
-first-time setup](AI_PROVIDERS.md).
+For the selected CLI, run the native login command shown by `ai status`
+(`codex login` or `claude auth login`) and recheck. Proof Assistant never reads
+the CLI's authentication files. See [Verification AI setup](AI_PROVIDERS.md).
 
 Persistent verification exit codes preserve failure boundaries:
 

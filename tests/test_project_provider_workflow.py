@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from proof_assistant.ai import (
+    SUPPORTED_DRIVERS,
     AuthenticationState,
     Difficulty,
     DiscoverySource,
@@ -303,6 +304,49 @@ def test_project_roles_round_trip_and_reset_restore_machine_inheritance(
     assert reset.effective == replacement_client.default_verification_settings()
 
 
+def test_historical_project_provider_can_be_replaced_or_reset(
+    workflow_factory,
+    managed_project: Path,
+) -> None:
+    workflow = workflow_factory()
+    _set_machine_default(workflow, DriverId.CODEX_CLI)
+    settings_path = managed_project / ".repoprover" / "verification-settings.json"
+    settings_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "scope": "PROJECT",
+                "revision": 5,
+                "override": {
+                    "ai_driver": "openai_api",
+                    "roles": [
+                        {
+                            "role": task.value,
+                            "model": "historical-model",
+                            "difficulty": "high",
+                        }
+                        for task in TaskKind
+                    ],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    snapshot = workflow.get_project_verification_settings(managed_project)
+
+    assert not snapshot.valid
+    assert "Codex CLI or Claude CLI" in (snapshot.validation_error or "")
+    assert snapshot.effective.ai_driver == DriverId.CODEX_CLI.value
+    replacement = workflow.update_project_verification_settings(
+        managed_project,
+        _project_override(DriverId.CLAUDE_CLI),
+        expected_revision=5,
+    )
+    assert replacement.valid
+    assert replacement.effective.ai_driver == DriverId.CLAUDE_CLI.value
+
+
 @pytest.mark.parametrize("failure", ("incomplete", "mixed_provider"))
 def test_machine_team_update_rejects_non_atomic_role_configuration(
     failure: str,
@@ -403,17 +447,17 @@ def test_machine_default_changes_only_projects_that_inherit(
             project_path=overridden_project,
         )
     )
-    override = _project_override(DriverId.CLAUDE_CLI)
+    override = _project_override(DriverId.CODEX_CLI)
     workflow.update_project_verification_settings(
         overridden_project, override, expected_revision=0
     )
 
-    _set_machine_default(workflow, DriverId.GEMINI_API)
+    _set_machine_default(workflow, DriverId.CLAUDE_CLI)
 
     inheriting = workflow.get_project_verification_settings(managed_project)
     overridden = workflow.get_project_verification_settings(overridden_project)
     assert all(
-        item.ai_driver == DriverId.GEMINI_API.value
+        item.ai_driver == DriverId.CLAUDE_CLI.value
         for item in inheriting.effective.role_settings
     )
     assert overridden.override == override
@@ -818,8 +862,8 @@ def test_started_job_keeps_project_team_frozen_after_future_setting_change(
     } == {DriverId.CLAUDE_CLI.value}
 
 
-@pytest.mark.parametrize("driver", tuple(DriverId))
-def test_every_registered_driver_accepts_a_complete_role_catalog(
+@pytest.mark.parametrize("driver", SUPPORTED_DRIVERS)
+def test_every_supported_driver_accepts_a_complete_role_catalog(
     driver: DriverId,
     workflow_factory,
     managed_project: Path,
@@ -833,3 +877,19 @@ def test_every_registered_driver_accepts_a_complete_role_catalog(
 
     assert saved.override == override
     _assert_role_settings(saved.effective, override)
+
+
+@pytest.mark.parametrize(
+    "driver", tuple(driver for driver in DriverId if driver not in SUPPORTED_DRIVERS)
+)
+def test_project_settings_reject_unsupported_driver(
+    driver: DriverId,
+    workflow_factory,
+    managed_project: Path,
+) -> None:
+    workflow = workflow_factory()
+
+    with pytest.raises(ValueError, match="Unsupported AI provider"):
+        workflow.update_project_verification_settings(
+            managed_project, _project_override(driver), expected_revision=0
+        )

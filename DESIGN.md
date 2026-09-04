@@ -90,7 +90,8 @@ layout rule.
   - understand what is running and whether author action is required;
   - answer a clarification against exact source context;
   - inspect findings, dependencies, and persisted evidence;
-  - select a provider and review or customize role-aware model policy;
+  - select Codex CLI or Claude CLI and accept a complete recommended role
+    policy, with role-by-role customization available when needed;
   - tune machine concurrency without confusing configured and effective state.
 - Key contexts of use:
   - local terminals and remote SSH sessions;
@@ -146,8 +147,8 @@ The Settings overlay is a persistent shell with these primary destinations:
 
 1. **Role assignments** — selected scope/provider, all eight roles, recommended
    policies, and save/discard state.
-2. **Connections & credentials** — installation, authentication, readiness,
-   credentials, and the selected provider's advanced fallback.
+2. **Provider connection** — installation, authentication, and readiness for
+   the selected CLI.
 3. **Provider diagnostics** — exact catalog/configuration provenance that
    ordinary users do not need.
 
@@ -161,39 +162,40 @@ When a project inherits machine settings, show the assignment matrix read-only
 with an **Inherited** state and one **Customize this project** action. Do not
 append a duplicate project form beneath the machine form.
 
-The scope switch belongs only to **Role assignments**. Provider installation,
-authentication, credentials, and account verification are always machine-owned,
-even when Settings was opened from a project.
+The scope switch belongs only to **Role assignments**. Provider installation
+and authentication are always machine-owned, even when Settings was opened
+from a project.
 
 ### First-run AI onboarding
 
-First run is a focused onboarding flow, not the ordinary settings shell. A
-machine with settings revision zero and no ready primary provider follows three
-explicit steps:
+First run is a focused onboarding flow, not the ordinary settings shell. Only
+Codex CLI and Claude CLI appear. Selecting either one loads its complete
+eight-role recommended preset automatically. A machine with settings revision
+zero and no ready primary provider follows at most two explicit steps:
 
-1. **Choose provider** — show every supported provider with Ready, Needs login,
-   Needs key, Missing, or Verification required state. Selecting a provider does
-   not install, authenticate, or send a model request.
-2. **Connect provider** — show only the selected provider's contextual install,
-   login, API credential, recheck, or explicitly confirmed account-verification
-   action. Exact commands and diagnostics are available in a detail pane.
-3. **Review verification team** — show the eight provider-recommended role,
-   model, and effort assignments before saving. The final action is **Save and
-   continue to projects**.
+1. **Choose provider** — show Codex CLI and Claude CLI with Ready, Needs login,
+   or Missing state. Selecting a provider does not install, authenticate, or
+   send a model request. When it is ready and its preset has loaded, **Use
+   Codex** or **Use Claude** saves the full team and continues directly to
+   projects.
+2. **Connect provider** — show only the selected CLI's contextual install,
+   login, and recheck actions when it is not ready. Exact commands and
+   diagnostics are available in a detail pane. Once ready, continuing saves the
+   automatically loaded team.
 
 First-run navigation contract:
 
 - `Esc` returns to the previous onboarding step but cannot leave an unready
   setup for the main menu.
 - Choosing **Projects** or **Settings** from Menu explains that one ready
-  primary provider and a reviewed eight-role team must be saved first.
+  primary provider and a complete eight-role team must be saved first.
 - **Quit** exits without treating onboarding as complete.
 - Refresh/recheck preserves the selected provider and current step.
 - An install, authentication, catalog, or network failure stays on the Connect
   step, keeps the safe next action visible, and exposes copyable details without
   expanding the page above the action.
-- At 80x24, each step uses the entire workspace and keeps Back/Continue or
-  Recheck/Exit in the fixed action bar.
+- At 80x24, each step uses the entire workspace and keeps Back/Use provider,
+  Continue, Recheck, or Exit in the fixed action bar.
 
 ### Core routes/screens
 
@@ -261,23 +263,26 @@ Scrolling is a content behavior, not the information architecture.
 
 ### Defaults first, customization visible
 
-Provider-aware recommended policies should make the common path easy, while the
-complete resulting role matrix remains visible. Applying recommendations edits
-a draft, reports how many assignments changed, and offers Undo. It does not
-persist until Save.
+Provider-aware recommended policies make provider choice sufficient for the
+ordinary path, while the complete resulting role matrix remains visible in
+Settings. Applying recommendations edits a draft and does not persist until
+Save. Role-by-role model and effort controls are advanced, optional controls.
 
 Changing the provider for a scope is an atomic provider-and-team transition.
 The old provider's assignments disappear immediately, neutral **Awaiting
 assignment** rows hold the stable geometry, and a complete capability-checked
 default matrix loads for the new provider. No foreign model identifier may
 remain visible, selectable, savable, or dispatchable during that transition.
-The provider control and its **Use recommended _provider_ defaults for all 8
-roles** action stay together above the roster and remain visible without page
-scrolling. Save remains unavailable until all eight new-provider assignments
-are valid. The defaults button can reset later same-provider customizations;
-**Undo defaults** restores only the immediately preceding complete team for
-that same provider. A provider switch clears Undo, and stale asynchronous
-results from a previously selected provider are discarded.
+The provider control and its **Reset to recommended preset** action stay
+together above the roster and remain visible without page scrolling. Save
+remains unavailable until all eight new-provider assignments are valid. The
+button resets later same-provider customizations. A provider switch clears
+Undo, and stale asynchronous results from a previously selected provider are
+discarded.
+
+A saved provider or role change applies to the next submitted run. Every active
+run retains the provider, models, and effort values frozen at submission; a
+settings change must not mutate, restart, or partially migrate that run.
 
 ### Scope is always explicit
 
@@ -353,14 +358,11 @@ descriptions do.
 - `ScrollableDialogBody`: modal body scrolls while Cancel/Confirm stay fixed.
 
 `ContentSwitcher` toggles display; it does not unmount inactive children. Hidden
-panes must therefore own no workers, timers, credential value, or secret-bearing
-draft, and no hidden element may remain in the active focus chain. A screen-owned
-controller may refresh lightweight presentation widgets in hidden panes so the
-next visit is current; asynchronous results are still generation-checked before
-they can change a draft. Sensitive input is dynamically mounted only on the
-visible connection page and is cleared and removed at every page or navigation
-boundary. Tests inspect hidden focus and secret absence, while production tests
-exercise stale-result rejection and transient-input destruction.
+panes must therefore own no workers or timers, and no hidden element may remain
+in the active focus chain. A screen-owned controller may refresh lightweight
+presentation widgets in hidden panes so the next visit is current;
+asynchronous results are still generation-checked before they can change a
+draft.
 
 ### Role-assignment reference layout
 
@@ -368,15 +370,15 @@ At 140 columns and wider:
 
 ```text
  Settings / Verification AI                       Scope: Machine defaults
- ┌ Settings ───────┬ Role assignments ─ Connections & credentials ─ Diagnostics ┐
+ ┌ Settings ───────┬ Role assignments ─ Provider connection ─ Diagnostics ┐
  │ Verification AI│ Provider  Claude Code CLI                   Ready       │
- │ Runtime        │ [Use recommended Claude defaults for all 8 roles]       │
+ │ Runtime        │ [Reset to recommended preset]                         │
  │ Advanced       ├ Verification team ───────────────┬ Selected role ──────┤
  │                │ Role             Model   Effort  State  │ Independent  │
- │                │ Clarification    Fable   X-high  Recomm.│ Rechecks the │
+ │                │ Clarification    Sonnet  Medium  Recomm.│ Rechecks the │
  │                │ Diagnostics      Opus    High    Recomm.│ main proof.  │
  │                │ Sketch           Sonnet  Medium  Recomm.│              │
- │                │ Primary proof    Best    High    Recomm.│ Model Fable  │
+ │                │ Primary proof    Best    High    Recomm.│ Model Best   │
  │                │ ▸ Independent    Fable   X-high  Recomm.│ Effort X-high│
  │                │ Maintenance      Sonnet  Medium  Recomm.│              │
  │                │ Review           Opus    High    Recomm.│ [Restore]    │
@@ -402,19 +404,18 @@ Roster cells use human display names. A long model name may be ellipsized in a
 bounded column, but its exact provider model ID and full name are always visible
 in the inspector and copyable detail. Ellipsis must not hide effort or state.
 
-The canonical deterministic Claude Code fixture for design, Pilot, and SVG
-snapshot review is:
+The canonical role presets for design, Pilot, and SVG snapshot review are:
 
-| Stable `TaskKind` | Display role | Model | Effort |
-| --- | --- | --- | --- |
-| `clarification` | Author clarification | `fable` | Extra high (`xhigh`) |
-| `diagnostic` | Scan / triage diagnostics | `opus` | High |
-| `proof` | Primary prove agent | `best` | High |
-| `sketch` | Sketch agent | `sonnet` | Medium |
-| `maintenance` | Maintain / fix agent | `sonnet` | Medium |
-| `review` | Math and engineering reviewers | `opus` | High |
-| `duplicate_proof` | Independent prove agent | `fable` | Extra high (`xhigh`) |
-| `reporting` | Progress / reporting agent | `haiku` | Low |
+| Stable `TaskKind` | Display role | Codex model | Claude model | Effort |
+| --- | --- | --- | --- | --- |
+| `clarification` | Author clarification | `gpt-5.6-terra` | `sonnet` | Medium |
+| `diagnostic` | Scan / triage diagnostics | `gpt-5.6-sol` | `opus` | High |
+| `proof` | Primary prove agent | `gpt-5.6-sol` | `best` | High |
+| `sketch` | Sketch agent | `gpt-5.6-terra` | `sonnet` | Medium |
+| `maintenance` | Maintain / fix agent | `gpt-5.6-terra` | `sonnet` | Medium |
+| `review` | Math and engineering reviewers | `gpt-5.6-sol` | `opus` | High |
+| `duplicate_proof` | Independent prove agent | `gpt-5.6-sol` | `fable` | Extra high (`xhigh`) |
+| `reporting` | Progress / reporting agent | `gpt-5.6-luna` | `haiku` | Low |
 
 `duplicate_proof` is the stable backend/storage identifier. The user-facing role
 name is **Independent prove agent** because the lane independently rechecks the
@@ -436,18 +437,17 @@ primary proof; do not expose “Duplicate proof” as a competing display name.
   and Undo state, and restores focus to the edited row.
 - Project inheritance is read-only until **Customize this project** creates a
   project draft. **Use machine defaults** previews removal of the override.
-- The Connections & credentials page is always machine-owned. Its Save action
-  and unsaved-work guard use the machine settings domain even when the role
+- The Provider connection page is always machine-owned, even when the role
   assignment scope was last set to **This project**.
 
-### Connections-and-credentials reference layout
+### Provider-connection reference layout
 
-- Left/list region: every provider, readiness text, and whether it is used by
-  the current scope.
+- Left/list region: Codex CLI and Claude CLI, readiness text, and whether each
+  is used by the current scope.
 - Detail region: selected provider version, authentication state, available
   actions, and collapsed model/executable diagnostics.
-- Installation, login, credential, recheck, and account verification actions
-  are contextual. Disabled actions include a textual reason.
+- Installation, login, and recheck actions are contextual. Disabled actions
+  include a textual reason.
 - Never render the full all-provider diagnostic dump above the controls.
 
 ### Live-progress reference layout
@@ -691,12 +691,12 @@ the compact sequential composition rather than squeezing the richer layout.
 | Recovery | blocking reason and safe next action | cancellation/failure report length | concise diagnosis; detail tab; fixed recovery actions | high |
 | Settings home | settings categories | category count | stable navigator plus compact current-state summary | high |
 | Verification AI roles | eight-role matrix and inspector | model labels and role explanations | master/detail roster; fixed draft actions | critical |
-| Connections & credentials | provider roster and inspector | catalogs and advanced fallback | contextual list/detail; progressive diagnostics | critical |
+| Provider connection | two-CLI roster and inspector | readiness and catalogs | contextual list/detail; progressive diagnostics | critical |
 | Runtime limits | editable limit policy | controls and explanations | controls first; focused policy page | critical |
 | Resource diagnostics | telemetry and benchmark output | live metrics and long output | separate overview/calibration views | high |
 | Advanced / legacy | uncommon compatibility values | diagnostic explanations | progressive disclosure outside primary path | medium |
 | Install/account/warning modals | decision and consequence | command plans and warnings | scrollable body; fixed actions | high |
-| First-run AI onboarding | provider choice, connection, team review | diagnostics, catalogs, role names | three focused gated steps; fixed Back/Continue/Exit | critical |
+| First-run AI onboarding | provider choice, conditional connection | diagnostics and catalogs | one-click ready path or two gated steps; fixed actions | critical |
 
 ## Interaction states
 
@@ -733,13 +733,13 @@ the compact sequential composition rather than squeezing the richer layout.
     Advanced view;
   - call the eight assignments the **verification team** or **role
     assignments**;
-  - label reserved roles as **Configured — not currently dispatched**, rather
-    than implying active use.
+  - label reserved roles **Reserved** in compact rosters and **Configured — not
+    currently dispatched** in role details, rather than implying active use.
 - Microcopy rules:
   - buttons use verbs and state their object: **Save role assignments**,
-    **Recheck provider**, **Customize this project**, **Use recommended Claude
-    defaults for all 8 roles**;
-  - headings use nouns: **Role assignments**, **Connections & credentials**;
+    **Recheck provider**, **Customize this project**, **Reset to recommended
+    preset**;
+  - headings use nouns: **Role assignments**, **Provider connection**;
   - warnings state consequence before mechanism;
   - avoid paragraphs when a status/value row is clearer;
   - never use `verified`, `proved`, or `certified` for model-only output.
@@ -825,23 +825,17 @@ the compact sequential composition rather than squeezing the richer layout.
   - Linux and macOS terminals;
   - SSH and keyboard-only use;
   - light and dark themes;
-  - no dependency on a graphical browser or desktop keyring UI for ordinary
-    navigation.
+  - no dependency on a graphical browser for ordinary navigation.
 - Behavior and security preservation gates:
-  - API credentials remain one-shot secret submissions, are cleared from input
-    immediately, and never remain in the Textual DOM, screen repr, settings
-    DTOs, project files, or logs;
   - provider installation requires review of the exact plan and separate
     cancel-first confirmation before the backend executes it;
-  - the Copilot account probe sends no request without its own explicit,
-    cancel-first confirmation;
   - destructive and unsafe-setting dialogs focus Cancel first;
   - all machine and project saves retain revision-conflict protection;
   - closing Settings restores the exact originating screen and observer state;
   - global navigation from live verification detaches the TUI observer and does
     not cancel backend work;
   - the TUI imports typed view models and sends commands but never takes over
-    backend provider, project, verification, persistence, or credential
+    backend provider, project, verification, persistence, or authentication
     authority;
   - first-run readiness enforcement cannot be bypassed by global navigation.
 - Test/screenshot expectations:
@@ -876,9 +870,10 @@ screen-local exceptions:
 3. **Verification AI** now separates role assignments, provider connections,
    and diagnostics. Machine and project scopes retain distinct drafts,
    revision-checked saves, provider defaults, and one-level Undo.
-4. First run is the gated **Choose provider → Connect provider → Review team**
-   flow. Global navigation, transient secrets, explicit account checks, and
-   reviewed installation commands retain their safety boundaries.
+4. First run selects Codex CLI or Claude CLI and applies the complete recommended
+   team automatically. A ready CLI continues in one action; an unready CLI uses
+   the focused **Connect provider** step. Reviewed installation commands retain
+   their safety boundaries.
 5. **Runtime & resources** is split into policy, overview, and calibration.
 6. **Live progress** and **Clarification** use one flexible workspace, compact
    peer views, wide split views, and fixed actions.
@@ -887,7 +882,7 @@ screen-local exceptions:
    hierarchy, with list/detail or focused steps where content can grow.
 8. Background settings loads are generation-checked. Out-of-order provider,
    role-policy, and project-policy results cannot overwrite newer reads,
-   mutations, or unsaved edits. Credential-store mutations are serialized.
+   mutations, or unsaved edits.
 9. Closing Settings restores the exact originating screen; background workflow
    results wait behind the overlay and appear only after it closes.
 10. Release quality gates are Ruff, the typing-policy check, strict mypy, the
@@ -920,9 +915,10 @@ A TUI change is not ready if any answer is no:
   content?
 - Does first-run onboarding still require one ready, explicitly saved primary
   provider before the main menu becomes available?
-- Are credentials absent from the DOM/repr/logs after one-shot submission?
-- Are installation, account probes, destructive actions, and unsafe settings
-  still separately reviewed and cancel-first?
+- Are provider authentication details absent from the DOM, representations, and
+  logs?
+- Are installation, destructive actions, and unsafe settings still separately
+  reviewed and cancel-first?
 - Does leaving live progress detach observation without sending cancellation?
 
 ## Open questions

@@ -68,10 +68,8 @@ supported overrides.
 ## Batteries not included
 
 Proof Assistant does not include access to an AI provider. Effective formal
-verification needs a capable paid AI plan with enough usage for sustained proof
-work. In practice, the two most common choices are paid plans from Anthropic
-and OpenAI; depending on how you connect, usage may come from a provider
-subscription or a separately billed API account.
+verification needs a capable Codex CLI or Claude CLI subscription with enough
+usage for sustained proof work.
 
 For eligible researchers, Anthropic's limited
 [Claude Team plan for scientists](https://claude.com/programs/team-plan-for-scientists#pricing)
@@ -80,30 +78,26 @@ research groups.
 
 ## Configure verification AI
 
-On first launch, Proof Assistant checks its machine-wide primary AI driver. If
-it is not ready, **Set up verification AI** opens a focused **Choose provider →
-Connect provider → Review eight-role team** flow. You can inspect or install a
-CLI, copy its native login step, or choose an API credential source. A CLI
-install requires review and explicit approval, and the Copilot quota-consuming
-account probe is never sent without separate consent.
+On first launch, Proof Assistant offers Codex CLI and Claude CLI. Selecting one
+immediately loads a recommended model and reasoning-effort preset for all eight
+roles. If that CLI is already ready, one **Use Codex** or **Use Claude** action
+saves the team and continues. Otherwise, a focused **Connect provider** step
+shows the reviewed installation plan or native login command.
 
 Later, open **Menu** (or press **Ctrl+P**), choose **Settings → Verification
-AI**, and move among **Role assignments**, **Connections & credentials**, and
+AI**, and move among **Role assignments**, **Provider connection**, and
 **Provider diagnostics**. Role assignments shows the complete eight-role
 verification team with one provider for the selected scope, plus a model and
 reasoning effort for each role. Its scope switch makes **Machine defaults** and
-**This project** explicit. The
-provider switch and **Use recommended _provider_ defaults for all 8 roles**
-button stay above the roster. Switching providers immediately removes the old
-provider's assignments and loads a complete recommended team; the button resets
-later customizations, and **Undo defaults** restores only a same-provider draft.
-Every role's model menu is limited to the selected provider. When the
-installed Claude Code CLI supports it, Claude defaults use Fable with
-extra-high effort for both **Author clarification** and the **Independent prove
-agent**. Credentials remain machine-owned, and each submitted job freezes its
-resolved role map.
+**This project** explicit. The provider switch and **Reset to recommended
+preset** button stay above the roster. Switching providers immediately removes
+the old provider's assignments and loads a complete recommended team. Most
+users need no further changes; role-by-role model and effort tuning remains an
+advanced option. Every role's model menu is limited to the selected provider.
+Each submitted job freezes its resolved role map, so saved changes apply to the
+next run without changing a run already in progress.
 See
-[AI providers and first-time setup](docs/AI_PROVIDERS.md).
+[Verification AI setup](docs/AI_PROVIDERS.md).
 
 ## Create or resume a project
 
@@ -218,7 +212,7 @@ source representation.
 | start, resume, clarify, and review | [Usage guide](docs/USAGE.md) |
 | understand the project-owned verification task | [Task and scope](docs/TASK_FILES.md) |
 | understand snapshots, graphs, and certificates | [Incremental verification](docs/INCREMENTAL_VERIFICATION.md) |
-| connect Codex, Claude, Copilot, OpenAI, Anthropic, or Gemini | [AI providers and setup](docs/AI_PROVIDERS.md) |
+| connect Codex CLI or Claude CLI | [Verification AI setup](docs/AI_PROVIDERS.md) |
 | tune AI, Lean, and build resources | [Concurrency and resources](docs/CONCURRENCY.md) |
 | use advanced command-line operations | [Command reference](docs/COMMAND_REFERENCE.md) |
 | diagnose a quiet or failed run | [Troubleshooting](docs/TROUBLESHOOTING.md) |
@@ -246,12 +240,10 @@ $HOME/.cache/repoprover-codex
 Reusing that exact location prevents existing installations from creating a
 second multi-gigabyte Mathlib dependency depot after the rename.
 
-CLI authentication remains inside each provider's native CLI. API keys are
-read only from the selected environment variable or OS keyring; they are never
-stored in a project or provider settings file. Proof Assistant never reads
-provider auth files or extracts login tokens. Provider tools remain constrained
-to the Proof Assistant host boundary described in
-[AI providers and first-time setup](docs/AI_PROVIDERS.md#execution-and-security-boundary).
+Authentication remains inside each provider's native CLI. Proof Assistant
+never reads provider authentication files or extracts login tokens. Provider
+tools remain constrained to the Proof Assistant host boundary described in
+[Verification AI setup](docs/AI_PROVIDERS.md#execution-and-security-boundary).
 This independently maintained project does not modify or publish to
 `facebookresearch/repoprover`.
 

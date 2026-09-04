@@ -5,6 +5,7 @@ from dataclasses import replace
 import pytest
 
 from proof_assistant.ai import (
+    SUPPORTED_DRIVERS,
     AuthenticationState,
     CommandResult,
     CredentialSource,
@@ -702,7 +703,7 @@ def test_install_preview_rejects_old_node_without_running_install(tmp_path):
         http=FakeHttp(HttpResponse(500, b"")),
         credentials=FakeCredentials(),
         path_manager=FakePathManager(),
-    ).preview_install(DriverId.COPILOT_CLI)
+    ).preview_install(DriverId.CLAUDE_CLI)
     assert plan.state is SetupActionState.UNSUPPORTED
     assert "22" in plan.detail
     assert len(commands.calls) == 1
@@ -711,8 +712,8 @@ def test_install_preview_rejects_old_node_without_running_install(tmp_path):
 def test_install_preview_does_not_accept_executable_name_collision(tmp_path):
     commands = FakeCommands(
         lambda argv, input_text: (
-            CommandResult(0, "AWS deployment helper")
-            if argv == ("/wrong/copilot", "help")
+            CommandResult(0, "Unrelated deployment helper")
+            if argv == ("/wrong/claude", "--version")
             else CommandResult(0, "v22.0.0")
         )
     )
@@ -721,7 +722,7 @@ def test_install_preview_does_not_accept_executable_name_collision(tmp_path):
         commands=commands,
         executables=FakeExecutables(
             {
-                "copilot": "/wrong/copilot",
+                "claude": "/wrong/claude",
                 "npm": "/bin/npm",
                 "node": "/bin/node",
             }
@@ -729,9 +730,9 @@ def test_install_preview_does_not_accept_executable_name_collision(tmp_path):
         http=FakeHttp(HttpResponse(500, b"")),
         credentials=FakeCredentials(),
         path_manager=FakePathManager(),
-    ).preview_install(DriverId.COPILOT_CLI)
+    ).preview_install(DriverId.CLAUDE_CLI)
     assert plan.state is SetupActionState.AVAILABLE
-    assert plan.commands[0].argv[-1] == "@github/copilot"
+    assert plan.commands[0].argv[-1] == "@anthropic-ai/claude-code"
 
 
 def test_store_credential_is_one_shot_and_never_part_of_config(tmp_path):
@@ -764,6 +765,8 @@ def test_task_policy_uses_task_override_catalog_and_validates_difficulty(tmp_pat
     config = replace(
         initial.config,
         primary_driver=DriverId.OPENAI_API,
+        drivers=initial.config.drivers
+        + (DriverPreference(driver=DriverId.OPENAI_API),),
         tasks=(),
     )
     settings = store.save(config, expected_revision=0)
@@ -957,7 +960,7 @@ def test_machine_config_rejects_mixed_provider_role_team(tmp_path):
     [
         (TaskKind.PROOF, "best", Difficulty.HIGH),
         (TaskKind.DUPLICATE_PROOF, "fable", Difficulty.XHIGH),
-        (TaskKind.CLARIFICATION, "fable", Difficulty.XHIGH),
+        (TaskKind.CLARIFICATION, "sonnet", Difficulty.MEDIUM),
         (TaskKind.DIAGNOSTIC, "opus", Difficulty.HIGH),
         (TaskKind.REVIEW, "opus", Difficulty.HIGH),
         (TaskKind.SKETCH, "sonnet", Difficulty.MEDIUM),
@@ -987,6 +990,37 @@ def test_claude_task_policy_routes_by_task(
     assert policy.difficulty is expected_difficulty
 
 
+@pytest.mark.parametrize(
+    ("task", "expected_model", "expected_difficulty"),
+    [
+        (TaskKind.PROOF, "gpt-5.6-sol", Difficulty.HIGH),
+        (TaskKind.DUPLICATE_PROOF, "gpt-5.6-sol", Difficulty.XHIGH),
+        (TaskKind.CLARIFICATION, "gpt-5.6-terra", Difficulty.MEDIUM),
+        (TaskKind.DIAGNOSTIC, "gpt-5.6-sol", Difficulty.HIGH),
+        (TaskKind.REVIEW, "gpt-5.6-sol", Difficulty.HIGH),
+        (TaskKind.SKETCH, "gpt-5.6-terra", Difficulty.MEDIUM),
+        (TaskKind.MAINTENANCE, "gpt-5.6-terra", Difficulty.MEDIUM),
+        (TaskKind.REPORTING, "gpt-5.6-luna", Difficulty.LOW),
+    ],
+)
+def test_codex_task_policy_routes_by_task(
+    tmp_path, task, expected_model, expected_difficulty
+):
+    core = service(
+        tmp_path,
+        commands=FakeCommands(),
+        executables=FakeExecutables(),
+        http=FakeHttp(HttpResponse(500, b"")),
+        credentials=FakeCredentials(),
+        path_manager=FakePathManager(),
+    )
+
+    policy = core.recommend_task_policy(task)
+
+    assert policy.model == expected_model
+    assert policy.difficulty is expected_difficulty
+
+
 def test_role_recommendation_never_selects_none(tmp_path):
     core = service(
         tmp_path,
@@ -1011,7 +1045,12 @@ def test_role_recommendation_never_selects_none(tmp_path):
     )
     settings = replace(
         current,
-        config=replace(current.config, primary_driver=DriverId.COPILOT_CLI),
+        config=replace(
+            current.config,
+            primary_driver=DriverId.COPILOT_CLI,
+            drivers=current.config.drivers
+            + (DriverPreference(driver=DriverId.COPILOT_CLI),),
+        ),
     )
 
     policy = core.recommend_task_policy(
@@ -1161,10 +1200,33 @@ def test_setup_snapshot_requires_auth_and_contract_approved_catalog(tmp_path):
         path_manager=FakePathManager(),
     )
     snapshot = core.get_setup_snapshot()
-    assert len(snapshot.statuses) == 6
+    assert tuple(status.driver for status in snapshot.statuses) == SUPPORTED_DRIVERS
     assert snapshot.primary_driver is DriverId.CODEX_CLI
     assert not snapshot.primary_ready
     assert all("secret" not in repr(item).casefold() for item in snapshot.statuses)
+
+
+def test_default_provider_config_only_contains_supported_drivers(tmp_path):
+    settings = MachineProviderConfigStore(tmp_path / "providers.json").load()
+
+    assert tuple(item.driver for item in settings.config.drivers) == SUPPORTED_DRIVERS
+
+
+@pytest.mark.parametrize(
+    "driver", tuple(driver for driver in DriverId if driver not in SUPPORTED_DRIVERS)
+)
+def test_install_preview_rejects_unsupported_driver(tmp_path, driver):
+    core = service(
+        tmp_path,
+        commands=FakeCommands(),
+        executables=FakeExecutables(),
+        http=FakeHttp(HttpResponse(500, b"")),
+        credentials=FakeCredentials(),
+        path_manager=FakePathManager(),
+    )
+
+    with pytest.raises(ProviderConfigError, match="Unsupported AI provider"):
+        core.preview_install(driver)
 
 
 def test_live_anthropic_catalog_uses_per_model_effort_capabilities(tmp_path):
@@ -1245,7 +1307,7 @@ def test_live_catalog_does_not_invent_unknown_openai_effort_contract(tmp_path):
     assert Difficulty.MAX in by_id["gpt-5.6-sol"].difficulties
 
 
-def test_live_catalog_drives_auto_policy_and_rejects_unavailable_override(tmp_path):
+def test_setup_snapshot_offers_explicit_recovery_for_historical_primary(tmp_path):
     credentials = FakeCredentials(
         {(DriverId.OPENAI_API, CredentialSource.ENVIRONMENT): "test-credential"}
     )
@@ -1263,45 +1325,128 @@ def test_live_catalog_drives_auto_policy_and_rejects_unavailable_override(tmp_pa
         path_manager=FakePathManager(),
     )
     current = core.config_store.load()
-    automatic = replace(current.config, primary_driver=DriverId.OPENAI_API)
+    supported_with_stale_model = tuple(
+        replace(
+            item,
+            model="removed-codex-model",
+            difficulty=Difficulty.HIGH,
+            enabled=False,
+        )
+        if item.driver is DriverId.CODEX_CLI
+        else item
+        for item in current.config.drivers
+    )
+    automatic = replace(
+        current.config,
+        primary_driver=DriverId.OPENAI_API,
+        drivers=supported_with_stale_model
+        + (DriverPreference(driver=DriverId.OPENAI_API),),
+    )
     core.config_store.save(automatic, expected_revision=current.revision)
 
     snapshot = core.get_setup_snapshot()
-    assert snapshot.primary_ready
-    catalog = next(
-        status.catalog
-        for status in snapshot.statuses
-        if status.driver is DriverId.OPENAI_API
-    )
-    assert catalog is not None
-    policy = core.recommend_task_policy(
-        TaskKind.PROOF,
-        settings=snapshot.settings,
-        catalog=catalog,
-    )
-    assert policy.model == "account-only-model"
-    assert policy.difficulty is Difficulty.AUTO
 
-    preferences = tuple(
-        replace(item, model="not-in-account-catalog")
-        if item.driver is DriverId.OPENAI_API
+    assert snapshot.selection_required
+    assert not snapshot.primary_ready
+    assert snapshot.primary_driver is DriverId.CODEX_CLI
+    assert tuple(status.driver for status in snapshot.statuses) == SUPPORTED_DRIVERS
+    assert tuple(item.driver for item in snapshot.settings.config.drivers) == (
+        SUPPORTED_DRIVERS
+    )
+    assert snapshot.settings.config.tasks == ()
+    assert core.config_store.load().config.primary_driver is DriverId.OPENAI_API
+
+    replacement = core.recommended_driver_config(
+        DriverId.CLAUDE_CLI,
+        settings=core.config_store.load(),
+    )
+    assert replacement.primary_driver is DriverId.CLAUDE_CLI
+    assert tuple(item.driver for item in replacement.drivers) == SUPPORTED_DRIVERS
+    assert {item.task for item in replacement.tasks} == set(TaskKind)
+    core.validate_config(replacement)
+    saved = core.config_store.save(replacement, expected_revision=1)
+    assert saved.config.primary_driver is DriverId.CLAUDE_CLI
+    assert tuple(item.driver for item in saved.config.drivers) == SUPPORTED_DRIVERS
+    assert all(item.model is None for item in saved.config.drivers)
+    assert all(item.difficulty is Difficulty.AUTO for item in saved.config.drivers)
+    assert all(item.enabled for item in saved.config.drivers)
+    with pytest.raises(ProviderConfigError, match="Unsupported AI provider"):
+        core.validate_config(automatic)
+
+
+def test_recommended_provider_enables_a_historically_disabled_cli(tmp_path):
+    core = service(
+        tmp_path,
+        commands=FakeCommands(),
+        executables=FakeExecutables(),
+        http=FakeHttp(HttpResponse(500, b"")),
+        credentials=FakeCredentials(),
+        path_manager=FakePathManager(),
+    )
+    current = core.config_store.load()
+    disabled_claude = replace(
+        current,
+        config=replace(
+            current.config,
+            drivers=tuple(
+                replace(item, enabled=False)
+                if item.driver is DriverId.CLAUDE_CLI
+                else item
+                for item in current.config.drivers
+            ),
+        ),
+    )
+
+    replacement = core.recommended_driver_config(
+        DriverId.CLAUDE_CLI,
+        settings=disabled_claude,
+    )
+
+    assert replacement.primary_driver is DriverId.CLAUDE_CLI
+    assert all(item.enabled for item in replacement.drivers)
+    assert {item.task for item in replacement.tasks} == set(TaskKind)
+    core.validate_config(replacement)
+
+
+def test_setup_snapshot_validates_every_saved_role(tmp_path):
+    def handler(argv, input_text):
+        del input_text
+        if argv == ("/tools/claude", "--version"):
+            return CommandResult(0, "2.1.170 (Claude Code)")
+        if argv == ("/tools/claude", "auth", "status", "--text"):
+            return CommandResult(0, "logged in")
+        raise AssertionError(argv)
+
+    core = service(
+        tmp_path,
+        commands=FakeCommands(handler),
+        executables=FakeExecutables({"claude": "/tools/claude"}),
+        http=FakeHttp(HttpResponse(500, b"")),
+        credentials=FakeCredentials(),
+        path_manager=FakePathManager(),
+    )
+    current = core.config_store.load()
+    configured = core.recommended_driver_config(
+        DriverId.CLAUDE_CLI, settings=current
+    )
+    bad_reporting = tuple(
+        replace(item, model="not-a-real-model")
+        if item.task is TaskKind.REPORTING
         else item
-        for item in automatic.drivers
+        for item in configured.tasks
     )
-    invalid = replace(automatic, drivers=preferences)
-    with pytest.raises(ProviderConfigError, match="not present"):
-        core.validate_config(invalid)
-
     core.config_store.save(
-        invalid,
-        expected_revision=core.config_store.load().revision,
+        replace(configured, tasks=bad_reporting), expected_revision=current.revision
     )
-    unavailable = core.get_setup_snapshot()
-    assert not unavailable.primary_ready
-    assert "not present" in unavailable.detail
+
+    snapshot = core.get_setup_snapshot()
+
+    assert not snapshot.primary_ready
+    assert "reporting role" in snapshot.detail
+    assert "not-a-real-model" in snapshot.detail
 
 
-def test_workflow_defaults_use_the_live_primary_catalog(tmp_path):
+def test_workflow_defaults_reject_historical_unsupported_primary(tmp_path):
     from proof_assistant.workflow.service import ProofAssistantWorkflow
 
     core = service(
@@ -1321,7 +1466,12 @@ def test_workflow_defaults_use_the_live_primary_catalog(tmp_path):
     )
     current = core.config_store.load()
     core.config_store.save(
-        replace(current.config, primary_driver=DriverId.OPENAI_API),
+        replace(
+            current.config,
+            primary_driver=DriverId.OPENAI_API,
+            drivers=current.config.drivers
+            + (DriverPreference(driver=DriverId.OPENAI_API),),
+        ),
         expected_revision=current.revision,
     )
     workflow = ProofAssistantWorkflow(
@@ -1331,10 +1481,8 @@ def test_workflow_defaults_use_the_live_primary_catalog(tmp_path):
         provider_service=core,
         use_codex_clarification=False,
     )
-    defaults = workflow.default_verification_settings()
-    assert defaults.ai_driver == DriverId.OPENAI_API.value
-    assert defaults.model == "account-only-model"
-    assert defaults.effort == Difficulty.AUTO.value
+    with pytest.raises(ValueError, match="Unsupported AI provider"):
+        workflow.default_verification_settings()
 
 
 def test_live_gemini_catalog_only_exposes_implemented_difficulty_mappings(tmp_path):

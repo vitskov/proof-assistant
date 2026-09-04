@@ -1,7 +1,6 @@
 """Machine-wide settings screens for the replaceable Textual client."""
 
 from .screens import (
-    AIAccountVerificationConfirmationScreen,
     AIInstallConfirmationScreen,
     AIProviderSettingsScreen,
     ConcurrencyResourcesScreen,
@@ -15,7 +14,6 @@ from .screens import (
 )
 
 __all__ = [
-    "AIAccountVerificationConfirmationScreen",
     "AIInstallConfirmationScreen",
     "AIProviderSettingsScreen",
     "ConcurrencyResourcesScreen",

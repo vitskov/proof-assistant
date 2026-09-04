@@ -12,7 +12,12 @@ import pytest
 
 import proof_assistant.ai.execution as execution
 from proof_assistant.ai.config import MachineProviderConfigStore
-from proof_assistant.ai.contracts import CredentialSource, Difficulty, DriverId
+from proof_assistant.ai.contracts import (
+    CredentialSource,
+    Difficulty,
+    DriverId,
+    DriverPreference,
+)
 from proof_assistant.ai.execution import (
     AdmittedToolHost,
     AIBackend,
@@ -246,11 +251,11 @@ def test_api_credential_source_none_fails_closed_without_environment_fallback(
 ) -> None:
     config_store = MachineProviderConfigStore(tmp_path / "providers.json")
     settings = config_store.load()
-    drivers = tuple(
-        replace(preference, credential_source=CredentialSource.NONE)
-        if preference.driver is DriverId.OPENAI_API
-        else preference
-        for preference in settings.config.drivers
+    drivers = settings.config.drivers + (
+        DriverPreference(
+            driver=DriverId.OPENAI_API,
+            credential_source=CredentialSource.NONE,
+        ),
     )
     config_store.save(
         replace(settings.config, drivers=drivers),

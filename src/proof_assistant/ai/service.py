@@ -21,6 +21,7 @@ from ..protocol import (
 from .catalog import driver_definition
 from .config import MachineProviderConfigStore
 from .contracts import (
+    SUPPORTED_DRIVERS,
     AuthenticationState,
     CommandSpec,
     CredentialSource,
@@ -43,6 +44,7 @@ from .contracts import (
     SetupActionState,
     TaskKind,
     TaskModelPolicy,
+    TaskPreference,
     UnsupportedDifficultyError,
 )
 from .runtime import (
@@ -1069,6 +1071,11 @@ class ProviderService:
         return True
 
     def preview_install(self, driver: DriverId) -> InstallPlan:
+        if driver not in SUPPORTED_DRIVERS:
+            choices = ", ".join(item.value for item in SUPPORTED_DRIVERS)
+            raise ProviderConfigError(
+                f"Unsupported AI provider {driver.value!r}; choose one of: {choices}"
+            )
         definition = driver_definition(driver)
         if definition.transport is DriverTransport.API:
             return self._install_plan(
@@ -1127,7 +1134,7 @@ class ProviderService:
                     (),
                     definition.executable,
                     str(self.installer_bin),
-                    "Claude Code and GitHub Copilot CLI require Node.js 22 or newer.",
+                    f"{definition.display_name} requires Node.js 22 or newer.",
                 )
         command = CommandSpec(
             (
@@ -1308,6 +1315,14 @@ class ProviderService:
             else item
             for item in settings.config.drivers
         )
+        if all(item.driver is not driver for item in preferences):
+            preferences += (
+                DriverPreference(
+                    driver=driver,
+                    credential_source=CredentialSource.NONE,
+                    runtime_verified_version=status.version,
+                ),
+            )
         self.config_store.save(
             replace(settings.config, drivers=preferences),
             expected_revision=settings.revision,
@@ -1339,6 +1354,13 @@ class ProviderService:
 
     def validate_config(self, config: ProviderConfig) -> None:
         """Validate all explicit choices against one catalog per used driver."""
+
+        if config.primary_driver not in SUPPORTED_DRIVERS:
+            choices = ", ".join(driver.value for driver in SUPPORTED_DRIVERS)
+            raise ProviderConfigError(
+                f"Unsupported AI provider {config.primary_driver.value!r}; "
+                f"choose one of: {choices}"
+            )
 
         settings = MachineProviderSettings(config=config)
         foreign_tasks = tuple(
@@ -1385,6 +1407,51 @@ class ProviderService:
                 settings=settings,
                 catalog=catalog_for(driver),
             )
+
+    @staticmethod
+    def _settings_for_supported_driver(
+        settings: MachineProviderSettings,
+        driver: DriverId,
+        *,
+        reset_tasks: bool,
+    ) -> MachineProviderSettings:
+        """Return a non-persisted two-provider view of saved settings."""
+
+        if driver not in SUPPORTED_DRIVERS:
+            raise ProviderConfigError(f"Unsupported AI provider {driver.value!r}")
+        defaults = {item.driver: item for item in ProviderConfig().drivers}
+        saved = {
+            item.driver: replace(
+                item,
+                credential_source=CredentialSource.NONE,
+                model=None,
+                difficulty=Difficulty.AUTO,
+                enabled=True,
+            )
+            for item in settings.config.drivers
+            if item.driver in SUPPORTED_DRIVERS
+        }
+        drivers = tuple(
+            replace(saved.get(item, defaults[item]), enabled=True)
+            for item in SUPPORTED_DRIVERS
+        )
+        tasks = (
+            ()
+            if reset_tasks
+            else tuple(
+                item
+                for item in settings.config.tasks
+                if item.driver is None or item.driver is driver
+            )
+        )
+        return replace(
+            settings,
+            config=ProviderConfig(
+                primary_driver=driver,
+                drivers=drivers,
+                tasks=tasks,
+            ),
+        )
 
     def recommend_task_policy(
         self,
@@ -1452,7 +1519,15 @@ class ProviderService:
     ) -> tuple[TaskModelPolicy, ...]:
         """Return a complete clean default matrix for one selected provider."""
 
-        loaded = settings or self.config_store.load()
+        if driver not in SUPPORTED_DRIVERS:
+            choices = ", ".join(item.value for item in SUPPORTED_DRIVERS)
+            raise ProviderConfigError(
+                f"Unsupported AI provider {driver.value!r}; choose one of: {choices}"
+            )
+
+        loaded = self._settings_for_supported_driver(
+            settings or self.config_store.load(), driver, reset_tasks=True
+        )
         clean_drivers = tuple(
             replace(item, model=None, difficulty=Difficulty.AUTO)
             if item.driver is driver
@@ -1480,6 +1555,31 @@ class ProviderService:
             for task in TaskKind
         )
 
+    def recommended_driver_config(
+        self,
+        driver: DriverId,
+        *,
+        settings: MachineProviderSettings | None = None,
+    ) -> ProviderConfig:
+        """Build the complete, normalized config for an explicit provider choice."""
+
+        loaded = self._settings_for_supported_driver(
+            settings or self.config_store.load(), driver, reset_tasks=True
+        )
+        policies = self.recommend_driver_task_policies(driver, settings=loaded)
+        return replace(
+            loaded.config,
+            tasks=tuple(
+                TaskPreference(
+                    task=policy.task,
+                    driver=driver,
+                    model=policy.model,
+                    difficulty=policy.difficulty,
+                )
+                for policy in policies
+            ),
+        )
+
     @staticmethod
     def _recommended_model(
         task: TaskKind,
@@ -1488,17 +1588,20 @@ class ProviderService:
     ) -> str | None:
         if not models:
             return None
+        preferences: tuple[str, ...]
         if driver is DriverId.CLAUDE_CLI:
             available = {item.model_id for item in models}
-            if task is TaskKind.DUPLICATE_PROOF:
-                preferences = ("fable", "best", "opus", "sonnet", "haiku")
-            elif task is TaskKind.PROOF:
+            if task is TaskKind.PROOF:
                 preferences = ("best", "fable", "opus", "sonnet", "haiku")
-            elif task is TaskKind.CLARIFICATION:
-                preferences = ("fable", "opus", "best", "sonnet", "haiku")
+            elif task is TaskKind.DUPLICATE_PROOF:
+                preferences = ("fable", "best", "opus", "sonnet", "haiku")
             elif task in {TaskKind.DIAGNOSTIC, TaskKind.REVIEW}:
                 preferences = ("opus", "best", "fable", "sonnet", "haiku")
-            elif task in {TaskKind.SKETCH, TaskKind.MAINTENANCE}:
+            elif task in {
+                TaskKind.CLARIFICATION,
+                TaskKind.SKETCH,
+                TaskKind.MAINTENANCE,
+            }:
                 preferences = ("sonnet", "opus", "best", "fable", "haiku")
             else:
                 preferences = ("haiku", "sonnet", "opus", "best", "fable")
@@ -1508,6 +1611,29 @@ class ProviderService:
             )
             if alias_model is not None:
                 return alias_model
+        elif driver is DriverId.CODEX_CLI:
+            available = {item.model_id for item in models}
+            if task in {
+                TaskKind.PROOF,
+                TaskKind.DIAGNOSTIC,
+                TaskKind.REVIEW,
+                TaskKind.DUPLICATE_PROOF,
+            }:
+                preferences = ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")
+            elif task in {
+                TaskKind.CLARIFICATION,
+                TaskKind.SKETCH,
+                TaskKind.MAINTENANCE,
+            }:
+                preferences = ("gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.6-luna")
+            else:
+                preferences = ("gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol")
+            preferred_model = next(
+                (model_id for model_id in preferences if model_id in available),
+                None,
+            )
+            if preferred_model is not None:
+                return preferred_model
 
         strong_tokens = ("sol", "opus", "pro", "reason", "o3", "o4")
         light_tokens = ("luna", "haiku", "flash", "mini", "nano")
@@ -1552,8 +1678,10 @@ class ProviderService:
             return Difficulty.LOW
         if task in {TaskKind.SKETCH, TaskKind.MAINTENANCE}:
             return Difficulty.MEDIUM
-        if task in {TaskKind.CLARIFICATION, TaskKind.DUPLICATE_PROOF}:
+        if task is TaskKind.DUPLICATE_PROOF:
             return Difficulty.XHIGH
+        if task is TaskKind.CLARIFICATION:
+            return Difficulty.MEDIUM
         return Difficulty.HIGH
 
     @staticmethod
@@ -1568,12 +1696,12 @@ class ProviderService:
             return recommended
         preferences = {
             TaskKind.CLARIFICATION: (
-                Difficulty.XHIGH,
-                Difficulty.HIGH,
-                Difficulty.MAX,
                 Difficulty.MEDIUM,
+                Difficulty.HIGH,
                 Difficulty.LOW,
                 Difficulty.AUTO,
+                Difficulty.XHIGH,
+                Difficulty.MAX,
             ),
             TaskKind.PROOF: (
                 Difficulty.HIGH,
@@ -1634,45 +1762,63 @@ class ProviderService:
         return selected
 
     def get_setup_snapshot(self) -> ProviderSetupSnapshot:
-        settings = self.config_store.load()
+        saved_settings = self.config_store.load()
+        selection_required = (
+            saved_settings.config.primary_driver not in SUPPORTED_DRIVERS
+        )
+        selected_driver = (
+            DriverId.CODEX_CLI
+            if selection_required
+            else saved_settings.config.primary_driver
+        )
+        settings = self._settings_for_supported_driver(
+            saved_settings,
+            selected_driver,
+            reset_tasks=selection_required,
+        )
         statuses = tuple(
             self.inspect_driver(
                 driver,
                 preference=settings.config.preference_for(driver),
             )
-            for driver in DriverId
+            for driver in SUPPORTED_DRIVERS
         )
         primary = next(
             item for item in statuses if item.driver is settings.config.primary_driver
         )
         model_ready = False
-        model_detail = "Primary AI driver has no validated model catalog."
+        model_detail = "The selected provider has no validated model catalog."
         if primary.catalog is not None and primary.catalog.contract_approved:
-            try:
-                policy = self.recommend_task_policy(
-                    TaskKind.PROOF,
-                    settings=settings,
-                    catalog=primary.catalog,
-                )
-            except (ProviderConfigError, UnsupportedDifficultyError) as exc:
-                model_detail = str(exc)
+            for task in TaskKind:
+                try:
+                    policy = self.recommend_task_policy(
+                        task,
+                        settings=settings,
+                        catalog=primary.catalog,
+                    )
+                except (ProviderConfigError, UnsupportedDifficultyError) as exc:
+                    model_detail = f"{task.value} role: {exc}"
+                    break
+                if policy.model is None:
+                    model_detail = f"{task.value} role has no usable model."
+                    break
             else:
-                model_ready = policy.model is not None
-                model_detail = (
-                    f"Proof policy resolves to {policy.model}."
-                    if policy.model is not None
-                    else "Primary AI driver has no usable proof model."
-                )
-        ready = primary.ready and model_ready
+                model_ready = True
+                model_detail = "All eight role assignments resolve successfully."
+        ready = primary.ready and model_ready and not selection_required
         return ProviderSetupSnapshot(
             settings=settings,
             statuses=statuses,
             primary_driver=settings.config.primary_driver,
             primary_ready=ready,
             detail=(
-                f"Primary AI driver is ready. {model_detail}"
+                "The saved provider is no longer available for new work. Choose "
+                "Codex CLI or Claude CLI and save its recommended role preset."
+                if selection_required
+                else f"Primary AI driver is ready. {model_detail}"
                 if ready
                 else "Primary AI driver needs installation, authentication, or a valid model contract. "
                 + model_detail
             ),
+            selection_required=selection_required,
         )

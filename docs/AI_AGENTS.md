@@ -80,24 +80,17 @@ internally. Do not reintroduce a user-facing external task-file workflow.
 
 ## Provider and proof authority
 
-- CLI authentication remains inside Codex, Claude Code, or Copilot CLI. Never
-  read/print a provider auth file or extract a subscription token into an API
-  key.
-- API keys may be resolved only from the configured environment variable or OS
-  keyring. Never persist them in provider settings, projects, arguments, logs,
-  fixtures, or reports.
+- CLI authentication remains inside Codex CLI or Claude CLI. Never read or
+  print a provider authentication file or extract a subscription token.
 - Keep `proof_assistant.ai` as the provider source of truth. Reuse RepoProver
-  prompts/tool schemas/handlers, not its raw-key config, static model table,
-  generic provider client, or concurrency defaults.
+  prompts/tool schemas/handlers, not its legacy provider configuration, static
+  model table, generic provider client, or concurrency defaults.
 - Preserve catalog provenance: a curated fallback is not live account access.
   Validate model/difficulty against the selected descriptor.
-- Never turn routine Copilot inspection into quota traffic. Only the explicit,
-  consented tiny no-tools probe may establish runtime account access.
 - Codex children must start without existing MCP servers, apps, plugins,
-  bundled skills, or local skills and fail closed if any remain. Claude and
-  Copilot must receive only the ephemeral Proof Assistant MCP surface with
-  general mutation tools disabled. Direct API tools must return through the
-  same host allowlist.
+  bundled skills, or local skills and fail closed if any remain. Claude must
+  receive only the ephemeral Proof Assistant MCP surface with general mutation
+  tools disabled.
 - RepoProver/host tools remain the mutation control plane.
 - Only an independently built Lean declaration can create a certificate.
 - `%% assistant:` LaTeX blocks are author-supplied advisory context. Expose
@@ -136,8 +129,8 @@ respect reservations/leases.
 - `src/proof_assistant/workflow/` — UI-neutral state machine and contracts.
 - `src/proof_assistant/workspace/` — source/project/task management.
 - `src/proof_assistant/presentation/` — findings/clarification view models.
-- `src/proof_assistant/ai/` — provider contracts, machine policy, credential
-  indirection, setup/catalog service, and isolated execution adapters.
+- `src/proof_assistant/ai/` — provider contracts, machine policy, CLI readiness,
+  setup/catalog service, and isolated execution adapters.
 - `src/proof_assistant/incremental/` — snapshots, graphs, state, scheduling,
   certification, and reports.
 - `src/proof_assistant/backend.py` — Codex app-server compatibility/isolation

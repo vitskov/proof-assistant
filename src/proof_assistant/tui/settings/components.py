@@ -19,6 +19,7 @@ from textual.widgets import Select, Static
 
 from proof_assistant.tui.commands import DesktopDataTable as DataTable
 from proof_assistant.workflow.contracts import (
+    SUPPORTED_DRIVERS,
     Difficulty,
     DriverId,
     DriverTransport,
@@ -44,15 +45,11 @@ DRIVER_LABELS: Mapping[DriverId, str] = MappingProxyType(
     {
         DriverId.CODEX_CLI: "OpenAI Codex CLI",
         DriverId.CLAUDE_CLI: "Anthropic Claude Code CLI",
-        DriverId.COPILOT_CLI: "GitHub Copilot CLI",
-        DriverId.OPENAI_API: "OpenAI API",
-        DriverId.ANTHROPIC_API: "Anthropic API",
-        DriverId.GEMINI_API: "Google Gemini API",
     }
 )
 
 _TASK_ORDER = {task: index for index, task in enumerate(TaskKind)}
-_DRIVER_ORDER = {driver: index for index, driver in enumerate(DriverId)}
+_DRIVER_ORDER = {driver: index for index, driver in enumerate(SUPPORTED_DRIVERS)}
 
 
 def role_label(task: TaskKind) -> str:

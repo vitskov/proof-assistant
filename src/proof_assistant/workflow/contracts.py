@@ -14,6 +14,9 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from ..ai import (
+    SUPPORTED_DRIVERS as SUPPORTED_DRIVERS,
+)
+from ..ai import (
     CredentialSource as CredentialSource,
 )
 from ..ai import (
@@ -55,6 +58,12 @@ from ..ai import (
 from ..ai.contracts import validate_model_identifier as validate_model_identifier
 
 CONTRACT_SCHEMA_VERSION = 11
+
+DISPATCHED_AI_TASKS = (
+    TaskKind.CLARIFICATION,
+    TaskKind.DIAGNOSTIC,
+    TaskKind.PROOF,
+)
 
 
 class WorkflowState(StrEnum):
