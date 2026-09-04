@@ -689,7 +689,21 @@ class ProofAssistantApp(App[None], inherit_bindings=False):
         elif action == "theme":
             self.action_toggle_proof_theme()
         elif action == "quit":
-            self.exit()
+            self.action_request_quit()
+
+    def action_request_quit(self) -> None:
+        """Exit from every screen while honoring an editor's unsaved-work guard."""
+
+        screen = self.screen
+        if isinstance(screen, ModalScreen):
+            screen.dismiss(None)
+            self.call_after_refresh(self.action_request_quit)
+            return
+        guarded_quit = getattr(screen, "request_quit", None)
+        if callable(guarded_quit):
+            guarded_quit()
+            return
+        self.exit()
 
     def action_toggle_proof_theme(self) -> None:
         self.theme = (

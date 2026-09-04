@@ -88,12 +88,15 @@ install requires review and explicit approval, and the Copilot quota-consuming
 account probe is never sent without separate consent.
 
 Later, open **Menu** (or press **Ctrl+P**), choose **Settings → Verification
-AI**, and move among **Role assignments**, **Provider connection**, and
+AI**, and move among **Role assignments**, **Connections & credentials**, and
 **Provider diagnostics**. Role assignments shows the complete eight-role
-verification team with a model and reasoning effort for each role. Its scope
-switch makes **Machine defaults** and **This project** explicit. **Apply
-provider defaults** fills all eight assignments for the selected provider, and
-**Undo defaults** restores the previous draft before you save. When the
+verification team with one provider for the selected scope, plus a model and
+reasoning effort for each role. Its scope switch makes **Machine defaults** and
+**This project** explicit. The
+provider switch and **Use recommended _provider_ defaults for all 8 roles**
+button stay above the roster; the button fills the complete team in one step,
+and **Undo defaults** restores the previous draft before you save. Every role's
+model menu is limited to the selected provider. When the
 installed Claude Code CLI supports it, Claude defaults use Fable with
 extra-high effort for both **Author clarification** and the **Independent prove
 agent**. Credentials remain machine-owned, and each submitted job freezes its
@@ -115,8 +118,10 @@ visible **Menu** control or press **Ctrl+P** for a searchable list containing
 the current screen's actions plus Help, Projects, Settings, Theme, and Quit.
 Use **Tab** or **Shift+Tab** to move focus, arrow keys within lists and text,
 **Enter** to activate the focused control, **Esc** to go back once, and
-**Ctrl+S** to save settings. Common project actions also use **Ctrl+N**,
-**Ctrl+O**, and **Ctrl+R** where shown. Proof Assistant does not require
+**Ctrl+S** to save settings. **Ctrl+Q** exits from every screen; unsaved
+settings offer Save, Discard, or Continue editing first. Common project actions
+also use **Ctrl+N**, **Ctrl+O**, and **Ctrl+R** where shown. Proof Assistant does
+not require
 function keys, unmodified letter commands, or Vim/Emacs command conventions.
 
 The project list is reconciled by the backend. Resumable projects have a

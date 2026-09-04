@@ -106,7 +106,8 @@ layout rule.
 Keep global navigation stable:
 
 - the visible, focusable **Menu** control in the header;
-- `Ctrl+P` as the only global keyboard binding;
+- `Ctrl+P` for the global command menu and `Ctrl+Q` for application exit from
+  every screen;
 - Help, Projects, Settings, Theme, and Quit as named Menu destinations; and
 - live actions from the current screen above those application destinations.
 
@@ -116,7 +117,8 @@ tasks belong in the visible workspace and Menu. Do not introduce function-key,
 unmodified-letter, bracket, `Ctrl+Enter`, or Vim/Emacs command aliases. During
 first-run AI onboarding, Projects and Settings cannot bypass the readiness
 gate; the current screen explains what remains incomplete. Quit remains an
-explicit Menu action.
+explicit Menu action as well as a global shortcut. Editors route both paths
+through the same unsaved-work guard.
 
 ### Navigation depth
 
@@ -144,10 +146,10 @@ The Settings overlay is a persistent shell with these primary destinations:
 
 1. **Role assignments** — selected scope/provider, all eight roles, recommended
    policies, and save/discard state.
-2. **Provider connections** — installation, authentication, readiness,
-   credentials, model catalog, and provider diagnostics.
-3. **Provider diagnostics** — provider fallback and exact catalog/configuration
-   provenance that ordinary users do not need.
+2. **Connections & credentials** — installation, authentication, readiness,
+   credentials, and the selected provider's advanced fallback.
+3. **Provider diagnostics** — exact catalog/configuration provenance that
+   ordinary users do not need.
 
 Machine and project policy use the same editor, selected by a scope switch in
 the page title area:
@@ -265,12 +267,16 @@ a draft, reports how many assignments changed, and offers Undo. It does not
 persist until Save.
 
 Changing the provider for a scope changes only the provider in the current
-draft and leaves the eight assignments untouched. **Apply provider defaults**
-then replaces the complete matrix in one generation-checked operation; **Undo
-defaults** restores the immediately preceding complete draft. Provider changes
-never silently rewrite role assignments, and stale results from a previously
-selected provider are discarded. Recommendation Undo exists until the draft is
-saved, discarded, or replaced by another recommendation operation.
+draft and leaves the eight assignments untouched. The provider control and its
+**Use recommended _provider_ defaults for all 8 roles** action stay together
+above the roster and remain visible without page scrolling. Incompatible role
+assignments are marked **Needs update** and Save remains unavailable until the
+user either replaces them individually or applies the complete defaults matrix
+in one generation-checked operation. **Undo defaults** restores the immediately
+preceding complete draft. Provider changes never silently rewrite role
+assignments, and stale results from a previously selected provider are
+discarded. Recommendation Undo exists until the draft is saved, discarded, or
+replaced by another recommendation operation.
 
 ### Scope is always explicit
 
@@ -361,9 +367,9 @@ At 140 columns and wider:
 
 ```text
  Settings / Verification AI                       Scope: Machine defaults
- ┌ Settings ───────┬ Role assignments ─ Connections ─ Provider diagnostics ┐
+ ┌ Settings ───────┬ Role assignments ─ Connections & credentials ─ Diagnostics ┐
  │ Verification AI│ Provider  Claude Code CLI                   Ready       │
- │ Runtime        │ [Use Claude recommendations]                            │
+ │ Runtime        │ [Use recommended Claude defaults for all 8 roles]       │
  │ Advanced       ├ Verification team ───────────────┬ Selected role ──────┤
  │                │ Role             Model   Effort  State  │ Independent  │
  │                │ Clarification    Fable   X-high  Recomm.│ Rechecks the │
@@ -385,6 +391,11 @@ All eight rows and at least `Role | Model | Effort | State` are visible together
 at 120x40. At 80–119 columns, Settings first shows a category page; a selected
 destination replaces it, and the roster/detail replace one another. `Esc`
 returns to the same selected row.
+
+The active scope, assigned provider, provider readiness, and one-click defaults
+action are visible without scrolling at every supported size. A keyboard-only
+user can switch providers with standard Tab, Enter, and arrow-key interaction;
+the connection inspector cannot change the provider assigned to a scope.
 
 Roster cells use human display names. A long model name may be ellipsized in a
 bounded column, but its exact provider model ID and full name are always visible
@@ -424,8 +435,11 @@ primary proof; do not expose “Duplicate proof” as a competing display name.
   and Undo state, and restores focus to the edited row.
 - Project inheritance is read-only until **Customize this project** creates a
   project draft. **Use machine defaults** previews removal of the override.
+- The Connections & credentials page is always machine-owned. Its Save action
+  and unsaved-work guard use the machine settings domain even when the role
+  assignment scope was last set to **This project**.
 
-### Provider-connections reference layout
+### Connections-and-credentials reference layout
 
 - Left/list region: every provider, readiness text, and whether it is used by
   the current scope.
@@ -676,7 +690,7 @@ the compact sequential composition rather than squeezing the richer layout.
 | Recovery | blocking reason and safe next action | cancellation/failure report length | concise diagnosis; detail tab; fixed recovery actions | high |
 | Settings home | settings categories | category count | stable navigator plus compact current-state summary | high |
 | Verification AI roles | eight-role matrix and inspector | model labels and role explanations | master/detail roster; fixed draft actions | critical |
-| Provider connections | provider roster and inspector | catalogs and diagnostics | contextual list/detail; progressive diagnostics | critical |
+| Connections & credentials | provider roster and inspector | catalogs and advanced fallback | contextual list/detail; progressive diagnostics | critical |
 | Runtime limits | editable limit policy | controls and explanations | controls first; focused policy page | critical |
 | Resource diagnostics | telemetry and benchmark output | live metrics and long output | separate overview/calibration views | high |
 | Advanced / legacy | uncommon compatibility values | diagnostic explanations | progressive disclosure outside primary path | medium |
@@ -722,8 +736,9 @@ the compact sequential composition rather than squeezing the richer layout.
     than implying active use.
 - Microcopy rules:
   - buttons use verbs and state their object: **Save role assignments**,
-    **Recheck provider**, **Customize this project**;
-  - headings use nouns: **Role assignments**, **Provider connections**;
+    **Recheck provider**, **Customize this project**, **Use recommended Claude
+    defaults for all 8 roles**;
+  - headings use nouns: **Role assignments**, **Connections & credentials**;
   - warnings state consequence before mechanism;
   - avoid paragraphs when a status/value row is clearer;
   - never use `verified`, `proved`, or `certified` for model-only output.

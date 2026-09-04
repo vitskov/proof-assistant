@@ -17,6 +17,58 @@ proof-assistant
 Rerunning the same command performs a safe upgrade. It refuses to replace a
 managed checkout containing local changes.
 
+### Start with fresh machine settings
+
+A normal reinstall preserves settings. To make the next launch run with fresh
+machine settings, exit Proof Assistant and archive its machine-setting files
+before reinstalling:
+
+```text
+Provider roles      ${XDG_CONFIG_HOME:-$HOME/.config}/proof-assistant/providers.json
+Concurrency         ${XDG_CONFIG_HOME:-$HOME/.config}/proof-assistant/settings.yaml
+Local preferences   ${XDG_CONFIG_HOME:-$HOME/.config}/proof-assistant/preferences.json
+Project override    $PROJECT/.repoprover/verification-settings.json
+```
+
+```bash
+reset_backup="$HOME/proof-assistant-settings-backup-$(date +%Y%m%d-%H%M%S)"
+config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/proof-assistant"
+mkdir -p "$reset_backup"
+for name in providers.json providers.json.lock settings.yaml settings.yaml.lock preferences.json; do
+  [[ ! -e "$config_dir/$name" ]] || mv "$config_dir/$name" "$reset_backup/$name"
+done
+home_preferences="$HOME/.config/proof-assistant/preferences.json"
+if [[ "$home_preferences" != "$config_dir/preferences.json" && -e "$home_preferences" ]]; then
+  mv "$home_preferences" "$reset_backup/preferences-home.json"
+fi
+```
+
+This archives the provider settings (`providers.json`), concurrency policy
+(`settings.yaml`), local preferences (`preferences.json`), and their lock files
+while preserving `projects.json`, the managed-project catalog. If
+`XDG_CONFIG_HOME` points into Dropbox or the managed projects directory, local
+preferences instead use `~/.config/proof-assistant/preferences.json`; the same
+command archives that fallback too. The next launch recreates defaults even if
+the same app version is already installed, so running the installer again is
+optional for a settings-only reset.
+
+This does not delete managed projects, project-specific AI overrides,
+credentials stored by the OS keyring, or the Lean/Mathlib cache. Use **Use
+machine defaults** inside a project to remove that project's override. The
+backup can be restored if the reset was unintended, or deleted after the fresh
+setup is verified.
+
+### What an upgrade downloads
+
+The standard one-line upgrade fetches the requested Proof Assistant and
+RepoProver Git revisions on every run. It reuses a working `uv`, the existing
+Python environment, elan, the pinned Lean toolchain, and the Lean/Mathlib cache.
+The editable Python packages are refreshed on every run; `uv` may contact
+package indexes and reuses cached artifacts where possible. Elan is bootstrapped
+when it is absent or unusable, the pinned Lean toolchain is downloaded when it
+is absent, and the pinned `uv` bootstrap runs only when no usable `uv` is
+already available.
+
 ## Requirements
 
 | Resource | Minimum | Recommended |

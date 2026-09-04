@@ -38,6 +38,8 @@ The common vocabulary is consistent throughout the application:
 - arrow keys navigate lists, tables, trees, and text;
 - **Esc** goes back once or safely cancels a modal;
 - **Ctrl+P** opens the command menu from anywhere;
+- **Ctrl+Q** exits from every screen, with the same unsaved-settings guard as
+  the Menu's Quit action;
 - **Ctrl+N**, **Ctrl+O**, and **Ctrl+R** provide New, Open, and Refresh/Retry
   where the footer shows them;
 - **Ctrl+S** saves settings; and
@@ -387,9 +389,9 @@ evidence is preserved; the TUI never edits project metadata itself.
 
 Open **Menu** (or press **Ctrl+P**), choose **Settings**, then open
 **Verification AI**. This destination is split into
-**Role assignments**, **Provider connection**, and **Provider diagnostics**, so
-the complete role team is not buried below connection and diagnostic controls.
-Provider connection shows the machine-wide primary driver,
+**Role assignments**, **Connections & credentials**, and **Provider
+diagnostics**, so the complete role team is not buried below connection and
+diagnostic controls. Connections & credentials shows machine-owned
 installation/authentication state, credential source, and provider fallback.
 Provider diagnostics shows exact catalog provenance and resolved task-policy
 details. The connection view can review a missing CLI's exact user-local
@@ -409,8 +411,12 @@ assignments**, an explicit scope switch selects **Machine defaults** or **This
 project**. Both scopes show all eight roles with separate model and reasoning
 effort values: author clarification, scan / triage diagnostics, primary prove,
 sketch, maintain / fix, math and engineering review, independent prove, and
-progress / reporting. **Apply provider defaults** fills the complete matrix for
-the selected provider; **Undo defaults** restores the previous unsaved draft.
+progress / reporting. The provider selector and **Use recommended _provider_
+defaults for all 8 roles** button are together above the roster. Changing the
+provider creates an unsaved draft without silently overwriting the roles; the
+button fills the complete matrix in one step, and **Undo defaults** restores the
+previous unsaved draft. Role model and effort choices are limited to the
+selected provider's capabilities.
 In project scope, **Use machine defaults** removes the project override. The
 complete role map affects future submissions only and is frozen into each job,
 including the clarification role. A selected driver still shares the same

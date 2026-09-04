@@ -12,7 +12,8 @@ proof-assistant tui
 ```
 
 Both launch the Textual application. Bare invocation is the normal user entry
-point.
+point. **Ctrl+P** opens the global command menu and **Ctrl+Q** exits from every
+screen; a dirty settings editor offers Save, Discard, or Continue editing first.
 
 ## Persistent manuscript projects
 

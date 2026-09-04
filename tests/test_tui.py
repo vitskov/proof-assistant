@@ -28,7 +28,7 @@ from textual.widgets import (
 import proof_assistant.tui.screens as tui_screens
 import proof_assistant.tui.settings.screens as tui_settings_screens
 from proof_assistant.tui import ProofAssistantApp
-from proof_assistant.tui.app import CommandMenuScreen
+from proof_assistant.tui.app import CommandMenuScreen, ResizeNeededScreen
 from proof_assistant.tui.commands import (
     AppHeader,
     AppHeaderIcon,
@@ -1182,10 +1182,10 @@ async def test_permanent_footer_and_screen_aware_command_menu() -> None:
         await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
         await wait_for(pilot, lambda: bool(app.screen.query(CommandFooter).nodes))
         assert app.theme == PROOF_DARK_THEME.name
-        assert {"ctrl+p", "ctrl+n", "ctrl+o", "ctrl+r"}.issubset(
+        assert {"ctrl+p", "ctrl+q", "ctrl+n", "ctrl+o", "ctrl+r"}.issubset(
             app.screen.active_bindings
         )
-        assert not {"f1", "f2", "f3", "ctrl+t", "ctrl+q", "n", "o", "r", "s"} & set(
+        assert not {"f1", "f2", "f3", "ctrl+t", "n", "o", "r", "s"} & set(
             app.screen.active_bindings
         )
 
@@ -1204,6 +1204,7 @@ async def test_permanent_footer_and_screen_aware_command_menu() -> None:
         await wait_for(pilot, lambda: isinstance(app.screen, ShortcutHelpScreen))
         reference = app.screen.query_one("#shortcut-reference", TextArea).text
         assert "Ctrl+P" in reference
+        assert "Ctrl+Q" in reference
         assert "Ctrl+N" in reference
         assert "Ctrl+O" in reference
         assert "Ctrl+R" in reference
@@ -1211,6 +1212,60 @@ async def test_permanent_footer_and_screen_aware_command_menu() -> None:
         assert "F1" not in reference
         assert "Ctrl+Enter" not in reference
         assert app.screen.query_one(CommandFooter)
+
+
+@async_test
+async def test_global_quit_shortcut_works_from_focused_inputs_and_modals() -> None:
+    service = FakeWorkflowService()
+    app = ProofAssistantApp(service)
+    quit_requested = asyncio.Event()
+    app.exit = lambda *args, **kwargs: quit_requested.set()  # type: ignore[method-assign]
+
+    async with app.run_test(size=(100, 36)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        app.show_new_project()
+        await wait_for(pilot, lambda: isinstance(app.screen, NewProjectScreen))
+        await wait_for(pilot, lambda: bool(app.screen.query("#project-name").nodes))
+        form_input = app.screen.query_one("#project-name", DesktopInput)
+        form_input.focus()
+        await pilot.press("ctrl+q")
+        await wait_for(pilot, quit_requested.is_set)
+
+        quit_requested.clear()
+        await pilot.press("ctrl+p")
+        await wait_for(pilot, lambda: isinstance(app.screen, CommandMenuScreen))
+        await pilot.press("ctrl+q")
+        await wait_for(pilot, quit_requested.is_set)
+        assert isinstance(app.screen, NewProjectScreen)
+
+
+@async_test
+async def test_global_quit_from_resize_gate_preserves_dirty_settings_guard() -> None:
+    service = FakeWorkflowService()
+    app = ProofAssistantApp(service)
+    quit_requested = asyncio.Event()
+    app.exit = lambda *args, **kwargs: quit_requested.set()  # type: ignore[method-assign]
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        app.show_concurrency_settings(service.machine_settings)
+        await wait_for(
+            pilot, lambda: isinstance(app.screen, ConcurrencyResourcesScreen)
+        )
+        settings = app.screen
+        await wait_for(pilot, lambda: bool(settings.query("#ai-concurrency").nodes))
+        settings.query_one("#ai-concurrency", Input).value = "6"
+
+        await pilot.resize_terminal(79, 24)
+        await wait_for(pilot, lambda: isinstance(app.screen, ResizeNeededScreen))
+        await pilot.press("ctrl+q")
+        await wait_for(
+            pilot,
+            lambda: bool(app.screen.query("#settings-unsaved-discard").nodes),
+        )
+        assert not quit_requested.is_set()
+        app.screen.query_one("#settings-unsaved-discard", Button).press()
+        await wait_for(pilot, quit_requested.is_set)
 
 
 @async_test
@@ -3205,8 +3260,10 @@ async def test_main_menu_discards_queued_settings_completion_result() -> None:
         catalog_release.set()
         await wait_for(
             pilot,
-            lambda: "1 project(s) available."
-            in app.screen.query_one("#status-line", TextArea).text,
+            lambda: (
+                "1 project(s) available."
+                in app.screen.query_one("#status-line", TextArea).text
+            ),
         )
         assert not isinstance(app.screen, FindingsScreen)
 

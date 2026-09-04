@@ -878,6 +878,120 @@ async def test_every_provider_saves_a_complete_capability_valid_role_team() -> N
 
 
 @async_test
+async def test_provider_switch_and_one_click_defaults_are_visible_and_explicit() -> (
+    None
+):
+    for size in ((80, 24), (120, 40)):
+        service = ProviderWorkflowFake(_snapshot())
+        app = ProofAssistantApp(service)  # type: ignore[arg-type]
+        async with app.run_test(size=size) as pilot:
+            await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+            app.show_ai_provider_settings()
+            await wait_for(
+                pilot, lambda: isinstance(app.screen, AIProviderSettingsScreen)
+            )
+            screen = app.screen
+            assert isinstance(screen, AIProviderSettingsScreen)
+            await wait_for(
+                pilot,
+                lambda: (
+                    set(screen._machine_role_drafts) == set(TaskKind)
+                    and not screen.query_one("#ai-primary-driver", Select).disabled
+                ),
+            )
+            await pilot.pause()
+
+            provider = screen.query_one("#ai-primary-driver", Select)
+            defaults = screen.query_one("#ai-use-recommended", Button)
+            roles_page = screen.query_one("#roles-page")
+            assert provider.is_on_screen
+            assert defaults.is_on_screen
+            assert roles_page.region.contains_region(provider.region)
+            assert roles_page.region.contains_region(defaults.region)
+
+            original_drafts = dict(screen._machine_role_drafts)
+            provider.value = DriverId.CLAUDE_CLI.value
+            await wait_for(
+                pilot,
+                lambda: (
+                    screen.query_one("#ai-role-model", Select).value
+                    == "__needs_update__"
+                    and screen.query_one("#save-ai-settings", Button).disabled
+                ),
+            )
+            assert screen._machine_role_drafts == original_drafts
+            assert "Claude Code CLI" in defaults.label.plain
+            assert "all 8 roles" in defaults.label.plain
+            with pytest.raises(InvalidSelectValueError):
+                screen.query_one("#ai-role-model", Select).value = "gpt-5.6-sol"
+            roster = screen.query_one("#ai-role-roster", DataTable)
+            assert all(
+                "Needs update" in {str(cell) for cell in roster.get_row(task.value)}
+                for task in TaskKind
+            )
+
+            defaults.press()
+            await wait_for(
+                pilot,
+                lambda: (
+                    not screen.query_one("#save-ai-settings", Button).disabled
+                    and screen._machine_role_drafts[TaskKind.DUPLICATE_PROOF]
+                    == ("fable", Difficulty.XHIGH)
+                ),
+            )
+            claude_models = {
+                item.model_id for item in _catalog(DriverId.CLAUDE_CLI).models
+            }
+            assert set(screen._machine_role_drafts) == set(TaskKind)
+            assert all(
+                model in claude_models
+                for model, _ in screen._machine_role_drafts.values()
+            )
+
+            screen.query_one("#ai-manage-connection", Button).press()
+            await wait_for(
+                pilot,
+                lambda: (
+                    screen.query_one("#ai-settings-pages", ContentSwitcher).current
+                    == "connection-page"
+                ),
+            )
+            assert (
+                screen.query_one("#ai-configure-driver", Select).value
+                == DriverId.CLAUDE_CLI.value
+            )
+
+
+@async_test
+async def test_global_quit_preserves_dirty_provider_settings_guard() -> None:
+    service = ProviderWorkflowFake(_snapshot())
+    app = ProofAssistantApp(service)  # type: ignore[arg-type]
+    quit_requested = asyncio.Event()
+    app.exit = lambda *args, **kwargs: quit_requested.set()  # type: ignore[method-assign]
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        app.show_ai_provider_settings()
+        await wait_for(pilot, lambda: isinstance(app.screen, AIProviderSettingsScreen))
+        screen = app.screen
+        assert isinstance(screen, AIProviderSettingsScreen)
+        await wait_for(
+            pilot,
+            lambda: not screen.query_one("#ai-primary-driver", Select).disabled,
+        )
+        screen.query_one("#ai-primary-driver", Select).value = DriverId.CLAUDE_CLI.value
+
+        await pilot.press("ctrl+q")
+        await wait_for(
+            pilot,
+            lambda: isinstance(app.screen, UnsavedAISettingsConfirmationScreen),
+        )
+        assert not quit_requested.is_set()
+        app.screen.query_one("#ai-unsaved-discard", Button).press()
+        await wait_for(pilot, quit_requested.is_set)
+
+
+@async_test
 async def test_claude_role_defaults_are_visible_and_one_role_can_be_overridden() -> (
     None
 ):
@@ -1334,7 +1448,20 @@ async def test_stale_project_provider_defaults_cannot_overwrite_newer_provider()
             lambda: not screen.query_one("#project-ai-driver", Select).disabled,
         )
 
+        project_drafts = dict(screen._project_role_drafts)
         screen.query_one("#project-ai-driver", Select).value = DriverId.CLAUDE_CLI.value
+        await wait_for(
+            pilot,
+            lambda: (
+                screen.query_one("#project-ai-role-model", Select).value
+                == "__needs_update__"
+                and screen.query_one("#save-project-ai", Button).disabled
+            ),
+        )
+        assert screen._project_role_drafts == project_drafts
+        defaults = screen.query_one("#project-ai-use-recommended", Button)
+        assert "Claude Code CLI" in defaults.label.plain
+        assert "all 8 roles" in defaults.label.plain
         screen.query_one("#project-ai-use-recommended", Button).press()
         await wait_for(
             pilot,
@@ -1425,8 +1552,13 @@ async def test_connection_draft_is_guarded_and_survives_status_reload() -> None:
         await show_ai_settings_view(pilot, screen, "connection")
         await wait_for(
             pilot,
-            lambda: not screen.query_one("#ai-provider-model", Select).disabled,
+            lambda: (
+                screen._provider_controls_ready
+                and not screen.query_one("#ai-provider-model", Select).disabled
+                and bool(screen.query("#ai-api-key").nodes)
+            ),
         )
+        await pilot.pause()
         model = screen.query_one("#ai-provider-model", Select)
         model.value = "gpt-5.6-sol"
         await wait_for(pilot, screen._machine_draft_is_dirty)
@@ -1487,6 +1619,369 @@ async def test_connection_draft_is_guarded_and_survives_status_reload() -> None:
         await wait_for(pilot, lambda: service.setup_reads > reads_before)
         await wait_for(pilot, lambda: not screen._machine_draft_is_dirty())
         assert model.value != "gpt-5.6-sol"
+
+
+@async_test
+async def test_project_connection_page_ctrl_s_saves_machine_settings() -> None:
+    project = Path("/test/project-connection-save")
+    service = ProviderWorkflowFake(_snapshot())
+    app = ProofAssistantApp(service)  # type: ignore[arg-type]
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        app.show_ai_provider_settings(project=project)
+        await wait_for(pilot, lambda: isinstance(app.screen, AIProviderSettingsScreen))
+        screen = app.screen
+        assert isinstance(screen, AIProviderSettingsScreen)
+        await wait_for(pilot, lambda: screen.project_settings is not None)
+        screen.query_one("#settings-scope", Select).value = SettingsScopeKind.PROJECT
+        await wait_for(pilot, lambda: screen._active_scope is SettingsScopeKind.PROJECT)
+        screen.query_one("#project-ai-manage-connection", Button).press()
+        await wait_for(
+            pilot,
+            lambda: (
+                screen.query_one("#ai-settings-pages", ContentSwitcher).current
+                == "connection-page"
+            ),
+        )
+        await wait_for(
+            pilot,
+            lambda: (
+                screen._provider_controls_ready
+                and not screen.query_one("#ai-provider-model", Select).disabled
+            ),
+        )
+        screen.query_one("#ai-provider-model", Select).value = "gpt-5.6-terra"
+        screen.query_one("#ai-provider-difficulty", Select).value = "high"
+        await wait_for(pilot, screen._machine_draft_is_dirty)
+
+        await pilot.press("ctrl+s")
+        await wait_for(pilot, lambda: bool(service.updates))
+        assert service.project_updates == []
+        assert service.updates[-1][0].preference_for(DriverId.CODEX_CLI).model == (
+            "gpt-5.6-terra"
+        )
+
+
+@async_test
+async def test_project_connection_page_visible_save_button_saves_machine_settings() -> (
+    None
+):
+    project = Path("/test/project-connection-button-save")
+    service = ProviderWorkflowFake(_snapshot())
+    app = ProofAssistantApp(service)  # type: ignore[arg-type]
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        app.show_ai_provider_settings(project=project)
+        await wait_for(pilot, lambda: isinstance(app.screen, AIProviderSettingsScreen))
+        screen = app.screen
+        assert isinstance(screen, AIProviderSettingsScreen)
+        await wait_for(pilot, lambda: screen.project_settings is not None)
+        screen.query_one("#settings-scope", Select).value = SettingsScopeKind.PROJECT
+        await wait_for(pilot, lambda: screen._active_scope is SettingsScopeKind.PROJECT)
+        screen.query_one("#project-ai-manage-connection", Button).press()
+        await wait_for(
+            pilot,
+            lambda: (
+                screen.query_one("#ai-settings-pages", ContentSwitcher).current
+                == "connection-page"
+            ),
+        )
+        await wait_for(
+            pilot,
+            lambda: (
+                screen._provider_controls_ready
+                and not screen.query_one("#ai-provider-model", Select).disabled
+                and bool(screen.query("#ai-api-key").nodes)
+            ),
+        )
+        await pilot.pause()
+        screen.query_one("#ai-provider-model", Select).value = "gpt-5.6-terra"
+        screen.query_one("#ai-provider-difficulty", Select).value = "high"
+        await wait_for(pilot, screen._machine_draft_is_dirty)
+
+        machine_save = screen.query_one("#save-ai-settings", Button)
+        project_save = screen.query_one("#save-project-ai", Button)
+        assert machine_save.display
+        assert not project_save.display
+        machine_save.press()
+        await wait_for(pilot, lambda: bool(service.updates))
+        assert service.project_updates == []
+        assert service.updates[-1][0].preference_for(DriverId.CODEX_CLI).model == (
+            "gpt-5.6-terra"
+        )
+
+
+@async_test
+async def test_project_connection_page_ctrl_q_guards_machine_settings() -> None:
+    project = Path("/test/project-connection-quit")
+    service = ProviderWorkflowFake(_snapshot())
+    app = ProofAssistantApp(service)  # type: ignore[arg-type]
+    quit_requested = asyncio.Event()
+    app.exit = lambda *args, **kwargs: quit_requested.set()  # type: ignore[method-assign]
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        app.show_ai_provider_settings(project=project)
+        await wait_for(pilot, lambda: isinstance(app.screen, AIProviderSettingsScreen))
+        screen = app.screen
+        assert isinstance(screen, AIProviderSettingsScreen)
+        await wait_for(pilot, lambda: screen.project_settings is not None)
+        screen.query_one("#settings-scope", Select).value = SettingsScopeKind.PROJECT
+        await wait_for(pilot, lambda: screen._active_scope is SettingsScopeKind.PROJECT)
+        screen.query_one("#project-ai-manage-connection", Button).press()
+        await wait_for(
+            pilot,
+            lambda: (
+                screen.query_one("#ai-settings-pages", ContentSwitcher).current
+                == "connection-page"
+            ),
+        )
+        await wait_for(
+            pilot,
+            lambda: (
+                screen._provider_controls_ready
+                and not screen.query_one("#ai-provider-model", Select).disabled
+                and bool(screen.query("#ai-api-key").nodes)
+            ),
+        )
+        await pilot.pause()
+        screen.query_one("#ai-provider-model", Select).value = "gpt-5.6-terra"
+        screen.query_one("#ai-provider-difficulty", Select).value = "high"
+        await wait_for(pilot, screen._machine_draft_is_dirty)
+
+        await pilot.press("ctrl+q")
+        await wait_for(
+            pilot, lambda: isinstance(app.screen, UnsavedAISettingsConfirmationScreen)
+        )
+        assert not quit_requested.is_set()
+        dialog = app.screen
+        assert isinstance(dialog, UnsavedAISettingsConfirmationScreen)
+        assert dialog.scope_label == "machine"
+        dialog.query_one("#ai-unsaved-save", Button).press()
+        await wait_for(pilot, quit_requested.is_set)
+        assert service.project_updates == []
+        assert len(service.updates) == 1
+
+
+@async_test
+async def test_machine_defaults_completion_cannot_overwrite_newer_role_edit() -> None:
+    service = ProviderWorkflowFake(_snapshot())
+    service.recommended_defaults_release = threading.Event()
+    app = ProofAssistantApp(service)  # type: ignore[arg-type]
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        app.show_ai_provider_settings()
+        await wait_for(pilot, lambda: isinstance(app.screen, AIProviderSettingsScreen))
+        screen = app.screen
+        assert isinstance(screen, AIProviderSettingsScreen)
+        await wait_for(
+            pilot, lambda: not screen.query_one("#ai-use-recommended", Button).disabled
+        )
+        screen.query_one("#ai-use-recommended", Button).press()
+        await wait_for(pilot, service.recommended_defaults_started.is_set)
+        screen.query_one("#ai-role-task", Select).value = TaskKind.REPORTING.value
+        await pilot.pause()
+        screen.query_one("#ai-role-model", Select).value = "gpt-5.6-terra"
+        await wait_for(
+            pilot,
+            lambda: (
+                screen._machine_role_drafts[TaskKind.REPORTING][0] == "gpt-5.6-terra"
+            ),
+        )
+        edited = dict(screen._machine_role_drafts)
+        service.recommended_defaults_release.set()
+        await wait_for(
+            pilot,
+            service.recommended_defaults_completed_by_driver[DriverId.CODEX_CLI].is_set,
+        )
+        await pilot.pause()
+        assert screen._machine_role_drafts == edited
+        assert "not applied" in notice_text(screen)
+
+
+@async_test
+async def test_project_defaults_completion_cannot_overwrite_newer_role_edit() -> None:
+    project = Path("/test/project-default-edit-race")
+    service = ProviderWorkflowFake(_snapshot())
+    service.recommended_defaults_release = threading.Event()
+    app = ProofAssistantApp(service)  # type: ignore[arg-type]
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        app.show_ai_provider_settings(project=project)
+        await wait_for(pilot, lambda: isinstance(app.screen, AIProviderSettingsScreen))
+        screen = app.screen
+        assert isinstance(screen, AIProviderSettingsScreen)
+        await wait_for(pilot, lambda: screen.project_settings is not None)
+        screen.query_one("#customize-project-ai", Button).press()
+        await wait_for(
+            pilot,
+            lambda: (
+                not screen.query_one("#project-ai-use-recommended", Button).disabled
+            ),
+        )
+        screen.query_one("#project-ai-use-recommended", Button).press()
+        await wait_for(pilot, service.recommended_defaults_started.is_set)
+        screen.query_one("#project-ai-role", Select).value = TaskKind.REPORTING.value
+        await pilot.pause()
+        screen.query_one("#project-ai-role-model", Select).value = "gpt-5.6-terra"
+        await wait_for(
+            pilot,
+            lambda: (
+                screen._project_role_drafts[TaskKind.REPORTING][0] == "gpt-5.6-terra"
+            ),
+        )
+        edited = dict(screen._project_role_drafts)
+        service.recommended_defaults_release.set()
+        await wait_for(
+            pilot,
+            service.recommended_defaults_completed_by_driver[DriverId.CODEX_CLI].is_set,
+        )
+        await pilot.pause()
+        assert screen._project_role_drafts == edited
+        assert "not applied" in notice_text(screen)
+
+
+@async_test
+async def test_provider_switch_preserves_overlapping_model_with_unsupported_effort() -> (
+    None
+):
+    claude_catalog = ModelCatalog(
+        DriverId.CLAUDE_CLI,
+        (ModelDescriptor("gpt-5.6-sol", "Overlap", (Difficulty.AUTO,)),),
+        DiscoverySource.LIVE_ACCOUNT,
+        "Overlapping test catalog.",
+        True,
+    )
+    statuses = tuple(
+        replace(_status(driver), catalog=claude_catalog)
+        if driver is DriverId.CLAUDE_CLI
+        else _status(driver)
+        for driver in DriverId
+    )
+    for project in (False, True):
+        service = ProviderWorkflowFake(_snapshot(statuses=statuses))
+        path = Path("/test/overlap") if project else None
+        app = ProofAssistantApp(service)  # type: ignore[arg-type]
+
+        async with app.run_test(size=(120, 40)) as pilot:
+            await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+            app.show_ai_provider_settings(project=path)
+            await wait_for(
+                pilot, lambda: isinstance(app.screen, AIProviderSettingsScreen)
+            )
+            screen = app.screen
+            assert isinstance(screen, AIProviderSettingsScreen)
+            if project:
+                await wait_for(pilot, lambda: screen.project_settings is not None)
+                screen.query_one("#customize-project-ai", Button).press()
+                await wait_for(
+                    pilot,
+                    lambda: not screen.query_one("#project-ai-driver", Select).disabled,
+                )
+                before = dict(screen._project_role_drafts)
+                screen.query_one("#project-ai-driver", Select).value = "claude_cli"
+                await wait_for(
+                    pilot,
+                    lambda: (
+                        screen.query_one("#project-ai-role-difficulty", Select).value
+                        == "__needs_update__"
+                    ),
+                )
+                assert screen._project_role_drafts == before
+            else:
+                await wait_for(
+                    pilot,
+                    lambda: not screen.query_one("#ai-primary-driver", Select).disabled,
+                )
+                before = dict(screen._machine_role_drafts)
+                screen.query_one("#ai-primary-driver", Select).value = "claude_cli"
+                await wait_for(
+                    pilot,
+                    lambda: (
+                        screen.query_one("#ai-role-difficulty", Select).value
+                        == "__needs_update__"
+                    ),
+                )
+                assert screen._machine_role_drafts == before
+
+
+@async_test
+async def test_invalid_recommended_default_matrix_never_mutates_draft() -> None:
+    service = ProviderWorkflowFake(_snapshot())
+    app = ProofAssistantApp(service)  # type: ignore[arg-type]
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        app.show_ai_provider_settings()
+        await wait_for(pilot, lambda: isinstance(app.screen, AIProviderSettingsScreen))
+        screen = app.screen
+        assert isinstance(screen, AIProviderSettingsScreen)
+        await wait_for(pilot, lambda: set(screen._machine_role_drafts) == set(TaskKind))
+        for corruption in (
+            "wrong_driver",
+            "missing_task",
+            "duplicate_task",
+            "unknown_model",
+            "bad_effort",
+        ):
+            before = dict(screen._machine_role_drafts)
+            policies = list(service.ai_task_policies(driver=DriverId.CODEX_CLI))
+            if corruption == "wrong_driver":
+                policies[0] = replace(policies[0], driver=DriverId.CLAUDE_CLI)
+            elif corruption == "missing_task":
+                policies.pop()
+            elif corruption == "duplicate_task":
+                policies[-1] = replace(policies[-1], task=policies[0].task)
+            elif corruption == "unknown_model":
+                policies[0] = replace(policies[0], model="not-in-catalog")
+            else:
+                policies[0] = replace(policies[0], difficulty=Difficulty.MEDIUM)
+            notice_generation = screen._begin_notice("Testing invalid defaults…")
+            screen._apply_recommended_role_policies(
+                tuple(policies),
+                False,
+                notice_generation,
+                screen._machine_defaults_generation,
+                screen._machine_draft_generation,
+                DriverId.CODEX_CLI,
+            )
+            await pilot.pause()
+            assert screen._machine_role_drafts == before
+            assert "invalid recommended defaults" in notice_text(screen)
+
+
+@async_test
+async def test_project_save_backend_guard_rejects_provider_that_is_not_ready() -> None:
+    project = Path("/test/not-ready-project")
+    statuses = tuple(
+        _status(driver, authentication=AuthenticationState.REQUIRED)
+        if driver is DriverId.CLAUDE_CLI
+        else _status(driver)
+        for driver in DriverId
+    )
+    service = ProviderWorkflowFake(_snapshot(statuses=statuses))
+    app = ProofAssistantApp(service)  # type: ignore[arg-type]
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        app.show_ai_provider_settings(project=project)
+        await wait_for(pilot, lambda: isinstance(app.screen, AIProviderSettingsScreen))
+        screen = app.screen
+        assert isinstance(screen, AIProviderSettingsScreen)
+        await wait_for(pilot, lambda: screen.project_settings is not None)
+        screen.query_one("#customize-project-ai", Button).press()
+        screen.query_one("#project-ai-driver", Select).value = "claude_cli"
+        screen._project_role_drafts = {
+            policy.task: (policy.model or "", policy.difficulty)
+            for policy in service.ai_task_policies(driver=DriverId.CLAUDE_CLI)
+        }
+        assert not screen._save_project_settings()
+        assert service.project_updates == []
+        assert "not ready" in notice_text(screen)
 
 
 @async_test

@@ -38,7 +38,8 @@ It is a focused three-step flow:
    RepoProver role before **Finish setup** opens the project catalog.
 
 Back, Continue, Recheck, and Exit remain in the fixed action bar, including at
-80x24. A credential-store mutation is serialized and temporarily blocks page
+80x24; **Ctrl+Q** is also available from every screen. A credential-store
+mutation is serialized and temporarily blocks page
 or global navigation so an earlier secret can never overwrite a later one.
 
 The screen cannot read provider credential files and never receives a stored
@@ -51,9 +52,9 @@ The settings home has three focused destinations: **Verification AI**,
 turn has three peer views:
 
 1. **Role assignments** — the complete eight-role roster and its selected-role
-   editor;
-2. **Provider connection** — installation, authentication, credential source,
-   and provider-level fallback; and
+   editor, with the scope provider and one-click recommended defaults above it;
+2. **Connections & credentials** — installation, authentication, credential
+   source, and advanced provider-level fallback; and
 3. **Provider diagnostics** — exact sanitized status, catalog provenance, and
    resolved task-policy detail.
 
@@ -279,13 +280,17 @@ The TUI edits the machine's primary driver, provider connections, per-role
 model/difficulty matrix, provider fallback, and credential source. In **Role
 assignments**, the scope is always explicit: **Machine defaults** or **This
 project**. Provider connections and credentials remain machine-owned in either
-scope.
+scope; Save, navigation, and Quit therefore guard the machine connection draft
+even if **This project** was the last role-assignment scope.
 
-Changing the provider regenerates a complete capability-checked draft for all
-eight roles. **Apply provider defaults** does the same on demand. **Undo
-defaults** is a one-level draft undo: it restores the assignments that existed
-before the defaults operation, and neither operation persists anything until
-the matching **Save machine team** or **Save project team** action succeeds.
+Changing the provider creates an unsaved scope draft and does not silently
+rewrite role assignments. The adjacent **Use recommended _provider_ defaults
+for all 8 roles** button replaces the complete matrix with capability-checked
+defaults in one step. Incompatible assignments are marked **Needs update** and
+cannot be saved until they are replaced. **Undo defaults** is a one-level draft
+undo: it restores the assignments that existed before the defaults operation,
+and neither operation persists anything until the matching **Save machine
+team** or **Save project team** action succeeds.
 From an existing project's dashboard, the project scope can save a
 project-only provider plus complete role matrix or select **Use machine
 defaults** to remove the override. The override is stored in

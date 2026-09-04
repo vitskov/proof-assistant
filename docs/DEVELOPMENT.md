@@ -139,13 +139,14 @@ textual console
 
 ```bash
 # Terminal 2, from the repository root
-textual run --dev tests/textual_dev_app.py
+PYTHONPATH=. textual run --dev tests/textual_dev_settings_app.py
 ```
 
-The fixture shows the eight-role Claude layout, including Fable / extra-high
-for Author clarification and the Independent prove agent, without connecting
-to a provider. Use it to inspect focus, resize behavior, and Textual log
-messages. Record diagnostics with:
+The fixture opens the production provider-settings screen over a deterministic
+service, including the provider switch, one-click defaults, and Fable /
+extra-high for Author clarification and the Independent prove agent. It does
+not connect to a provider. Use it to inspect focus, resize behavior, and
+Textual log messages. Record diagnostics with:
 
 ```bash
 python -m textual_dev diagnose

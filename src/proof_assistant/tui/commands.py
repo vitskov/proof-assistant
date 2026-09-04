@@ -283,9 +283,9 @@ TOGGLE_THEME = CommandSpec(
     "Switch between the Proof Ink and Proof Paper themes.",
 )
 QUIT = CommandSpec(
-    "",
-    "Menu",
-    "quit",
+    "ctrl+q",
+    "Ctrl+Q",
+    "request_quit",
     "Quit",
     "Exit Proof Assistant and return to the shell.",
 )
@@ -364,6 +364,7 @@ DETACH_JOB = CommandSpec(
 
 GLOBAL_BINDINGS: list[Binding | tuple[str, str] | tuple[str, str, str]] = [
     COMMAND_PALETTE.binding(priority=True),
+    QUIT.binding(priority=True),
 ]
 
 
@@ -441,6 +442,7 @@ SHORTCUT_GROUPS: tuple[tuple[str, tuple[ReferenceCommand, ...]], ...] = (
         "Everywhere",
         (
             _reference(COMMAND_PALETTE),
+            _reference(QUIT),
             ReferenceCommand(
                 "Menu", "Application", "Open Projects, Settings, Help, Theme, or Quit."
             ),
