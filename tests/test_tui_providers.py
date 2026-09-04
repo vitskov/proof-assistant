@@ -698,6 +698,15 @@ async def test_landing_and_revisioned_model_difficulty_update() -> None:
         role.value = TaskKind.DUPLICATE_PROOF.value
         await wait_for(
             pilot,
+            lambda: "Independent prove agent"
+            in str(
+                screen.query_one(
+                    "#ai-role-detail .role-detail-title", Static
+                ).content
+            ),
+        )
+        await wait_for(
+            pilot,
             lambda: not screen.query_one("#ai-role-difficulty", Select).disabled,
         )
         difficulty = screen.query_one("#ai-role-difficulty", Select)
