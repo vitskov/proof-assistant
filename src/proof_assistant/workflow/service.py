@@ -398,7 +398,15 @@ class ProofAssistantWorkflow:
         """Return run defaults resolved only from machine-scoped policy."""
 
         base = self._base_verification_settings()
+        selected_driver = (
+            self._provider_service.config_store.load().config.primary_driver
+        )
         policies = self.ai_task_policies()
+        policy_drivers = {policy.driver for policy in policies}
+        if policy_drivers != {selected_driver}:
+            raise ValueError(
+                "Machine AI settings require one selected provider for every role"
+            )
         role_settings = tuple(
             VerificationRoleSettings(
                 task=policy.task,
@@ -480,27 +488,38 @@ class ProofAssistantWorkflow:
         """Revalidate a complete submitted role map before creating a job."""
 
         if not settings.role_settings:
-            return
+            raise ValueError(
+                "New verification jobs require a frozen model and effort for every role"
+            )
+        role_drivers = {DriverId(role.ai_driver) for role in settings.role_settings}
+        selected_driver = DriverId(settings.ai_driver)
+        if role_drivers != {selected_driver}:
+            raise ValueError(
+                "New verification jobs require one selected provider for every role"
+            )
         machine = self._provider_service.config_store.load().config
-        catalogs: dict[DriverId, ModelCatalog] = {}
+        preference = machine.preference_for(selected_driver)
+        if not preference.enabled:
+            raise ValueError(f"AI driver {selected_driver.value} is disabled")
+        status = self._provider_service.inspect_driver(
+            selected_driver, preference=preference
+        )
+        if not status.ready:
+            raise ValueError(
+                f"AI driver {selected_driver.value} is not ready for a new job"
+            )
+        catalog = status.catalog
+        if catalog is None:
+            raise ValueError(
+                f"AI driver {selected_driver.value} has no model catalog"
+            )
+        if not catalog.contract_approved:
+            raise ValueError(
+                f"AI driver {selected_driver.value} has no validated model catalog"
+            )
         for role in settings.role_settings:
-            driver = DriverId(role.ai_driver)
-            preference = machine.preference_for(driver)
-            if not preference.enabled:
-                raise ValueError(f"AI driver {driver.value} is disabled")
-            catalog = catalogs.get(driver)
-            if catalog is None:
-                status = self._provider_service.inspect_driver(
-                    driver, preference=preference
-                )
-                if not status.ready or status.catalog is None:
-                    raise ValueError(
-                        f"AI driver {driver.value} is not ready for a new job"
-                    )
-                catalog = status.catalog
-                catalogs[driver] = catalog
             self._provider_service.validate_difficulty(
-                driver,
+                selected_driver,
                 role.model,
                 Difficulty(role.effort),
                 catalog=catalog,
@@ -650,6 +669,26 @@ class ProofAssistantWorkflow:
     def update_ai_settings(
         self, config: ProviderConfig, *, expected_revision: int
     ) -> ProviderSetupSnapshot:
+        if config.tasks:
+            configured_tasks = {preference.task for preference in config.tasks}
+            if configured_tasks != set(TaskKind):
+                missing = sorted(
+                    task.value for task in set(TaskKind) - configured_tasks
+                )
+                raise ValueError(
+                    "Machine AI settings require a model and difficulty for every "
+                    "role; missing: " + ", ".join(missing)
+                )
+            foreign_drivers = {
+                preference.driver
+                for preference in config.tasks
+                if preference.driver is not None
+                and preference.driver is not config.primary_driver
+            }
+            if foreign_drivers:
+                raise ValueError(
+                    "Machine AI settings require one selected provider for every role"
+                )
         self._provider_service.validate_config(config)
         self._provider_service.config_store.save(
             config, expected_revision=expected_revision
@@ -2513,7 +2552,9 @@ class ProofAssistantWorkflow:
         if result.outcome == "clarification_required":
             state = WorkflowState.AWAITING_CLARIFICATION
             clarifications = self._presenter(
-                project, role=settings.for_task(TaskKind.CLARIFICATION)
+                project,
+                clarification_role=settings.for_task(TaskKind.CLARIFICATION),
+                diagnostic_role=settings.for_task(TaskKind.DIAGNOSTIC),
             ).present_all(project, summary.source_path)
             self._record_workflow_state(project, state)
             return WorkflowSnapshot(
@@ -2534,50 +2575,63 @@ class ProofAssistantWorkflow:
         self,
         project: Path,
         *,
-        role: VerificationRoleSettings | None = None,
+        clarification_role: VerificationRoleSettings | None = None,
+        diagnostic_role: VerificationRoleSettings | None = None,
     ) -> ClarificationPresenter:
         narrator = self._provided_narrator
         analyzer = None
         if self.use_codex_clarification:
-            if role is None:
-                try:
-                    role = self.default_verification_settings(project).for_task(
-                        TaskKind.CLARIFICATION
-                    )
-                except Exception:
-                    role = None
-            try:
-                policy = (
-                    None
-                    if role is not None
-                    else self._configured_task_policy(TaskKind.CLARIFICATION)
-                )
-            except Exception:
-                # Never cross providers silently. The presenter has a deterministic
-                # non-AI rendering path when no validated narrator can be resolved.
-                narrator = None
-            else:
+
+            def role_config(
+                task: TaskKind, role: VerificationRoleSettings | None
+            ) -> AIBackendConfig:
                 if role is not None:
+                    if role.task is not task:
+                        raise ValueError(
+                            f"Expected the frozen {task.value} role, got "
+                            f"{role.task.value}"
+                        )
                     driver = DriverId(role.ai_driver)
                     model = role.model
                     difficulty = Difficulty(role.effort)
                 else:
-                    assert policy is not None
+                    policy = self._configured_task_policy(task)
                     driver = policy.driver
                     model = policy.model or self.codex_model
                     difficulty = policy.difficulty
-                config = AIBackendConfig(
+                return AIBackendConfig(
                     driver=driver,
                     model=model,
                     difficulty=difficulty,
                     executable=(self.codex if driver is DriverId.CODEX_CLI else None),
                     concurrency=self._concurrency_spec(project=project),
-                    task_kind=TaskKind.CLARIFICATION,
-                    provider_config_path=(self._provider_service.config_store.path),
+                    task_kind=task,
+                    provider_config_path=self._provider_service.config_store.path,
                 )
-                if narrator is None:
-                    narrator = IsolatedAIClarificationNarrator(config, cwd=project)
-                analyzer = IsolatedAIClarificationAnalyzer(config, cwd=project)
+
+            if narrator is None:
+                try:
+                    clarification_config = role_config(
+                        TaskKind.CLARIFICATION, clarification_role
+                    )
+                except Exception:
+                    # Never cross providers or roles silently. Deterministic
+                    # rendering remains available when narration cannot resolve.
+                    narrator = None
+                else:
+                    narrator = IsolatedAIClarificationNarrator(
+                        clarification_config, cwd=project
+                    )
+            try:
+                diagnostic_config = role_config(
+                    TaskKind.DIAGNOSTIC, diagnostic_role
+                )
+            except Exception:
+                analyzer = None
+            else:
+                analyzer = IsolatedAIClarificationAnalyzer(
+                    diagnostic_config, cwd=project
+                )
         return ClarificationPresenter(narrator, analyzer)
 
     def _summary(self, project: Path) -> ProjectSummary:

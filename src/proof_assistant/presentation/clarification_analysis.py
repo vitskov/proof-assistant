@@ -39,11 +39,11 @@ class ClarificationAnalyzer(Protocol):
 
 
 class IsolatedAIClarificationAnalyzer:
-    """Run one analysis turn with a frozen clarification-role assignment."""
+    """Run one analysis turn with a frozen diagnostic-role assignment."""
 
     def __init__(self, config: AIBackendConfig, *, cwd: Path) -> None:
-        if config.task_kind.value != "clarification":
-            raise ValueError("Clarification analysis requires the clarification role")
+        if config.task_kind.value != "diagnostic":
+            raise ValueError("Clarification analysis requires the diagnostic role")
         self.config = config
         self.cwd = cwd.resolve()
 

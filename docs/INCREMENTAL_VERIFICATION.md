@@ -196,10 +196,11 @@ claims/proofs, dependency endpoints and paths, certificates, diagnostics, and
 failure artifacts. `%% assistant:` content is labeled
 `AUTHOR_ADVISORY_NON_PROOF` inside that packet.
 
-One isolated, tool-free AI turn uses the clarification-role provider, model,
-and effort frozen into the verification job to propose the best current
-explanation. It must return a strict schema, and every factual reasoning item
-must cite an evidence ID from the packet. The TUI presents the hypothesis,
+One isolated, tool-free AI turn uses the diagnostic-role provider, model, and
+effort frozen into the verification job to propose the best current explanation.
+Optional author-facing narration uses the separate frozen clarification role.
+The analysis must return a strict schema, and every factual reasoning item must
+cite an evidence ID from the packet. The TUI presents the hypothesis,
 confidence, alternatives, uncertainties, author check, and model provenance
 separately from the observed problem, with an explicit warning that the
 hypothesis is not a Lean result or confirmed author intent.

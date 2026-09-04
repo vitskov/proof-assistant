@@ -4,6 +4,7 @@ import json
 import shutil
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -30,6 +31,8 @@ from proof_assistant.workflow import (
     NewProjectRequest,
     ProjectAIOverride,
     ProjectAIRoleOverride,
+    VerificationRoleSettings,
+    VerificationSettings,
 )
 from proof_assistant.workflow.jobs import VerificationJobStore, request_fingerprint
 from proof_assistant.workflow.service import ProofAssistantWorkflow
@@ -218,6 +221,26 @@ def _assert_role_settings(settings, override: ProjectAIOverride) -> None:
         assert effective.effort == role.difficulty.value
 
 
+def _frozen_settings(driver: DriverId) -> VerificationSettings:
+    override = _project_override(driver)
+    roles = tuple(
+        VerificationRoleSettings(
+            task=role.task,
+            ai_driver=driver.value,
+            model=role.model,
+            effort=role.difficulty.value,
+        )
+        for role in override.roles
+    )
+    proof = next(role for role in roles if role.task is TaskKind.PROOF)
+    return VerificationSettings(
+        ai_driver=proof.ai_driver,
+        model=proof.model,
+        effort=proof.effort,
+        role_settings=roles,
+    )
+
+
 def test_project_roles_round_trip_and_reset_restore_machine_inheritance(
     workflow_factory,
     managed_project: Path,
@@ -278,6 +301,42 @@ def test_project_roles_round_trip_and_reset_restore_machine_inheritance(
     assert reset.inherited
     assert reset.revision == 2
     assert reset.effective == replacement_client.default_verification_settings()
+
+
+@pytest.mark.parametrize("failure", ("incomplete", "mixed_provider"))
+def test_machine_team_update_rejects_non_atomic_role_configuration(
+    failure: str,
+    workflow_factory,
+) -> None:
+    workflow = workflow_factory()
+    current = workflow.get_ai_setup().settings
+    tasks = tuple(
+        TaskPreference(
+            task=task,
+            driver=(
+                DriverId.CLAUDE_CLI
+                if failure == "mixed_provider" and task is TaskKind.REPORTING
+                else DriverId.CODEX_CLI
+            ),
+            model=_role_model(DriverId.CODEX_CLI, task),
+            difficulty=_role_difficulty(task),
+        )
+        for task in TaskKind
+        if failure != "incomplete" or task is not TaskKind.REPORTING
+    )
+
+    expected = "every role" if failure == "incomplete" else "one selected provider"
+    with pytest.raises(ValueError, match=expected):
+        workflow.update_ai_settings(
+            replace(
+                current.config,
+                primary_driver=DriverId.CODEX_CLI,
+                tasks=tasks,
+            ),
+            expected_revision=current.revision,
+        )
+
+    assert workflow.get_ai_setup().settings == current
 
 
 def test_schema_v1_project_overrides_only_proof_and_fills_other_roles(
@@ -555,6 +614,208 @@ def test_job_freezes_all_role_settings_and_fingerprint_is_role_sensitive(
         )
         != fingerprint
     )
+
+
+def test_frozen_team_contract_rejects_mixed_providers() -> None:
+    frozen = _frozen_settings(DriverId.CLAUDE_CLI)
+    mixed_roles = tuple(
+        replace(role, ai_driver=DriverId.CODEX_CLI.value)
+        if role.task is TaskKind.REPORTING
+        else role
+        for role in frozen.role_settings
+    )
+
+    with pytest.raises(ValueError, match="one provider for every role"):
+        replace(frozen, role_settings=mixed_roles)
+
+
+def test_new_job_rejects_incomplete_team_before_persistence_or_spawn(
+    workflow_factory,
+    managed_project: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow = workflow_factory()
+    monkeypatch.setattr(workflow, "plan_changes", lambda _project: None)
+    monkeypatch.setattr(
+        "proof_assistant.workflow.service.subprocess.Popen",
+        lambda *_args, **_kwargs: pytest.fail("invalid request reached worker spawn"),
+    )
+
+    with pytest.raises(ValueError, match="every role"):
+        workflow.start_verification(
+            managed_project,
+            None,
+            VerificationSettings(),
+        )
+
+    assert VerificationJobStore(managed_project).latest() is None
+
+
+@pytest.mark.parametrize("failure", ("foreign_model", "unsupported_effort"))
+def test_new_job_revalidates_every_role_before_persistence_or_spawn(
+    failure: str,
+    workflow_factory,
+    managed_project: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow = workflow_factory()
+    frozen = _frozen_settings(DriverId.CLAUDE_CLI)
+    if failure == "foreign_model":
+        roles = tuple(
+            replace(role, model="gpt-foreign-model")
+            if role.task is TaskKind.REVIEW
+            else role
+            for role in frozen.role_settings
+        )
+        expected = "not present"
+    else:
+        original_validate = workflow._provider_service.validate_difficulty
+
+        def reject_review_max(driver, model, difficulty, *, catalog=None):
+            if (
+                model == CLAUDE_ROLE_MODELS[TaskKind.REVIEW]
+                and difficulty is Difficulty.MAX
+            ):
+                raise ProviderConfigError("unsupported effort for static test model")
+            return original_validate(driver, model, difficulty, catalog=catalog)
+
+        monkeypatch.setattr(
+            workflow._provider_service,
+            "validate_difficulty",
+            reject_review_max,
+        )
+        roles = tuple(
+            replace(role, effort=Difficulty.MAX.value)
+            if role.task is TaskKind.REVIEW
+            else role
+            for role in frozen.role_settings
+        )
+        expected = "unsupported effort"
+    invalid = replace(frozen, role_settings=roles)
+    monkeypatch.setattr(workflow, "plan_changes", lambda _project: None)
+    monkeypatch.setattr(
+        "proof_assistant.workflow.service.subprocess.Popen",
+        lambda *_args, **_kwargs: pytest.fail("invalid request reached worker spawn"),
+    )
+
+    with pytest.raises(ProviderConfigError, match=expected):
+        workflow.start_verification(managed_project, None, invalid)
+
+    assert VerificationJobStore(managed_project).latest() is None
+
+
+@pytest.mark.parametrize("failure", ("unready", "missing_catalog", "unapproved"))
+def test_new_job_rejects_unusable_selected_provider_before_persistence_or_spawn(
+    failure: str,
+    workflow_factory,
+    managed_project: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow = workflow_factory()
+    provider = workflow._provider_service
+    original_inspect = provider.inspect_driver
+
+    def unusable(driver, *, preference=None, discover_models=True):
+        status = original_inspect(
+            driver,
+            preference=preference,
+            discover_models=discover_models,
+        )
+        if failure == "unready":
+            return replace(status, authentication=AuthenticationState.REQUIRED)
+        if failure == "missing_catalog":
+            return replace(status, catalog=None)
+        assert status.catalog is not None
+        return replace(
+            status,
+            catalog=replace(status.catalog, contract_approved=False),
+        )
+
+    monkeypatch.setattr(provider, "inspect_driver", unusable)
+    monkeypatch.setattr(workflow, "plan_changes", lambda _project: None)
+    monkeypatch.setattr(
+        "proof_assistant.workflow.service.subprocess.Popen",
+        lambda *_args, **_kwargs: pytest.fail("invalid request reached worker spawn"),
+    )
+
+    expected = {
+        "unready": "not ready",
+        "missing_catalog": "no model catalog",
+        "unapproved": "validated model catalog",
+    }[failure]
+    with pytest.raises(ValueError, match=expected):
+        workflow.start_verification(
+            managed_project,
+            None,
+            _frozen_settings(DriverId.CLAUDE_CLI),
+        )
+
+    assert VerificationJobStore(managed_project).latest() is None
+
+
+def test_new_job_rejects_disabled_selected_provider_before_persistence_or_spawn(
+    workflow_factory,
+    managed_project: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow = workflow_factory()
+    stored = workflow._provider_service.config_store.load()
+    disabled = tuple(
+        replace(preference, enabled=False)
+        if preference.driver is DriverId.CLAUDE_CLI
+        else preference
+        for preference in stored.config.drivers
+    )
+    workflow._provider_service.config_store.save(
+        replace(stored.config, drivers=disabled),
+        expected_revision=stored.revision,
+    )
+    monkeypatch.setattr(workflow, "plan_changes", lambda _project: None)
+    monkeypatch.setattr(
+        "proof_assistant.workflow.service.subprocess.Popen",
+        lambda *_args, **_kwargs: pytest.fail("invalid request reached worker spawn"),
+    )
+
+    with pytest.raises(ValueError, match="is disabled"):
+        workflow.start_verification(
+            managed_project,
+            None,
+            _frozen_settings(DriverId.CLAUDE_CLI),
+        )
+
+    assert VerificationJobStore(managed_project).latest() is None
+
+
+def test_started_job_keeps_project_team_frozen_after_future_setting_change(
+    workflow_factory,
+    managed_project: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow = workflow_factory()
+    claude = workflow.update_project_verification_settings(
+        managed_project,
+        _project_override(DriverId.CLAUDE_CLI),
+        expected_revision=0,
+    )
+    monkeypatch.setattr(workflow, "plan_changes", lambda _project: None)
+    monkeypatch.setattr(
+        "proof_assistant.workflow.service.subprocess.Popen",
+        lambda *_args, **_kwargs: SimpleNamespace(pid=4321),
+    )
+
+    started = workflow.start_verification(managed_project, None, claude.effective)
+    workflow.update_project_verification_settings(
+        managed_project,
+        _project_override(DriverId.CODEX_CLI),
+        expected_revision=claude.revision,
+    )
+
+    persisted = VerificationJobStore(managed_project).job(started.job.job_id)
+    assert persisted is not None
+    assert persisted.settings == claude.effective
+    assert {
+        role.ai_driver for role in persisted.settings.role_settings
+    } == {DriverId.CLAUDE_CLI.value}
 
 
 @pytest.mark.parametrize("driver", tuple(DriverId))

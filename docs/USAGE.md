@@ -265,10 +265,11 @@ claim, observed problem, diagnostics, and affected graph. For a newly generated
 clarification it also builds a deterministic evidence packet containing the
 question, full relevant claims/proofs, direct dependency endpoints and paths,
 certificates, diagnostics, and failure artifacts. An isolated, tool-free AI
-turn uses the exact clarification-role provider/model/effort frozen into that
-verification job. Every factual reasoning statement must cite an evidence ID.
-The resulting hypothesis is advisory: it is not a Lean result, proof,
-certificate, or confirmed statement of author intent.
+analysis turn uses the exact diagnostic-role provider/model/effort frozen into
+that verification job; optional author-facing narration separately uses the
+frozen clarification role. Every factual reasoning statement must cite an
+evidence ID. The resulting hypothesis is advisory: it is not a Lean result,
+proof, certificate, or confirmed statement of author intent.
 
 Presentation and analysis output are schema- and provenance-validated before
 they are displayed or loaded. Unknown evidence IDs, mismatched evidence hashes,
@@ -413,14 +414,17 @@ effort values: author clarification, scan / triage diagnostics, primary prove,
 sketch, maintain / fix, math and engineering review, independent prove, and
 progress / reporting. The provider selector and **Use recommended _provider_
 defaults for all 8 roles** button are together above the roster. Changing the
-provider creates an unsaved draft without silently overwriting the roles; the
-button fills the complete matrix in one step, and **Undo defaults** restores the
-previous unsaved draft. Role model and effort choices are limited to the
+provider immediately removes the previous provider's rows and loads a complete
+recommended matrix for the new provider. Neutral placeholders remain visible
+while it loads, Save stays disabled, and stale or foreign model names never
+appear under the selected provider. The defaults button resets later
+same-provider customization; **Undo defaults** restores only that provider's
+previous complete draft. Role model and effort choices are limited to the
 selected provider's capabilities.
 In project scope, **Use machine defaults** removes the project override. The
 complete role map affects future submissions only and is frozen into each job,
-including the clarification role. A selected driver still shares the same
-global AI admission controller with all other AI task classes. See
+including the diagnostic and clarification roles. A selected driver still
+shares the same global AI admission controller with all other AI task classes. See
 [AI providers and first-time setup](AI_PROVIDERS.md) for commands, credential
 handling, model policy, and execution isolation.
 

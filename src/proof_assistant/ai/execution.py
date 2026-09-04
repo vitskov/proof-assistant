@@ -652,8 +652,25 @@ class AIBackend:
             finally:
                 server.close()
         if result.returncode != 0:
-            detail = _redacted(result.stderr or result.stdout)
-            raise ProviderExecutionError(
+            detail = self._cli_failure_detail(driver, result.stdout, result.stderr)
+            error_type = (
+                ProviderAuthenticationRequired
+                if driver is DriverId.CLAUDE_CLI
+                and any(
+                    marker in detail.casefold()
+                    for marker in (
+                        "authenticate",
+                        "authentication",
+                        "oauth",
+                        "log in",
+                        "login",
+                        "logged in",
+                        "auth token",
+                    )
+                )
+                else ProviderExecutionError
+            )
+            raise error_type(
                 f"{driver.value} exited with status {result.returncode}: {detail}"
             )
         events, final_text, thread_id = self._parse_cli_output(driver, result.stdout)
@@ -669,6 +686,27 @@ class AIBackend:
         )
 
     @staticmethod
+    def _cli_failure_detail(driver: DriverId, stdout: str, stderr: str) -> str:
+        """Extract a concise provider error without echoing a full event transcript."""
+
+        if driver is DriverId.CLAUDE_CLI:
+            for output in (stdout, stderr):
+                try:
+                    payload = json.loads(output)
+                except json.JSONDecodeError:
+                    continue
+                items = payload if isinstance(payload, list) else [payload]
+                for item in reversed(items):
+                    if not isinstance(item, dict):
+                        continue
+                    for key in ("result", "error", "message"):
+                        value = item.get(key)
+                        if isinstance(value, str) and value.strip():
+                            return _redacted(value.strip())
+        fallback = "\n".join(part for part in (stderr, stdout) if part.strip())
+        return _redacted(fallback)
+
+    @staticmethod
     def _parse_cli_output(
         driver: DriverId, stdout: str
     ) -> tuple[list[JSONObject], str, str]:
@@ -680,6 +718,37 @@ class AIBackend:
                 raise ProviderExecutionError(
                     "Claude CLI returned invalid JSON"
                 ) from exc
+            if isinstance(payload, list):
+                events = [item for item in payload if isinstance(item, dict)]
+                terminal = next(
+                    (
+                        item
+                        for item in reversed(events)
+                        if item.get("type") == "result"
+                        or item.get("result") is not None
+                        or item.get("output") is not None
+                    ),
+                    None,
+                )
+                if terminal is None:
+                    raise ProviderExecutionError(
+                        "Claude CLI returned no terminal result"
+                    )
+                final = terminal.get("result") or terminal.get("output") or ""
+                thread = (
+                    terminal.get("session_id")
+                    or terminal.get("sessionId")
+                    or next(
+                        (
+                            item.get("session_id") or item.get("sessionId")
+                            for item in reversed(events)
+                            if item.get("session_id") or item.get("sessionId")
+                        ),
+                        None,
+                    )
+                    or uuid.uuid4().hex
+                )
+                return events, str(final).strip(), str(thread)
             if not isinstance(payload, dict):
                 raise ProviderExecutionError("Claude CLI returned an invalid result")
             events.append(payload)

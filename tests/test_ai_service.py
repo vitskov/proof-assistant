@@ -925,6 +925,33 @@ def test_machine_defaults_reject_fable_after_claude_cli_downgrade(tmp_path):
         workflow.default_verification_settings()
 
 
+def test_machine_config_rejects_mixed_provider_role_team(tmp_path):
+    core = service(
+        tmp_path,
+        commands=FakeCommands(),
+        executables=FakeExecutables(),
+        http=FakeHttp(HttpResponse(500, b"")),
+        credentials=FakeCredentials(),
+        path_manager=FakePathManager(),
+    )
+    current = core.config_store.load()
+    candidate = replace(
+        current.config,
+        primary_driver=DriverId.CLAUDE_CLI,
+        tasks=(
+            TaskPreference(
+                TaskKind.PROOF,
+                driver=DriverId.CODEX_CLI,
+                model="gpt-5.6-sol",
+                difficulty=Difficulty.HIGH,
+            ),
+        ),
+    )
+
+    with pytest.raises(ProviderConfigError, match="Every role must use"):
+        core.validate_config(candidate)
+
+
 @pytest.mark.parametrize(
     ("task", "expected_model", "expected_difficulty"),
     [

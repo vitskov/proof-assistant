@@ -286,6 +286,14 @@ class RoleRoster(DataTable[str]):
         )
 
     def _render_rows(self, *, selected: TaskKind | None = None) -> None:
+        selected_key = (
+            selected.value if selected is not None else selected_row_key(self)
+        )
+        # Textual retains auto-sized column widths after rows are cleared. Reset
+        # the columns so a temporary loading placeholder cannot permanently make
+        # the completed eight-role roster wider or horizontally scrollable.
+        self.clear(columns=True)
+        self.add_columns("Role", "Model", "Effort", "State")
         replace_rows_preserving_selection(
             self,
             (
@@ -300,7 +308,7 @@ class RoleRoster(DataTable[str]):
                 )
                 for row in self._rows
             ),
-            selected_key=selected.value if selected is not None else None,
+            selected_key=selected_key,
         )
 
 

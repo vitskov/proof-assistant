@@ -580,6 +580,15 @@ class ProviderWorkflowFake:
         return self.snapshot
 
 
+class FailingClaudeDefaultsWorkflowFake(ProviderWorkflowFake):
+    def ai_task_policies(
+        self, driver: DriverId | None = None
+    ) -> tuple[TaskModelPolicy, ...]:
+        if driver is DriverId.CLAUDE_CLI:
+            raise RuntimeError("synthetic Claude catalog failure")
+        return super().ai_task_policies(driver)
+
+
 def _status_by_driver(
     snapshot: ProviderSetupSnapshot, driver: DriverId
 ) -> DriverStatus:
@@ -883,6 +892,10 @@ async def test_provider_switch_and_one_click_defaults_are_visible_and_explicit()
 ):
     for size in ((80, 24), (120, 40)):
         service = ProviderWorkflowFake(_snapshot())
+        claude_release = threading.Event()
+        service.recommended_defaults_release_by_driver[DriverId.CLAUDE_CLI] = (
+            claude_release
+        )
         app = ProofAssistantApp(service)  # type: ignore[arg-type]
         async with app.run_test(size=size) as pilot:
             await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
@@ -909,28 +922,40 @@ async def test_provider_switch_and_one_click_defaults_are_visible_and_explicit()
             assert roles_page.region.contains_region(provider.region)
             assert roles_page.region.contains_region(defaults.region)
 
-            original_drafts = dict(screen._machine_role_drafts)
             provider.value = DriverId.CLAUDE_CLI.value
             await wait_for(
                 pilot,
                 lambda: (
-                    screen.query_one("#ai-role-model", Select).value
+                    service.recommended_defaults_started_by_driver[
+                        DriverId.CLAUDE_CLI
+                    ].is_set()
+                    and not screen._machine_role_drafts
+                    and screen.query_one("#ai-role-model", Select).value
                     == "__needs_update__"
                     and screen.query_one("#save-ai-settings", Button).disabled
                 ),
             )
-            assert screen._machine_role_drafts == original_drafts
             assert "Claude Code CLI" in defaults.label.plain
             assert "all 8 roles" in defaults.label.plain
             with pytest.raises(InvalidSelectValueError):
                 screen.query_one("#ai-role-model", Select).value = "gpt-5.6-sol"
             roster = screen.query_one("#ai-role-roster", DataTable)
             assert all(
-                "Needs update" in {str(cell) for cell in roster.get_row(task.value)}
+                "gpt-" not in " ".join(str(cell) for cell in roster.get_row(task.value))
+                and "Awaiting assignment"
+                in {str(cell) for cell in roster.get_row(task.value)}
                 for task in TaskKind
             )
+            detail = screen.query_one("#ai-role-detail").query_one(
+                ".role-detail-summary", Static
+            )
+            assert "gpt-" not in str(detail.content)
+            policy_text = screen.query_one("#ai-task-policies", TextArea).text
+            assert "gpt-" not in policy_text
+            assert "codex_cli" not in policy_text
+            assert "claude_cli" in policy_text
 
-            defaults.press()
+            claude_release.set()
             await wait_for(
                 pilot,
                 lambda: (
@@ -947,6 +972,10 @@ async def test_provider_switch_and_one_click_defaults_are_visible_and_explicit()
                 model in claude_models
                 for model, _ in screen._machine_role_drafts.values()
             )
+            policy_text = screen.query_one("#ai-task-policies", TextArea).text
+            assert "gpt-" not in policy_text
+            assert "codex_cli" not in policy_text
+            assert "fable" in policy_text
 
             screen.query_one("#ai-manage-connection", Button).press()
             await wait_for(
@@ -960,6 +989,76 @@ async def test_provider_switch_and_one_click_defaults_are_visible_and_explicit()
                 screen.query_one("#ai-configure-driver", Select).value
                 == DriverId.CLAUDE_CLI.value
             )
+
+
+@async_test
+async def test_failed_machine_defaults_leave_target_provider_incomplete() -> None:
+    service = FailingClaudeDefaultsWorkflowFake(_snapshot())
+    app = ProofAssistantApp(service)  # type: ignore[arg-type]
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        app.show_ai_provider_settings()
+        await wait_for(pilot, lambda: isinstance(app.screen, AIProviderSettingsScreen))
+        screen = app.screen
+        assert isinstance(screen, AIProviderSettingsScreen)
+        await wait_for(
+            pilot,
+            lambda: not screen.query_one("#ai-primary-driver", Select).disabled,
+        )
+
+        screen.query_one("#ai-primary-driver", Select).value = "claude_cli"
+        await wait_for(
+            pilot,
+            lambda: "synthetic Claude catalog failure" in notice_text(screen),
+        )
+
+        policy_text = screen.query_one("#ai-task-policies", TextArea).text
+        assert "could not be loaded" in policy_text
+        assert "incomplete" in policy_text
+        assert "claude_cli" in policy_text
+        assert "gpt-" not in policy_text
+        assert "codex_cli" not in policy_text
+        assert screen.query_one("#save-ai-settings", Button).disabled
+
+
+@async_test
+async def test_failed_project_defaults_leave_target_provider_incomplete() -> None:
+    project = Path("/test/failed-project-defaults")
+    service = FailingClaudeDefaultsWorkflowFake(_snapshot())
+    app = ProofAssistantApp(service)  # type: ignore[arg-type]
+
+    async with app.run_test(size=(140, 48)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        app.show_ai_provider_settings(project=project)
+        await wait_for(pilot, lambda: isinstance(app.screen, AIProviderSettingsScreen))
+        screen = app.screen
+        assert isinstance(screen, AIProviderSettingsScreen)
+        await wait_for(
+            pilot,
+            lambda: (
+                screen.project_settings is not None
+                and not screen.query_one("#customize-project-ai", Button).disabled
+            ),
+        )
+        screen.query_one("#customize-project-ai", Button).press()
+        await wait_for(
+            pilot,
+            lambda: not screen.query_one("#project-ai-driver", Select).disabled,
+        )
+
+        screen.query_one("#project-ai-driver", Select).value = "claude_cli"
+        await wait_for(
+            pilot,
+            lambda: "synthetic Claude catalog failure" in notice_text(screen),
+        )
+
+        project_summary = screen.query_one("#project-ai-summary", TextArea).text
+        assert "Incomplete" in project_summary
+        assert "claude_cli" in project_summary
+        assert "gpt-" not in project_summary
+        assert "codex_cli" not in project_summary
+        assert screen.query_one("#save-project-ai", Button).disabled
 
 
 @async_test
@@ -989,6 +1088,49 @@ async def test_global_quit_preserves_dirty_provider_settings_guard() -> None:
         assert not quit_requested.is_set()
         app.screen.query_one("#ai-unsaved-discard", Button).press()
         await wait_for(pilot, quit_requested.is_set)
+
+
+@async_test
+async def test_provider_default_failure_keeps_target_team_neutral_and_unsavable() -> (
+    None
+):
+    service = ProviderWorkflowFake(_snapshot())
+    original_policies = service.ai_task_policies
+
+    def failing_claude_defaults(
+        driver: DriverId | None = None,
+    ) -> tuple[TaskModelPolicy, ...]:
+        if driver is DriverId.CLAUDE_CLI:
+            raise RuntimeError("test default discovery failure")
+        return original_policies(driver)
+
+    service.ai_task_policies = failing_claude_defaults  # type: ignore[method-assign]
+    app = ProofAssistantApp(service)  # type: ignore[arg-type]
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        await wait_for(pilot, lambda: isinstance(app.screen, WelcomeScreen))
+        app.show_ai_provider_settings()
+        await wait_for(pilot, lambda: isinstance(app.screen, AIProviderSettingsScreen))
+        screen = app.screen
+        assert isinstance(screen, AIProviderSettingsScreen)
+        await wait_for(
+            pilot,
+            lambda: not screen.query_one("#ai-primary-driver", Select).disabled,
+        )
+
+        screen.query_one("#ai-primary-driver", Select).value = DriverId.CLAUDE_CLI.value
+        await wait_for(
+            pilot,
+            lambda: "could not be loaded" in notice_text(screen),
+        )
+
+        assert screen._machine_role_drafts == {}
+        assert screen.query_one("#save-ai-settings", Button).disabled
+        roster = screen.query_one("#ai-role-roster", DataTable)
+        assert all(
+            "gpt-" not in " ".join(str(cell) for cell in roster.get_row(task.value))
+            for task in TaskKind
+        )
 
 
 @async_test
@@ -1388,13 +1530,11 @@ async def test_stale_machine_provider_defaults_cannot_overwrite_newer_provider()
         )
 
         screen.query_one("#ai-primary-driver", Select).value = DriverId.CLAUDE_CLI.value
-        screen.query_one("#ai-use-recommended", Button).press()
         await wait_for(
             pilot,
             service.recommended_defaults_started_by_driver[DriverId.CLAUDE_CLI].is_set,
         )
         screen.query_one("#ai-primary-driver", Select).value = DriverId.CODEX_CLI.value
-        screen.query_one("#ai-use-recommended", Button).press()
         await wait_for(
             pilot,
             lambda: (
@@ -1448,27 +1588,38 @@ async def test_stale_project_provider_defaults_cannot_overwrite_newer_provider()
             lambda: not screen.query_one("#project-ai-driver", Select).disabled,
         )
 
-        project_drafts = dict(screen._project_role_drafts)
         screen.query_one("#project-ai-driver", Select).value = DriverId.CLAUDE_CLI.value
         await wait_for(
             pilot,
             lambda: (
-                screen.query_one("#project-ai-role-model", Select).value
+                service.recommended_defaults_started_by_driver[
+                    DriverId.CLAUDE_CLI
+                ].is_set()
+                and not screen._project_role_drafts
+                and screen.query_one("#project-ai-role-model", Select).value
                 == "__needs_update__"
                 and screen.query_one("#save-project-ai", Button).disabled
             ),
         )
-        assert screen._project_role_drafts == project_drafts
         defaults = screen.query_one("#project-ai-use-recommended", Button)
         assert "Claude Code CLI" in defaults.label.plain
         assert "all 8 roles" in defaults.label.plain
-        screen.query_one("#project-ai-use-recommended", Button).press()
-        await wait_for(
-            pilot,
-            service.recommended_defaults_started_by_driver[DriverId.CLAUDE_CLI].is_set,
+        roster = screen.query_one("#project-ai-role-roster", DataTable)
+        assert all(
+            "gpt-" not in " ".join(str(cell) for cell in roster.get_row(task.value))
+            and "Awaiting assignment"
+            in {str(cell) for cell in roster.get_row(task.value)}
+            for task in TaskKind
         )
+        detail = screen.query_one("#project-ai-role-detail").query_one(
+            ".role-detail-summary", Static
+        )
+        assert "gpt-" not in str(detail.content)
+        project_summary = screen.query_one("#project-ai-summary", TextArea).text
+        assert "gpt-" not in project_summary
+        assert "codex_cli" not in project_summary
+        assert "claude_cli" in project_summary
         screen.query_one("#project-ai-driver", Select).value = DriverId.CODEX_CLI.value
-        screen.query_one("#project-ai-use-recommended", Button).press()
         await wait_for(
             pilot,
             lambda: (
@@ -1511,7 +1662,6 @@ async def test_initial_policy_load_cannot_overwrite_newer_provider_defaults() ->
         )
 
         screen.query_one("#ai-primary-driver", Select).value = DriverId.CLAUDE_CLI.value
-        screen.query_one("#ai-use-recommended", Button).press()
         await wait_for(
             pilot,
             service.recommended_defaults_completed_by_driver[
@@ -1882,31 +2032,29 @@ async def test_provider_switch_preserves_overlapping_model_with_unsupported_effo
                     pilot,
                     lambda: not screen.query_one("#project-ai-driver", Select).disabled,
                 )
-                before = dict(screen._project_role_drafts)
                 screen.query_one("#project-ai-driver", Select).value = "claude_cli"
                 await wait_for(
                     pilot,
                     lambda: (
-                        screen.query_one("#project-ai-role-difficulty", Select).value
+                        screen.query_one("#project-ai-role-model", Select).value
                         == "__needs_update__"
                     ),
                 )
-                assert screen._project_role_drafts == before
+                assert screen._project_role_drafts == {}
             else:
                 await wait_for(
                     pilot,
                     lambda: not screen.query_one("#ai-primary-driver", Select).disabled,
                 )
-                before = dict(screen._machine_role_drafts)
                 screen.query_one("#ai-primary-driver", Select).value = "claude_cli"
                 await wait_for(
                     pilot,
                     lambda: (
-                        screen.query_one("#ai-role-difficulty", Select).value
+                        screen.query_one("#ai-role-model", Select).value
                         == "__needs_update__"
                     ),
                 )
-                assert screen._machine_role_drafts == before
+                assert screen._machine_role_drafts == {}
 
 
 @async_test
@@ -2207,6 +2355,11 @@ async def test_switching_project_provider_removes_stale_codex_model_ids() -> Non
             pilot,
             lambda: screen.query_one("#project-ai-role-model", Select).value == "best",
         )
+        project_summary = screen.query_one("#project-ai-summary", TextArea).text
+        assert "gpt-" not in project_summary
+        assert "codex_cli" not in project_summary
+        assert "claude_cli" in project_summary
+        assert "fable" in project_summary
         model_select = screen.query_one("#project-ai-role-model", Select)
         assert_select_accepts(
             model_select, {"best", "fable", "opus", "sonnet", "haiku"}
@@ -2245,7 +2398,20 @@ async def test_project_provider_defaults_undo_restores_exact_project_draft() -> 
             lambda: not screen.query_one("#project-ai-driver", Select).disabled,
         )
         screen.query_one("#project-ai-driver", Select).value = DriverId.CLAUDE_CLI.value
-        await pilot.pause()
+        await wait_for(
+            pilot,
+            lambda: (
+                screen._project_role_drafts.get(TaskKind.DUPLICATE_PROOF)
+                == ("fable", Difficulty.XHIGH)
+                and screen.query_one("#project-ai-undo-recommended", Button).disabled
+            ),
+        )
+        screen._project_role_drafts[TaskKind.REPORTING] = (
+            "sonnet",
+            Difficulty.HIGH,
+        )
+        screen._project_draft_generation += 1
+        screen._render_project_ai_choices()
         project_before = dict(screen._project_role_drafts)
 
         screen.query_one("#project-ai-use-recommended", Button).press()
@@ -2261,6 +2427,10 @@ async def test_project_provider_defaults_undo_restores_exact_project_draft() -> 
         )
         screen.query_one("#project-ai-undo-recommended", Button).press()
         await wait_for(pilot, lambda: screen._project_role_drafts == project_before)
+        assert all(
+            model in {item.model_id for item in _catalog(DriverId.CLAUDE_CLI).models}
+            for model, _ in screen._project_role_drafts.values()
+        )
         assert screen._machine_role_drafts == machine_before
         assert screen.query_one("#project-ai-undo-recommended", Button).disabled
 

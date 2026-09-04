@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from proof_assistant.ai import Difficulty, DriverId, TaskKind
 from proof_assistant.incremental.models import ClaimState
 from proof_assistant.incremental.orchestration import (
     VerificationCancelled,
@@ -18,6 +19,7 @@ from proof_assistant.workflow.contracts import (
     ClaimChangeKind,
     NewProjectRequest,
     ProgressPhase,
+    VerificationRoleSettings,
     VerificationSettings,
     WorkflowState,
 )
@@ -215,20 +217,109 @@ def test_confirmed_plan_passes_reviewed_digest_and_emits_typed_progress(
 
     monkeypatch.setattr("proof_assistant.workflow.service.verify_project", fake_verify)
     events = []
+    roles = tuple(
+        VerificationRoleSettings(
+            task=task,
+            ai_driver=DriverId.CLAUDE_CLI.value,
+            model="fable" if task is TaskKind.PROOF else f"claude-{task.value}",
+            effort=(
+                Difficulty.XHIGH.value
+                if task is TaskKind.PROOF
+                else Difficulty.MEDIUM.value
+            ),
+        )
+        for task in TaskKind
+    )
     result = workflow.confirm_and_verify(
         project,
         plan.plan_id,
-        VerificationSettings(model="test"),
+        VerificationSettings(
+            ai_driver=DriverId.CLAUDE_CLI.value,
+            model="fable",
+            effort=Difficulty.XHIGH.value,
+            role_settings=roles,
+        ),
         progress=events.append,
     )
     assert result.state == WorkflowState.COMPLETED
     assert observed["expected_inventory_sha256"] == plan.candidate_inventory_sha256
+    assert observed["options"].ai_driver == DriverId.CLAUDE_CLI.value
+    assert observed["options"].model == "fable"
+    assert observed["options"].effort == Difficulty.XHIGH.value
     assert [event.phase for event in events] == [
         "VALIDATING",
         "REPORTING",
     ]
     assert events[0].details["main_file"] == "main.tex"
     assert events[0].details["input_files"] == ()
+
+
+def test_clarification_result_dispatches_both_frozen_ai_roles(
+    tmp_path, monkeypatch
+):
+    _source, project, workflow = setup_project(tmp_path)
+    roles = tuple(
+        VerificationRoleSettings(
+            task=task,
+            ai_driver=DriverId.CLAUDE_CLI.value,
+            model=(
+                "fable"
+                if task is TaskKind.CLARIFICATION
+                else "opus"
+                if task is TaskKind.DIAGNOSTIC
+                else f"claude-{task.value}"
+            ),
+            effort=(
+                Difficulty.XHIGH.value
+                if task is TaskKind.CLARIFICATION
+                else Difficulty.HIGH.value
+            ),
+        )
+        for task in TaskKind
+    )
+    proof_role = next(role for role in roles if role.task is TaskKind.PROOF)
+    settings = VerificationSettings(
+        ai_driver=DriverId.CLAUDE_CLI.value,
+        model=proof_role.model,
+        effort=proof_role.effort,
+        role_settings=roles,
+    )
+    captured = {}
+
+    class EmptyPresenter:
+        def present_all(self, _project, _source_path):
+            return ()
+
+    def capture_roles(
+        _project,
+        *,
+        clarification_role,
+        diagnostic_role,
+    ):
+        captured["clarification"] = clarification_role
+        captured["diagnostic"] = diagnostic_role
+        return EmptyPresenter()
+
+    monkeypatch.setattr(workflow, "_presenter", capture_roles)
+    result = VerificationResult(
+        "clarification_required",
+        "test clarification",
+        11,
+        1,
+        "snapshot",
+        str(project),
+        (),
+        (),
+        (),
+        (),
+        (),
+    )
+
+    snapshot = workflow._snapshot_for_result(project, result, settings=settings)
+
+    assert snapshot.state is WorkflowState.AWAITING_CLARIFICATION
+    assert captured["clarification"] == settings.for_task(TaskKind.CLARIFICATION)
+    assert captured["diagnostic"] == settings.for_task(TaskKind.DIAGNOSTIC)
 
 
 def test_progress_event_maps_typed_counts_and_claim_id(tmp_path):

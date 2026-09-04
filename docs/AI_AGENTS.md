@@ -107,8 +107,9 @@ internally. Do not reintroduce a user-facing external task-file workflow.
 - Clarification analysis may explain why verification stopped but cannot change
   the selected source path/span, quotation, immutable observed problem,
   diagnostics, claim, or affected proof graph. It must use the job's frozen
-  clarification-role assignment, run without tools, and cite only evidence IDs
-  in the host-built packet. Resume is cache-only; never make an unrequested
+  diagnostic-role assignment, run without tools, and cite only evidence IDs in
+  the host-built packet. Optional author-facing narration uses the separate
+  frozen clarification role. Resume is cache-only; never make an unrequested
   provider call while loading a question.
 
 ## Safe workflow

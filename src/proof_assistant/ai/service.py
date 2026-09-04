@@ -1341,6 +1341,18 @@ class ProviderService:
         """Validate all explicit choices against one catalog per used driver."""
 
         settings = MachineProviderSettings(config=config)
+        foreign_tasks = tuple(
+            preference.task.value
+            for preference in config.tasks
+            if preference.driver is not None
+            and preference.driver is not config.primary_driver
+        )
+        if foreign_tasks:
+            raise ProviderConfigError(
+                "Every role must use the selected provider "
+                f"{config.primary_driver.value}; mismatched roles: "
+                + ", ".join(sorted(foreign_tasks))
+            )
         catalogs: dict[DriverId, ModelCatalog] = {}
 
         def catalog_for(driver: DriverId) -> ModelCatalog:

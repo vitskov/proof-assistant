@@ -251,6 +251,11 @@ class VerificationSettings:
                 + ", ".join(missing)
             )
         if self.role_settings:
+            role_drivers = {item.ai_driver for item in self.role_settings}
+            if role_drivers != {self.ai_driver}:
+                raise ValueError(
+                    "frozen verification settings require one provider for every role"
+                )
             proof = next(
                 item for item in self.role_settings if item.task is TaskKind.PROOF
             )

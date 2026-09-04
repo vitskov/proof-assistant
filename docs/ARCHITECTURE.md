@@ -265,12 +265,14 @@ provider plus a model/difficulty assignment for every `TaskKind` in
 `.repoprover/verification-settings.json`. The workflow service validates that
 override against the current machine provider setup and approved catalog, then
 merges it with machine defaults when a verification is submitted. The resolved
-role matrix is copied into the durable job row and request fingerprint;
-clarification and proof execution read from that frozen matrix. Later edits
-affect only future jobs. Version-1 project files migrate their former scalar
-choice as the proof role and receive provider-aware defaults for the remaining
-roles. The project file is revisioned, locked, atomically replaced, and rejects
-unknown or secret-shaped fields.
+role matrix is copied into the durable job row and request fingerprint. Proof
+execution, clarification root-cause analysis, and optional author-facing
+narration read the proof, diagnostic, and clarification entries respectively
+from that frozen matrix. Later edits affect only future jobs. Version-1 project
+files migrate their former scalar choice as the proof role and receive
+provider-aware defaults for the remaining roles. The project file is
+revisioned, locked, atomically replaced, and rejects unknown or secret-shaped
+fields.
 
 RepoProver tools remain the control plane below that boundary for Lean, Git,
 files, shell operations, and Mathlib search. Proof workers receive narrow reads
@@ -322,7 +324,8 @@ schema, database status, origin, evidence hash, and every cited evidence ID
 match the current deterministic packet. Invalid stored content is reduced to a
 sanitized unavailable state. Resume validates the cache but does not invoke an
 AI provider; analysis is generated only in the fresh verification path using
-the clarification-role assignment frozen into that job.
+the diagnostic-role assignment frozen into that job. Optional author-facing
+narration uses the separate frozen clarification role.
 
 The backend emits a tree outline whenever the frozen dependency graph is
 acyclic. A shared prerequisite may occur under more than one parent, but a

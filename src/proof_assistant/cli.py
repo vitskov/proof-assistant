@@ -1583,7 +1583,11 @@ def cmd_ai_status(args: argparse.Namespace) -> int:
             statuses = (status,)
             selected_settings = replace(
                 settings,
-                config=replace(settings.config, primary_driver=selected),
+                config=replace(
+                    settings.config,
+                    primary_driver=selected,
+                    tasks=(),
+                ),
             )
             policy = service.recommend_task_policy(
                 TaskKind.PROOF,

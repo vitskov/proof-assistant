@@ -179,6 +179,8 @@ def test_cache_prepare_reuses_persisted_external_compiler(monkeypatch, tmp_path)
 def test_ai_status_for_one_driver_does_not_probe_every_provider(
     monkeypatch, capsys, tmp_path
 ):
+    from dataclasses import replace
+
     import proof_assistant.cli as cli
     from proof_assistant.ai import (
         AuthenticationState,
@@ -193,9 +195,24 @@ def test_ai_status_for_one_driver_does_not_probe_every_provider(
         ModelDescriptor,
         TaskKind,
         TaskModelPolicy,
+        TaskPreference,
     )
 
-    settings = MachineProviderSettings()
+    default_settings = MachineProviderSettings()
+    settings = replace(
+        default_settings,
+        config=replace(
+            default_settings.config,
+            tasks=(
+                TaskPreference(
+                    task=TaskKind.PROOF,
+                    driver=DriverId.CODEX_CLI,
+                    model="gpt-5.6-sol",
+                    difficulty=Difficulty.HIGH,
+                ),
+            ),
+        ),
+    )
     status = DriverStatus(
         driver=DriverId.CLAUDE_CLI,
         transport=DriverTransport.CLI,
@@ -231,6 +248,7 @@ def test_ai_status_for_one_driver_does_not_probe_every_provider(
         def recommend_task_policy(self, task, *, settings, catalog):
             assert task is TaskKind.PROOF
             assert settings.config.primary_driver is DriverId.CLAUDE_CLI
+            assert settings.config.tasks == ()
             assert catalog is status.catalog
             return TaskModelPolicy(
                 task=task,

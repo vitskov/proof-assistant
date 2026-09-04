@@ -1767,21 +1767,18 @@ class AIProviderSettingsScreen(NoticeScreen):
                 if driver is self._last_primary_driver:
                     return
                 self._last_primary_driver = driver
-                self._machine_defaults_generation += 1
                 self._machine_draft_generation += 1
+                self._machine_role_drafts = {}
                 self._machine_undo_drafts = None
                 self.query_one("#ai-undo-recommended", Button).disabled = True
                 with self.prevent(Select.Changed):
                     self.query_one("#ai-configure-driver", Select).value = str(selected)
                 self._last_configure_driver = driver
+                self._render_machine_policy_transition(driver)
                 self._render_selected_provider()
                 self._render_machine_role_choices()
                 self._refresh_machine_role_actions()
-                self.show_notice(
-                    f"{_driver_label(driver)} selected in this unsaved draft. "
-                    "Assignments from another provider are marked Needs update. "
-                    "Use the one-click recommended defaults or update each role."
-                )
+                self._load_recommended_role_policies(driver, project=False)
         elif event.select.id == "ai-configure-driver" and self.snapshot is not None:
             selected = event.select.value
             if selected is Select.NULL:
@@ -1794,13 +1791,14 @@ class AIProviderSettingsScreen(NoticeScreen):
             self._show_ai_view("connection")
             self._render_selected_provider()
             if self.first_run:
-                self._machine_defaults_generation += 1
+                self._machine_role_drafts = {}
                 self._machine_undo_drafts = None
                 self._last_primary_driver = driver
                 with self.prevent(Select.Changed):
                     self.query_one("#ai-primary-driver", Select).value = str(selected)
                 self.query_one("#ai-undo-recommended", Button).disabled = True
                 self.query_one("#save-ai-settings", Button).disabled = True
+                self._render_machine_role_choices()
                 self._load_recommended_role_policies(driver, project=False)
         elif event.select.id == "ai-provider-model" and self.snapshot is not None:
             self._machine_draft_generation += 1
@@ -1825,20 +1823,19 @@ class AIProviderSettingsScreen(NoticeScreen):
         elif event.select.id == "ai-role-difficulty" and self.snapshot is not None:
             self._record_machine_role_difficulty()
         elif event.select.id == "project-ai-driver" and self.snapshot is not None:
+            if not self._project_customizing or self.project_settings is None:
+                return
             selected = event.select.value
             if selected is not Select.NULL:
                 driver = DriverId(str(selected))
-                self._project_defaults_generation += 1
                 self._project_draft_generation += 1
+                self._project_role_drafts = {}
                 self._project_undo_drafts = None
                 self.query_one("#project-ai-undo-recommended", Button).disabled = True
+                self._render_project_draft_summary(driver, loading=True)
                 self._render_project_ai_choices()
                 self._refresh_project_role_actions()
-                self.show_notice(
-                    f"{_driver_label(driver)} selected for this unsaved project draft. "
-                    "Assignments from another provider are marked Needs update. "
-                    "Use the one-click recommended defaults or update each role."
-                )
+                self._load_recommended_role_policies(driver, project=True)
         elif event.select.id == "project-ai-role" and self.snapshot is not None:
             self._render_project_ai_choices()
         elif event.select.id == "project-ai-role-model" and self.snapshot is not None:
@@ -1951,6 +1948,54 @@ class AIProviderSettingsScreen(NoticeScreen):
         self.query_one(
             f"{prefix}-manage-connection", Button
         ).label = f"Manage {label} connection"
+
+    def _render_machine_policy_transition(self, driver: DriverId) -> None:
+        """Remove the previous provider from the supplemental policy display."""
+
+        self.query_one("#ai-task-policies", TextArea).text = (
+            f"Selected provider: {_driver_label(driver)} [{driver.value}]\n"
+            "Unsaved role assignments: loading recommended defaults for all 8 roles."
+        )
+
+    def _render_project_draft_summary(
+        self, driver: DriverId, *, loading: bool = False
+    ) -> None:
+        """Render only target-provider data for the unsaved project draft."""
+
+        project_settings = self.project_settings
+        if project_settings is None:
+            return
+        if loading:
+            role_lines = "\n".join(
+                f"  {_ROLE_LABELS[task]}: Awaiting assignment" for task in TaskKind
+            )
+            status = "Loading recommended defaults; Save is unavailable"
+        else:
+            role_lines = "\n".join(
+                (
+                    f"  {_ROLE_LABELS[task]}: {assignment[0]} / "
+                    f"{assignment[1].value}"
+                    if (
+                        (assignment := self._project_role_drafts.get(task)) is not None
+                        and self._role_assignment_is_valid(driver, assignment)
+                    )
+                    else f"  {_ROLE_LABELS[task]}: Awaiting assignment"
+                )
+                for task in TaskKind
+            )
+            status = (
+                "Ready to save"
+                if self._role_team_is_valid(driver, self._project_role_drafts)
+                else "Incomplete; Save is unavailable"
+            )
+        self.query_one("#project-ai-summary", TextArea).text = (
+            f"Project: {project_settings.project_path}\n"
+            f"Saved revision: {project_settings.revision}\n"
+            "Scope: unsaved project-specific provider and role team\n"
+            f"Status: {status}\n"
+            f"Selected provider: {driver.value}\n"
+            f"Unsaved role assignments for the next run:\n{role_lines}"
+        )
 
     def _refresh_machine_role_actions(self) -> None:
         snapshot = self.snapshot
@@ -2544,10 +2589,13 @@ class AIProviderSettingsScreen(NoticeScreen):
                 policies = self.proof_app.service.ai_task_policies(driver=driver)
             except Exception as exc:
                 self.proof_app.call_from_thread(
-                    self._complete_notice,
+                    self._record_recommended_role_load_error,
+                    project,
                     notice_generation,
-                    f"Recommended role defaults could not be loaded: {exc}",
-                    error=True,
+                    request_generation,
+                    draft_generation,
+                    driver,
+                    str(exc),
                 )
                 return
             self.proof_app.call_from_thread(
@@ -2565,6 +2613,53 @@ class AIProviderSettingsScreen(NoticeScreen):
             thread=True,
             exclusive=True,
             group=f"{target}-ai-role-defaults",
+        )
+
+    def _record_recommended_role_load_error(
+        self,
+        project: bool,
+        notice_generation: int,
+        request_generation: int,
+        draft_generation: int,
+        expected_driver: DriverId,
+        detail: str,
+    ) -> None:
+        if not self.is_mounted:
+            return
+        active_generation = (
+            self._project_defaults_generation
+            if project
+            else self._machine_defaults_generation
+        )
+        active_draft_generation = (
+            self._project_draft_generation
+            if project
+            else self._machine_draft_generation
+        )
+        selector_id = "#project-ai-driver" if project else "#ai-primary-driver"
+        selector_nodes = self.query(selector_id).nodes
+        if (
+            request_generation != active_generation
+            or draft_generation != active_draft_generation
+            or not selector_nodes
+            or not isinstance(selector_nodes[0], Select)
+            or selector_nodes[0].value is Select.NULL
+            or str(selector_nodes[0].value) != expected_driver.value
+        ):
+            return
+        if project:
+            self._render_project_draft_summary(expected_driver)
+        else:
+            self.query_one("#ai-task-policies", TextArea).text = (
+                f"Selected provider: {_driver_label(expected_driver)} "
+                f"[{expected_driver.value}]\n"
+                "Recommended defaults could not be loaded; assignments remain "
+                "incomplete."
+            )
+        self._complete_notice(
+            notice_generation,
+            f"Recommended role defaults could not be loaded: {detail}",
+            error=True,
         )
 
     def _apply_recommended_role_policies(
@@ -2634,6 +2729,7 @@ class AIProviderSettingsScreen(NoticeScreen):
                 self._project_undo_drafts = dict(self._project_role_drafts)
             self._project_role_drafts = drafts
             self._project_draft_generation += 1
+            self._render_project_draft_summary(expected_driver)
             self._render_project_ai_choices()
             self.query_one("#project-ai-undo-recommended", Button).disabled = (
                 self._project_undo_drafts is None
@@ -2663,6 +2759,10 @@ class AIProviderSettingsScreen(NoticeScreen):
             self._project_draft_generation += 1
             self._project_undo_drafts = None
             self.query_one("#project-ai-undo-recommended", Button).disabled = True
+            driver = DriverId(
+                _select_value(self.query_one("#project-ai-driver", Select))
+            )
+            self._render_project_draft_summary(driver)
             self._render_project_ai_choices()
         else:
             if self._machine_undo_drafts is None:
@@ -2675,23 +2775,25 @@ class AIProviderSettingsScreen(NoticeScreen):
         self.show_notice("Restored the role team from before provider defaults.")
 
     def _render_machine_roster(self) -> None:
-        if set(self._machine_role_drafts) != set(TaskKind):
-            return
         driver = DriverId(_select_value(self.query_one("#ai-primary-driver", Select)))
         selected = TaskKind(_select_value(self.query_one("#ai-role-task", Select)))
         roster = self.query_one("#ai-role-roster", RoleRoster)
-        rows = tuple(
+        rows: tuple[RoleAssignmentRow, ...] = tuple(
             RoleAssignmentRow(
                 task=task,
-                model=self._machine_role_drafts[task][0],
-                effort=self._machine_role_drafts[task][1],
+                model=assignment[0] if assignment is not None and valid else None,
+                effort=(
+                    assignment[1]
+                    if assignment is not None and valid
+                    else Difficulty.AUTO
+                ),
                 state=("Custom" if self._machine_undo_drafts is not None else "Ready")
-                if self._role_assignment_is_valid(
-                    driver, self._machine_role_drafts[task]
-                )
-                else "Needs update",
+                if valid
+                else "Awaiting assignment",
             )
             for task in TaskKind
+            for assignment in (self._machine_role_drafts.get(task),)
+            for valid in (self._role_assignment_is_valid(driver, assignment),)
         )
         if rows != self._machine_roster_signature:
             self._ignore_machine_highlight = selected
@@ -2699,37 +2801,43 @@ class AIProviderSettingsScreen(NoticeScreen):
             self._machine_roster_signature = rows
         elif roster.selected_task is not selected:
             roster.select_task(selected)
-        model, effort = self._machine_role_drafts[selected]
+        assignment = self._machine_role_drafts.get(selected)
+        valid = self._role_assignment_is_valid(driver, assignment)
+        model, effort = (
+            assignment if valid and assignment is not None else (None, Difficulty.AUTO)
+        )
         self.query_one("#ai-role-detail", SelectedRoleDetail).update_role(
             task=selected,
             model=model,
             effort=effort,
             state=(
                 "Complete machine assignment"
-                if self._role_assignment_is_valid(driver, (model, effort))
-                else "Needs update for selected provider"
+                if valid
+                else "Awaiting assignment for selected provider"
             ),
         )
 
     def _render_project_roster(self) -> None:
-        if set(self._project_role_drafts) != set(TaskKind):
-            return
         selected = TaskKind(_select_value(self.query_one("#project-ai-role", Select)))
         inherited = self.project_settings is None or self.project_settings.inherited
         driver = DriverId(_select_value(self.query_one("#project-ai-driver", Select)))
         roster = self.query_one("#project-ai-role-roster", RoleRoster)
-        rows = tuple(
+        rows: tuple[RoleAssignmentRow, ...] = tuple(
             RoleAssignmentRow(
                 task=task,
-                model=self._project_role_drafts[task][0],
-                effort=self._project_role_drafts[task][1],
+                model=assignment[0] if assignment is not None and valid else None,
+                effort=(
+                    assignment[1]
+                    if assignment is not None and valid
+                    else Difficulty.AUTO
+                ),
                 state=("Inherited" if inherited else "Project custom")
-                if self._role_assignment_is_valid(
-                    driver, self._project_role_drafts[task]
-                )
-                else "Needs update",
+                if valid
+                else "Awaiting assignment",
             )
             for task in TaskKind
+            for assignment in (self._project_role_drafts.get(task),)
+            for valid in (self._role_assignment_is_valid(driver, assignment),)
         )
         if rows != self._project_roster_signature:
             self._ignore_project_highlight = selected
@@ -2737,14 +2845,18 @@ class AIProviderSettingsScreen(NoticeScreen):
             self._project_roster_signature = rows
         elif roster.selected_task is not selected:
             roster.select_task(selected)
-        model, effort = self._project_role_drafts[selected]
+        assignment = self._project_role_drafts.get(selected)
+        valid = self._role_assignment_is_valid(driver, assignment)
+        model, effort = (
+            assignment if valid and assignment is not None else (None, Difficulty.AUTO)
+        )
         self.query_one("#project-ai-role-detail", SelectedRoleDetail).update_role(
             task=selected,
             model=model,
             effort=effort,
             state=("Inherited" if inherited else "Complete project assignment")
-            if self._role_assignment_is_valid(driver, (model, effort))
-            else "Needs update for selected provider",
+            if valid
+            else "Awaiting assignment for selected provider",
         )
 
     def _render_machine_role_choices(self) -> None:
@@ -2873,6 +2985,8 @@ class AIProviderSettingsScreen(NoticeScreen):
             current[1] if current is not None else Difficulty.AUTO,
         )
         self._project_draft_generation += 1
+        driver = DriverId(_select_value(self.query_one("#project-ai-driver", Select)))
+        self._render_project_draft_summary(driver)
         self._render_project_role_difficulties()
         self._render_project_roster()
 
@@ -2886,6 +3000,8 @@ class AIProviderSettingsScreen(NoticeScreen):
         )
         self._project_role_drafts[task] = (model, difficulty)
         self._project_draft_generation += 1
+        driver = DriverId(_select_value(self.query_one("#project-ai-driver", Select)))
+        self._render_project_draft_summary(driver)
         self._render_project_roster()
 
     def _load_task_policies(self) -> None:

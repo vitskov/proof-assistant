@@ -463,6 +463,118 @@ def test_cli_drivers_are_isolated_and_do_not_put_prompts_in_argv(
         assert input_text is None
 
 
+def test_claude_cli_accepts_current_json_event_array(tmp_path: Path) -> None:
+    stdout = json.dumps(
+        [
+            {
+                "type": "system",
+                "subtype": "init",
+                "session_id": "claude-session",
+            },
+            {
+                "type": "result",
+                "subtype": "success",
+                "session_id": "claude-session",
+                "result": "done",
+            },
+        ]
+    )
+    command = FakeCommand(CommandResult(0, stdout, ""))
+    backend = AIBackend(
+        AIBackendConfig(
+            driver=DriverId.CLAUDE_CLI,
+            model="fable",
+            difficulty=Difficulty.XHIGH,
+            provider_config_path=tmp_path / "providers.json",
+        ),
+        command_runner=command,
+    )
+
+    result = backend.run(
+        system_prompt="system",
+        user_prompt="prove",
+        tools=TOOLS,
+        tool_handler=lambda _name, _args: "ok",
+    )
+
+    assert result.final_text == "done"
+    assert result.thread_id == "claude-session"
+    assert result.model == "fable"
+    assert result.effort == "xhigh"
+    assert [event["type"] for event in result.events] == ["system", "result"]
+    argv = command.calls[0][0]
+    assert argv[argv.index("--model") + 1] == "fable"
+    assert argv[argv.index("--effort") + 1] == "xhigh"
+
+
+def test_claude_cli_surfaces_expired_auth_without_dumping_event_transcript(
+    tmp_path: Path,
+) -> None:
+    stdout = json.dumps(
+        [
+            {"type": "system", "subtype": "init", "session_id": "session"},
+            {
+                "type": "result",
+                "error": "authentication_failed",
+                "result": "Failed to authenticate: OAuth session expired",
+            },
+        ]
+    )
+    command = FakeCommand(CommandResult(1, stdout, "non-fatal update warning"))
+    backend = AIBackend(
+        AIBackendConfig(
+            driver=DriverId.CLAUDE_CLI,
+            model="haiku",
+            difficulty=Difficulty.LOW,
+            provider_config_path=tmp_path / "providers.json",
+        ),
+        command_runner=command,
+    )
+
+    with pytest.raises(ProviderAuthenticationRequired) as caught:
+        backend.run(
+            system_prompt="system",
+            user_prompt="prove",
+            tools=TOOLS,
+            tool_handler=lambda _name, _args: "ok",
+        )
+
+    assert "OAuth session expired" in str(caught.value)
+    assert '"type": "system"' not in str(caught.value)
+    assert "update warning" not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "message",
+    (
+        "Not logged in — Please run /login",
+        "Login expired — Please run /login",
+        "Missing auth token",
+    ),
+)
+def test_claude_cli_current_login_errors_require_authentication(
+    tmp_path: Path, message: str
+) -> None:
+    command = FakeCommand(CommandResult(1, "", message))
+    backend = AIBackend(
+        AIBackendConfig(
+            driver=DriverId.CLAUDE_CLI,
+            model="haiku",
+            difficulty=Difficulty.LOW,
+            provider_config_path=tmp_path / "providers.json",
+        ),
+        command_runner=command,
+    )
+
+    with pytest.raises(ProviderAuthenticationRequired, match="login|logged in|token"):
+        backend.run(
+            system_prompt="system",
+            user_prompt="prove",
+            tools=TOOLS,
+            tool_handler=lambda _name, _args: "ok",
+        )
+
+
 def test_stdio_mcp_bridge_forwards_only_declared_tools(tmp_path: Path) -> None:
     host = AdmittedToolHost(
         lambda name, args: f"{name}:{args['code']}",

@@ -266,17 +266,18 @@ complete resulting role matrix remains visible. Applying recommendations edits
 a draft, reports how many assignments changed, and offers Undo. It does not
 persist until Save.
 
-Changing the provider for a scope changes only the provider in the current
-draft and leaves the eight assignments untouched. The provider control and its
-**Use recommended _provider_ defaults for all 8 roles** action stay together
-above the roster and remain visible without page scrolling. Incompatible role
-assignments are marked **Needs update** and Save remains unavailable until the
-user either replaces them individually or applies the complete defaults matrix
-in one generation-checked operation. **Undo defaults** restores the immediately
-preceding complete draft. Provider changes never silently rewrite role
-assignments, and stale results from a previously selected provider are
-discarded. Recommendation Undo exists until the draft is saved, discarded, or
-replaced by another recommendation operation.
+Changing the provider for a scope is an atomic provider-and-team transition.
+The old provider's assignments disappear immediately, neutral **Awaiting
+assignment** rows hold the stable geometry, and a complete capability-checked
+default matrix loads for the new provider. No foreign model identifier may
+remain visible, selectable, savable, or dispatchable during that transition.
+The provider control and its **Use recommended _provider_ defaults for all 8
+roles** action stay together above the roster and remain visible without page
+scrolling. Save remains unavailable until all eight new-provider assignments
+are valid. The defaults button can reset later same-provider customizations;
+**Undo defaults** restores only the immediately preceding complete team for
+that same provider. A provider switch clears Undo, and stale asynchronous
+results from a previously selected provider are discarded.
 
 ### Scope is always explicit
 

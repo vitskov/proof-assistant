@@ -250,8 +250,14 @@ The UI displays all eight rows together: author clarification; scan / triage
 diagnostics; primary prove agent; sketch agent; maintain / fix agent; math and
 engineering reviewers; independent prove agent; and progress / reporting
 agent. Proof Assistant's current incremental execution actively uses the
-primary proof and clarification assignments. It freezes all eight so later
-RepoProver role dispatch cannot silently inherit one global model.
+primary proof assignment, the diagnostic assignment for clarification
+root-cause analysis, and the author-clarification assignment for its final
+narration. One selected provider owns the complete team. Saving and job
+submission validate every model and effort
+against that provider's current catalog before anything is persisted or
+spawned. It freezes all eight so a running job cannot change when future
+machine or project settings change, and later RepoProver role dispatch cannot
+silently inherit one global model.
 
 Supported difficulty names are:
 
@@ -269,9 +275,9 @@ Selection precedence is deterministic:
 ```text
 explicit settings supplied for one run
   > project provider + per-role model/difficulty override
-  > machine task/provider policy
+  > machine provider + per-role model/difficulty policy
 
-task-specific driver       > machine primary driver
+one selected provider owns every role in the effective team
 task-specific model        > provider model       > task recommendation
 task-specific difficulty   > provider difficulty  > task recommendation
 ```
@@ -283,23 +289,26 @@ project**. Provider connections and credentials remain machine-owned in either
 scope; Save, navigation, and Quit therefore guard the machine connection draft
 even if **This project** was the last role-assignment scope.
 
-Changing the provider creates an unsaved scope draft and does not silently
-rewrite role assignments. The adjacent **Use recommended _provider_ defaults
-for all 8 roles** button replaces the complete matrix with capability-checked
-defaults in one step. Incompatible assignments are marked **Needs update** and
-cannot be saved until they are replaced. **Undo defaults** is a one-level draft
-undo: it restores the assignments that existed before the defaults operation,
-and neither operation persists anything until the matching **Save machine
-team** or **Save project team** action succeeds.
+Changing the provider immediately clears the previous provider's visible role
+assignments and loads a complete capability-checked matrix for the new provider.
+The roster shows neutral **Awaiting assignment** placeholders during the load;
+foreign model identifiers are never displayed beneath the selected provider,
+and Save remains unavailable until all eight assignments are valid. The
+adjacent **Use recommended _provider_ defaults for all 8 roles** button resets
+later same-provider customizations. **Undo defaults** restores only the complete
+same-provider draft that preceded that reset; switching providers clears Undo.
+Nothing persists until the matching **Save machine team** or **Save project
+team** action succeeds.
 From an existing project's dashboard, the project scope can save a
 project-only provider plus complete role matrix or select **Use machine
 defaults** to remove the override. The override is stored in
 `.repoprover/verification-settings.json`; it never contains credentials. It is
 resolved when a verification is submitted, and the resulting settings are
 frozen in the durable job, so changing the panel does not mutate a running job.
-Clarification analysis and its optional narrator use the same frozen
-clarification-role assignment; Proof Assistant does not cross providers or
-silently borrow a different role's model for that question.
+Clarification root-cause analysis uses the frozen diagnostic-role assignment;
+its optional author-facing narrator uses the separate frozen clarification
+role. Proof Assistant does not cross providers or silently borrow another
+role's model for either turn.
 If a saved model later disappears, a CLI is downgraded, or authentication
 expires, Settings keeps the stored revision visible and allows **Use machine
 defaults**; Proof Assistant blocks a new run instead of silently substituting a

@@ -11,7 +11,20 @@ from types import SimpleNamespace
 
 import pytest
 
-from proof_assistant.ai import DriverId, ProviderConfig
+from proof_assistant.ai import (
+    AuthenticationState,
+    Difficulty,
+    DiscoverySource,
+    DriverId,
+    DriverStatus,
+    DriverTransport,
+    InstallationState,
+    ModelCatalog,
+    ModelDescriptor,
+    ProviderConfig,
+    ProviderService,
+    TaskKind,
+)
 from proof_assistant.ai.config import MachineProviderConfigStore
 from proof_assistant.cli import build_parser
 from proof_assistant.incremental.locking import (
@@ -27,6 +40,7 @@ from proof_assistant.workflow.contracts import (
     ProgressEvent,
     ProgressPhase,
     VerificationJobState,
+    VerificationRoleSettings,
     VerificationSettings,
     WorkflowServiceContract,
     WorkflowState,
@@ -38,6 +52,71 @@ from proof_assistant.workflow.service import (
     VerificationJobNotCancellableError,
 )
 from proof_assistant.workspace.management import ProjectManager
+
+
+class _StaticProviderService(ProviderService):
+    """Authenticated provider contract for worker lifecycle tests."""
+
+    def inspect_driver(self, driver, *, preference=None, discover_models=True):
+        del preference
+        catalog = (
+            ModelCatalog(
+                driver=driver,
+                models=tuple(
+                    ModelDescriptor(
+                        model_id=model,
+                        display_name=model,
+                        difficulties=tuple(Difficulty),
+                    )
+                    for model in ("test", "different")
+                ),
+                source=DiscoverySource.CURATED_FALLBACK,
+                detail="Static worker lifecycle test catalog.",
+                contract_approved=True,
+            )
+            if discover_models
+            else None
+        )
+        transport = (
+            DriverTransport.API
+            if driver.value.endswith("_api")
+            else DriverTransport.CLI
+        )
+        return DriverStatus(
+            driver=driver,
+            transport=transport,
+            installation=(
+                InstallationState.NOT_APPLICABLE
+                if transport is DriverTransport.API
+                else InstallationState.INSTALLED
+            ),
+            authentication=AuthenticationState.AUTHENTICATED,
+            executable=None if transport is DriverTransport.API else f"/{driver.value}",
+            version="static-test-provider",
+            catalog=catalog,
+        )
+
+
+def _settings(
+    *,
+    driver: DriverId = DriverId.CODEX_CLI,
+    model: str = "test",
+) -> VerificationSettings:
+    roles = tuple(
+        VerificationRoleSettings(
+            task=task,
+            ai_driver=driver.value,
+            model=model,
+            effort=Difficulty.HIGH.value,
+        )
+        for task in TaskKind
+    )
+    return VerificationSettings(
+        ai_driver=driver.value,
+        model=model,
+        effort=Difficulty.HIGH.value,
+        role_settings=roles,
+    )
 
 
 def _workflow(
@@ -53,10 +132,17 @@ def _workflow(
         r"\end{document}",
         encoding="utf-8",
     )
+    provider_store = MachineProviderConfigStore(
+        provider_config_path or tmp_path / "providers.json"
+    )
     service = ProofAssistantWorkflow(
         catalog_root=tmp_path / "catalog",
         machine_config_path=tmp_path / "settings.yaml",
-        provider_config_path=provider_config_path,
+        provider_service=_StaticProviderService(
+            config_store=provider_store,
+            environment={},
+            home=tmp_path,
+        ),
         use_codex_clarification=False,
     )
     # These tests exercise detached-worker and mutation-lease behavior, not the
@@ -111,13 +197,13 @@ def test_start_is_detached_idempotent_and_conflicts_on_different_request(
     )
     try:
         first = service.start_verification(
-            project, None, VerificationSettings(model="test")
+            project, None, _settings(driver=DriverId.ANTHROPIC_API)
         )
         replacement_client = ProofAssistantWorkflow(
             catalog_root=tmp_path / "catalog", use_codex_clarification=False
         )
         attached = replacement_client.start_verification(
-            project, None, VerificationSettings(model="test")
+            project, None, _settings(driver=DriverId.ANTHROPIC_API)
         )
 
         assert first.started is True
@@ -154,7 +240,9 @@ def test_start_is_detached_idempotent_and_conflicts_on_different_request(
 
         with pytest.raises(VerificationJobConflictError) as raised:
             service.start_verification(
-                project, None, VerificationSettings(model="different")
+                project,
+                None,
+                _settings(driver=DriverId.ANTHROPIC_API, model="different"),
             )
         assert raised.value.observation.job.job_id == first.job.job_id
     finally:
@@ -246,7 +334,7 @@ def test_concurrent_equivalent_submissions_spawn_exactly_one_worker(
     monkeypatch.setattr(
         "proof_assistant.workflow.service.subprocess.Popen", processes.popen
     )
-    settings = VerificationSettings(model="test")
+    settings = _settings()
     try:
         with ThreadPoolExecutor(max_workers=2) as pool:
             observations = tuple(
@@ -272,7 +360,7 @@ def test_progress_cursor_cancel_and_crash_reconciliation_are_durable(
         "proof_assistant.workflow.service.subprocess.Popen", processes.popen
     )
     started = service.start_verification(
-        project, None, VerificationSettings(model="test")
+        project, None, _settings()
     )
     store = VerificationJobStore(project)
     stored = store.append_event(
@@ -313,7 +401,7 @@ def test_starting_worker_lease_blocks_project_deletion(tmp_path, monkeypatch):
         "proof_assistant.workflow.service.subprocess.Popen", processes.popen
     )
     try:
-        service.start_verification(project, None, VerificationSettings(model="test"))
+        service.start_verification(project, None, _settings())
         inspection = service.inspect_project_deletion(project)
         assert inspection.availability == "BUSY"
         assert "mutation lease" in (inspection.issue or "")
@@ -398,7 +486,7 @@ def test_launch_failure_is_terminal_and_releases_mutation_lease(tmp_path, monkey
     )
 
     with pytest.raises(OSError, match="exec unavailable"):
-        service.start_verification(project, None, VerificationSettings(model="test"))
+        service.start_verification(project, None, _settings())
 
     job = VerificationJobStore(project).latest()
     assert job is not None
@@ -424,7 +512,7 @@ def test_post_spawn_status_write_failure_never_releases_child_lease(
     monkeypatch.setattr(VerificationJobStore, "record_spawn", fail_record_spawn)
     try:
         observation = service.start_verification(
-            project, None, VerificationSettings(model="test")
+            project, None, _settings()
         )
         assert observation.started is True
         assert worker_lease_active(project) is True

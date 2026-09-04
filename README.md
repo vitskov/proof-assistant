@@ -94,9 +94,10 @@ verification team with one provider for the selected scope, plus a model and
 reasoning effort for each role. Its scope switch makes **Machine defaults** and
 **This project** explicit. The
 provider switch and **Use recommended _provider_ defaults for all 8 roles**
-button stay above the roster; the button fills the complete team in one step,
-and **Undo defaults** restores the previous draft before you save. Every role's
-model menu is limited to the selected provider. When the
+button stay above the roster. Switching providers immediately removes the old
+provider's assignments and loads a complete recommended team; the button resets
+later customizations, and **Undo defaults** restores only a same-provider draft.
+Every role's model menu is limited to the selected provider. When the
 installed Claude Code CLI supports it, Claude defaults use Fable with
 extra-high effort for both **Author clarification** and the **Independent prove
 agent**. Credentials remain machine-owned, and each submitted job freezes its

@@ -1,16 +1,21 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from proof_assistant.ai import TaskKind
+from proof_assistant.ai import Difficulty, DriverId, TaskKind
+from proof_assistant.ai.execution import AIBackendConfig
 from proof_assistant.incremental.models import ManuscriptEdge
 from proof_assistant.incremental.session import IncrementalSession
 from proof_assistant.incremental.store import StateStore
 from proof_assistant.presentation.clarification_analysis import validate_analysis
-from proof_assistant.presentation.clarifications import ClarificationPresenter
+from proof_assistant.presentation.clarifications import (
+    ClarificationPresenter,
+    IsolatedAIClarificationNarrator,
+)
 from proof_assistant.workflow.contracts import (
     ClarificationAnalysisStatus,
     ClarificationOrigin,
@@ -452,19 +457,55 @@ def test_clarification_origin_cannot_be_rewritten(tmp_path):
             )
 
 
-def test_presenter_consumes_exact_frozen_clarification_role(tmp_path):
+def test_presenter_consumes_exact_frozen_clarification_and_diagnostic_roles(tmp_path):
     _source, project, workflow = setup_project(tmp_path)
     workflow.use_codex_clarification = True
-    role = VerificationRoleSettings(
+    clarification_role = VerificationRoleSettings(
         task=TaskKind.CLARIFICATION,
         ai_driver="claude_cli",
         model="fable",
         effort="xhigh",
     )
+    diagnostic_role = VerificationRoleSettings(
+        task=TaskKind.DIAGNOSTIC,
+        ai_driver="claude_cli",
+        model="opus",
+        effort="high",
+    )
 
-    presenter = workflow._presenter(project, role=role)
+    presenter = workflow._presenter(
+        project,
+        clarification_role=clarification_role,
+        diagnostic_role=diagnostic_role,
+    )
 
+    assert isinstance(presenter.narrator, IsolatedAIClarificationNarrator)
+    assert presenter.narrator.config.driver_id.value == "claude_cli"
+    assert presenter.narrator.config.model == "fable"
+    assert presenter.narrator.config.difficulty_id.value == "xhigh"
+    assert presenter.narrator.config.task_kind is TaskKind.CLARIFICATION
     assert presenter.analyzer is not None
     assert presenter.analyzer.provider == "claude_cli"
-    assert presenter.analyzer.model == "fable"
-    assert presenter.analyzer.effort == "xhigh"
+    assert presenter.analyzer.model == "opus"
+    assert presenter.analyzer.effort == "high"
+    assert presenter.analyzer.config.task_kind is TaskKind.DIAGNOSTIC
+
+
+def test_clarification_analyzer_requires_diagnostic_task_kind(tmp_path):
+    from proof_assistant.presentation.clarification_analysis import (
+        IsolatedAIClarificationAnalyzer,
+    )
+
+    config = AIBackendConfig(
+        driver=DriverId.CLAUDE_CLI,
+        model="opus",
+        difficulty=Difficulty.HIGH,
+        task_kind=TaskKind.DIAGNOSTIC,
+    )
+
+    analyzer = IsolatedAIClarificationAnalyzer(config, cwd=tmp_path)
+    assert analyzer.config.task_kind is TaskKind.DIAGNOSTIC
+    with pytest.raises(ValueError, match="diagnostic role"):
+        IsolatedAIClarificationAnalyzer(
+            replace(config, task_kind=TaskKind.CLARIFICATION), cwd=tmp_path
+        )

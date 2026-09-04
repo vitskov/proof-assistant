@@ -58,7 +58,10 @@ async def _open_role_assignments(pilot: Pilot[None], theme: str) -> None:
     await wait_for(pilot, lambda: isinstance(app.screen, AIProviderSettingsScreen))
     await wait_for(
         pilot,
-        lambda: app.screen.query_one("#ai-role-roster", RoleRoster).row_count == 8,
+        lambda: (
+            set(app.screen._machine_role_drafts) == set(TaskKind)
+            and app.screen.query_one("#ai-role-roster", RoleRoster).row_count == 8
+        ),
     )
     await pilot.pause()
     roster = app.screen.query_one("#ai-role-roster", RoleRoster)
