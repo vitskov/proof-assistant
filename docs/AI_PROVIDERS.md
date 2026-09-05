@@ -133,6 +133,9 @@ PROJECT/.repoprover/verification-settings.json
 
 Neither file contains login secrets. Provider and role choices are validated,
 locked, and atomically replaced before they can be used by a future job.
+Both files must remain outside Dropbox: Dropbox is accepted only as a read-only
+external manuscript source, never as a destination for configuration or any
+other Proof Assistant-created file.
 
 ## Troubleshooting
 

@@ -84,10 +84,11 @@ projects and Dropbox; it does not become project state. Its normal location is
 `XDG_CONFIG_HOME` location. A Dropbox-backed or managed-project XDG location is
 ignored in favor of the home-local path.
 
-The source may be in Dropbox. In that case the TUI warns that synchronization
-can expose intermediate multi-file saves. It still permits the source because
-the importer waits for a stable inventory, stages a complete copy, re-hashes
-it, and asks you to review changes before verification.
+The source may be in Dropbox only as read-only input. In that case the TUI warns
+that synchronization can expose intermediate multi-file saves. It still
+permits the source because the importer waits for a stable inventory, stages a
+complete copy outside Dropbox, re-hashes it, and asks you to review changes
+before verification.
 
 ### 2. Select the main LaTeX file
 
@@ -126,10 +127,12 @@ Give the project a name. Unless changed, it is created at:
 $HOME/proof-assistant/<project-name>
 ```
 
-The project must not be in Dropbox. It contains durable Git history, database
-state, imported source snapshots, Lean code, certificates, questions, and
-reports. Do not edit its managed manuscript copy; edit the external source
-selected in step 1.
+The project must not be in Dropbox. More generally, Proof Assistant never
+writes work directories, managed projects, generated or copied state, caches,
+Lake artifacts, worktrees, reports, logs, snapshots, temporary files, exports,
+configuration, environments, or installation source into Dropbox. A requested
+Dropbox work or output destination is prohibited by design. Do not edit the
+managed manuscript copy; edit the external source selected in step 1.
 
 ### 4. Define the task
 
@@ -146,10 +149,11 @@ There is no external task file to select, keep synchronized, or edit.
 ### 5. Create and verify
 
 Review the entered source, selected main file, destination, task choice, and
-Dropbox notices. No managed project has been created at this point. Choose
-**Confirm, create, and verify** to create a stable initial import, resolve the
-main file's input closure, and start the first verification pass. Going back
-preserves the setup form and custom task; for multi-root manuscripts it also
+Dropbox notices. A Dropbox source is read-only, and any Dropbox work/output
+destination is rejected. No managed project has been created at this point.
+Choose **Confirm, create, and verify** to create a stable initial import,
+resolve the main file's input closure, and start the first verification pass.
+Going back preserves the setup form and custom task; for multi-root manuscripts it also
 preserves the selected main file.
 
 ## Verification progress
@@ -356,9 +360,9 @@ backend-owned operation, not a recursive deletion performed by the TUI:
 The external manuscript folder is never moved or modified, including when it
 is in Dropbox. A running project is reported as **BUSY** and cannot be moved.
 Incomplete projects, unrelated occupied paths, overlapping source/project
-configurations, Dropbox-managed paths, and unsafe recovery locations are
-refused. On macOS the recovery area is the user's `~/.Trash`; on other systems
-it is the Proof Assistant-owned
+configurations, every Dropbox work/output path, and unsafe recovery locations
+are refused as prohibited by design. On macOS the recovery area is the user's
+`~/.Trash`; on other systems it is the Proof Assistant-owned
 `$XDG_DATA_HOME/proof-assistant/recoverable-trash`. The result screen shows the
 exact recovery path. The project remains recoverable until that returned path
 is manually removed (or, on macOS, Trash is emptied).

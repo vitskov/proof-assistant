@@ -667,6 +667,15 @@ the compact sequential composition rather than squeezing the richer layout.
 - Make entire semantic list rows selectable when the row represents navigation.
 - Destructive actions stay separated from ordinary row activation.
 
+### Dropbox write boundary
+
+Dropbox is permitted only as a read-only external manuscript source. No Proof
+Assistant work directory, managed project, generated or copied state, cache,
+Lake artifact, worktree, report, log, snapshot, temporary file, export,
+configuration, environment, or installation source may be written there. A
+Dropbox work or output destination is rejected as prohibited by design; the UI
+must explain that boundary and direct the user to a local path outside Dropbox.
+
 ## Screen geometry and redesign map
 
 | Surface | Primary workspace | Growth risk | Target structure | Priority |

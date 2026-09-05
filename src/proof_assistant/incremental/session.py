@@ -25,6 +25,11 @@ from ..workspace.management import (
     ProjectConfigurationError,
     load_or_migrate_project_config,
 )
+from ..workspace.paths import (
+    ProofAssistantWritePathError,
+    validate_managed_project_path,
+    validate_proof_assistant_write_path,
+)
 from .graph import (
     affected_claims,
     build_graph,
@@ -298,7 +303,9 @@ class IncrementalSession:
     """Persistent deterministic control plane for manuscript verification."""
 
     def __init__(self, project: Path) -> None:
-        self.project = project.expanduser().resolve()
+        # Sessions create state, snapshots, exports, and Lake inputs; enforce
+        # the managed-project boundary before any command can write.
+        self.project = validate_managed_project_path(project)
         self.state_root = self.project / ".repoprover"
         self.config_path = self.state_root / "config.json"
         self.database_path = self.state_root / "state.sqlite3"
@@ -320,7 +327,12 @@ class IncrementalSession:
         main_file: str,
     ) -> IncrementalSession:
         source = Path(manuscript).expanduser().resolve()
-        destination = Path(project).expanduser().resolve()
+        try:
+            destination = validate_proof_assistant_write_path(
+                project, purpose="Managed Proof Assistant projects"
+            )
+        except ProofAssistantWritePathError as exc:
+            raise IncrementalProjectError(str(exc)) from exc
         if not source.is_dir():
             raise ManuscriptInputError(f"Manuscript directory does not exist: {source}")
         if _is_within(destination, source) or _is_within(source, destination):

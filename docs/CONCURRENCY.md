@@ -237,7 +237,12 @@ $HOME/.config/proof-assistant/settings.yaml
 
 The file declares `scope: MACHINE`, uses an atomic revisioned update, and is
 written with mode `0600`. Proof Assistant refuses a custom machine-settings
-path under Dropbox. Use the TUI to update it; if it must be edited by hand,
+path under Dropbox. This follows the system-wide rule that Dropbox is read-only
+manuscript-source storage: no Proof Assistant work directory, managed project,
+generated or copied state, cache, Lake artifact, worktree, report, log,
+snapshot, temporary file, export, configuration, environment, or installation
+source may be written there. Dropbox work/output destinations are prohibited by
+design. Use the TUI to update settings; if the file must be edited by hand,
 close settings clients and increment the revision so later compare-and-swap
 updates cannot mistake it for the previous version.
 
@@ -433,7 +438,7 @@ $HOME/.cache/repoprover-codex/concurrency/admission.sqlite3
 The older `repoprover-codex` cache root is retained deliberately after the
 product rename so an installed machine does not create a second multi-gigabyte
 Mathlib depot. The cache and Python environment must remain local and outside
-Dropbox.
+Dropbox, as must all other mutable Proof Assistant state.
 
 Admission, priority ordering, limits, and lease creation are transactional.
 Leases have a TTL and heartbeat; expired leases and abandoned waiters are
@@ -544,6 +549,8 @@ Concurrency changes do not weaken verification:
 - host merges, source snapshots, state transitions, and final integration stay
   serialized or transactional where required;
 - separate worktrees prevent proof workers from writing the same checkout;
+- every mutable controller path, worktree, temporary file, log, report, and
+  snapshot remains outside Dropbox;
 - pressure adaptation changes admission only, not proof semantics;
 - reducing a limit lets admitted work reach a safe boundary;
 - fixed mode makes resource limits reproducible without disabling final

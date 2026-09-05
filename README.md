@@ -150,9 +150,14 @@ other files.
 Only this resolved source closure is interpreted as the manuscript, so an
 alternate paper or orphaned draft in the same folder is not silently verified.
 
-The source may be in Dropbox: Proof Assistant warns you, waits for a stable
-multi-file snapshot, and copies the files into its managed project. The managed
-project, Python environment, and Lean cache must remain outside Dropbox.
+Dropbox is a read-only source boundary. A manuscript source may be in Dropbox:
+Proof Assistant warns you, waits for a stable multi-file snapshot, and reads it
+into a local managed project. Proof Assistant never writes work directories,
+managed projects, generated or copied state, caches, Lake artifacts, worktrees,
+reports, logs, snapshots, temporary files, exports, configuration,
+environments, or installation source into Dropbox. Selecting a Dropbox work or
+output destination is prohibited by design; choose a local path outside
+Dropbox.
 
 Choose **Use default task** to check every theorem-like claim, or **Customize
 task** to edit the request inside the TUI. The resulting task is owned and

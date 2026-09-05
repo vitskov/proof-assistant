@@ -437,8 +437,16 @@ def prepare_manuscript_workspace(
     task_file: str | Path,
 ) -> ManuscriptWorkspace:
     """Copy inputs into a new, isolated, Git-backed verification workspace."""
+    # Import lazily: workspace.source imports this module for shared constants.
+    from .workspace.paths import ProofAssistantWritePathError, validate_proof_assistant_write_path
+
     source = Path(manuscript).expanduser().resolve()
-    destination = Path(output).expanduser().resolve()
+    try:
+        destination = validate_proof_assistant_write_path(
+            output, purpose="Manuscript-run work and output"
+        )
+    except ProofAssistantWritePathError as exc:
+        raise ManuscriptInputError(str(exc)) from exc
     if not source.is_dir():
         raise ManuscriptInputError(f"Manuscript directory does not exist: {source}")
     _validate_source_symlinks(source)

@@ -123,6 +123,12 @@ implicit meaning or mutable UI objects.
   triggers an atomic rollback. Project/source/recovery overlap, Dropbox-managed
   paths, active writers, and non-project paths fail closed. The TUI only invokes
   these two methods; it has no filesystem-deletion authority.
+- Dropbox is a read-only source boundary. External manuscript files may be read
+  there, but no Proof Assistant work directory, managed project, generated or
+  copied state, cache, Lake artifact, worktree, report, log, snapshot,
+  temporary file, export, configuration, environment, or installation source
+  may be written there. Dropbox work/output destinations fail closed as
+  prohibited by design.
 - `ProjectSummary` and `ChangeImpactPlan` expose the persisted main file and
   its ordered, resolved input closure. A UI therefore renders the exact backend
   interpretation rather than reconstructing inclusion topology.
@@ -358,3 +364,5 @@ Compatible Mathlib/REPL dependencies share the established depot under
 root builds. Reservations, OS leases, a coarse SQLite index, atomic quarantine,
 and one deadline per GC pass protect active data and bound cleanup work. See
 [Cache and storage](CACHE_AND_STORAGE.md).
+All of these mutable paths resolve outside Dropbox; only the external
+manuscript source may be read from Dropbox.

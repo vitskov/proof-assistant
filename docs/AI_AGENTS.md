@@ -17,10 +17,13 @@ source, tests, and maintained docs supersede historical handoff notes.
 - Python environment: `$HOME/.venvs/proof-assistant`.
 - Managed projects: `$HOME/proof-assistant/<project-name>` by default.
 - Cache: exactly `$HOME/.cache/repoprover-codex` unless explicitly configured.
-- Never put Python environments, managed projects, or Lean/Lake/Mathlib caches
-  in Dropbox.
-- An external manuscript source may be in Dropbox; warn and use stable staged
-  import rather than rejecting it.
+- Treat Dropbox as read-only input storage. An external manuscript source may
+  be read there, with the stable-source warning and import contract.
+- Never write Proof Assistant work directories, managed projects, generated or
+  copied state, caches, Lake artifacts, worktrees, reports, logs, snapshots,
+  temporary files, exports, configuration, environments, or installation
+  source into Dropbox. Requested Dropbox work or output destinations are
+  prohibited by design.
 - Every installer must compile and execute a native program.
 
 Keeping the old cache name is intentional and prevents a duplicate

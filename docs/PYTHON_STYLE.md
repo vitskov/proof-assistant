@@ -6,7 +6,9 @@ cleanup performed at the end of a change.
 
 ## Required local gates
 
-Run the same checks as CI from an external `uv` environment:
+Run the same checks as CI from an external `uv` environment outside Dropbox.
+Dropbox is read-only manuscript-source storage and must not receive test,
+build, environment, cache, or temporary output:
 
 ```bash
 uv run --no-sync ruff check src tests scripts

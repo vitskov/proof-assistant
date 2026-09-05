@@ -126,10 +126,13 @@ recognized Proof Assistant PATH marker. The original is retained as
 `.bash_profile.proof-assistant-backup`. Any unrelated content prevents that
 migration.
 
-The Python environment, toolchains, managed source, RepoProver checkout,
-managed verification projects, and cache must remain outside Dropbox. A LaTeX
-source folder may be in Dropbox because Proof Assistant imports a stable copy
-into its local project.
+Dropbox may be used only as a read-only LaTeX source. Proof Assistant never
+writes work directories, managed projects, generated or copied state, caches,
+Lake artifacts, worktrees, reports, logs, snapshots, temporary files, exports,
+configuration, environments, or installation source into Dropbox. A requested
+Dropbox work or output destination is prohibited by design. The source is read
+through the stable-source contract and all resulting state is written to local
+paths outside Dropbox.
 
 Default locations:
 
@@ -162,7 +165,8 @@ supplied checkout. It never pushes to the upstream RepoProver repository.
 Other optional location overrides are `PROOF_ASSISTANT_SOURCE_DIR`,
 `PROOF_ASSISTANT_VENV`, `PROOF_ASSISTANT_CACHE_HOME`,
 `PROOF_ASSISTANT_ELAN_HOME`, and `PROOF_ASSISTANT_UV_HOME`. Override paths must
-be absolute and resolve outside Dropbox.
+be absolute and resolve outside Dropbox; Dropbox destinations are prohibited by
+design even when supplied explicitly.
 
 ## Validate
 

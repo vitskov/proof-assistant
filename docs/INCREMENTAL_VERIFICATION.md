@@ -25,12 +25,16 @@ project/
     └── runs/000001/               # diff, diagnostics, model/build evidence
 ```
 
-The author edits the original manuscript folder, never the project copy. The
-source may be in Dropbox, but the managed project may not. A stable-source
-observer inventories the entire filtered source tree twice, stages and
-re-hashes its copy, and asks for explicit change-plan confirmation. The backend
-then snapshots it into a private bare Git repository and atomically updates
-`project/manuscript/` from that exact commit.
+The author edits the original manuscript folder, never the project copy.
+Dropbox may hold that folder only as a read-only source. Proof Assistant never
+writes work directories, managed projects, generated or copied state, caches,
+Lake artifacts, worktrees, reports, logs, snapshots, temporary files, exports,
+configuration, environments, or installation source into Dropbox; a Dropbox
+work or output destination is prohibited by design. A stable-source observer
+inventories the entire filtered source tree twice, stages and re-hashes its
+copy outside Dropbox, and asks for explicit change-plan confirmation. The
+backend then snapshots it into a private bare Git repository and atomically
+updates `project/manuscript/` from that exact commit.
 
 Filesystem notifications are only wake-up signals; they are not evidence that
 a multi-file save has finished. The confirmed source inventory is the strict

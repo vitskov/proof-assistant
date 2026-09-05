@@ -7,6 +7,10 @@ Proof Assistant creates and versions:
 $PROJECT/VERIFY.yaml
 ```
 
+`$PROJECT` and this generated task file must remain outside Dropbox. Dropbox
+may be used only for a read-only external manuscript source; a Dropbox work or
+output destination is prohibited by design.
+
 Choose **Use default task** or edit the seeded request with **Customize task**
 in the TUI. The workflow service validates and serializes the result; ordinary
 users do not need to write YAML.

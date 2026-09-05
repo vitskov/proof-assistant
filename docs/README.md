@@ -2,6 +2,15 @@
 
 This index separates ordinary use from implementation and maintenance details.
 
+Dropbox may be used only as a read-only manuscript source. Proof Assistant
+never writes work directories, managed projects, generated or copied state,
+caches, Lake artifacts, worktrees, reports, logs, snapshots, temporary files,
+exports, configuration, environments, or installation source into Dropbox; a
+Dropbox work or output destination is prohibited by design.
+
+The historical incident and its root cause are documented in
+[DROPBOX_POSTMORTEM.md](DROPBOX_POSTMORTEM.md).
+
 ## Start here
 
 1. [Installation](INSTALLATION.md) — prerequisites, local installation,

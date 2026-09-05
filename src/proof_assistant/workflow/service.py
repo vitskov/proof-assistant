@@ -225,7 +225,7 @@ class VerificationJobNotFoundError(RuntimeError):
     pass
 
 
-class ProjectDestinationError(RuntimeError):
+class ProjectDestinationError(ManagedProjectPathError):
     """Creation/resumption conflict carrying the same typed catalog facts."""
 
     def __init__(self, inspection: ProjectDestinationInspection) -> None:
@@ -1617,7 +1617,19 @@ class ProofAssistantWorkflow:
     def inspect_project_destination(
         self, name: str, project_path: Path | None = None
     ) -> ProjectDestinationInspection:
-        resolved = self.projects.resolve_destination(name, project_path)
+        requested = (
+            project_path
+            if project_path is not None
+            else self.projects.resolve_destination(name)
+        )
+        try:
+            resolved = self.projects.resolve_destination(name, requested)
+        except ManagedProjectPathError as exc:
+            return ProjectDestinationInspection(
+                Path(requested).expanduser().resolve(strict=False),
+                ProjectAvailability.PROHIBITED,
+                str(exc),
+            )
         return self._destination_inspection(self.projects.inspect(resolved))
 
     def inspect_project_deletion(self, project: Path) -> ProjectDeletionInspection:
@@ -1667,6 +1679,8 @@ class ProofAssistantWorkflow:
             request.name, request.project_path
         )
         if not inspection.can_create:
+            if inspection.availability == ProjectAvailability.PROHIBITED:
+                raise ProjectDestinationError(inspection)
             record = self.projects.inspect(inspection.project_path)
             self.projects.remember_occupied(record)
             raise ProjectDestinationError(inspection)

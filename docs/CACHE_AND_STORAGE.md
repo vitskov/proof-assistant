@@ -14,6 +14,13 @@ Proof Assistant rename. Reusing it avoids a second multi-gigabyte Mathlib
 depot. It must resolve inside the
 user home, on a local filesystem, and outside every detected Dropbox root.
 
+Dropbox is read-only input storage: an external manuscript source may be read
+there, but Proof Assistant never writes work directories, managed projects,
+generated or copied state, caches, Lake artifacts, worktrees, reports, logs,
+snapshots, temporary files, exports, configuration, environments, or
+installation source into Dropbox. A requested Dropbox work or output
+destination is prohibited by design.
+
 The limits are conservative admission controls, not an operating-system quota.
 External processes and unexpectedly oversized build outputs remain outside the
 package's control.
@@ -78,6 +85,8 @@ Persistent verification projects live at the caller's `--project` path and are
 not cache entries. Their Lean source, Git history, source-snapshot repository,
 SQLite state, reports, and certificates are never removed by cache GC. Only
 their reproducible `.lake` root build is managed through the cache symlink.
+Both the persistent project and every managed cache target must be outside
+Dropbox.
 
 ## Admission and reservations
 

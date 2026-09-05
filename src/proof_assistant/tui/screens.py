@@ -101,9 +101,9 @@ def _dropbox_warning(project: ProjectSummary | ChangeImpactPlan) -> str:
     if not project.source_in_dropbox:
         return ""
     return (
-        "Dropbox source detected. This is supported: Proof Assistant works from a "
-        "stable managed copy. Finish all related edits before confirming a new "
-        "iteration."
+        "Dropbox source detected. This is supported only as read-only input: Proof "
+        "Assistant writes exclusively to a stable managed copy outside Dropbox. "
+        "Finish all related edits before confirming a new iteration."
     )
 
 
@@ -1061,8 +1061,9 @@ class NewProjectScreen(NoticeScreen):
                     )
                     yield Button("Browse folders", id="browse-source")
                 yield CopyableText(
-                    "The source may be in Dropbox. Files are copied into a managed, "
-                    "Git-versioned project before verification.",
+                    "The source may be in Dropbox as read-only input. Proof Assistant "
+                    "never writes there; files are copied into a managed, "
+                    "Git-versioned project outside Dropbox before verification.",
                     classes="muted",
                 )
                 yield Label("Managed project folder (optional)")
@@ -1077,8 +1078,10 @@ class NewProjectScreen(NoticeScreen):
                     id="project-path",
                 )
                 yield CopyableText(
-                    "Managed projects, Python environments, and Lean caches must "
-                    "not be in Dropbox.",
+                    "A work/output folder in Dropbox is prohibited by design. All "
+                    "managed projects, generated state, temporary files, reports, "
+                    "logs, exports, environments, and Lean/Lake caches must stay "
+                    "outside Dropbox.",
                     classes="warning",
                 )
                 yield CopyableText("Verification task", classes="section")
@@ -1312,8 +1315,10 @@ class ProjectReviewScreen(NoticeScreen):
             with PageWorkspace():
                 if self.inspection.source_in_dropbox:
                     yield CopyableText(
-                        "Dropbox source detected. This is supported: files will be "
-                        "copied into managed project storage before verification.",
+                        "Dropbox source detected. This is supported only as read-only "
+                        "input: files will be copied into managed project storage "
+                        "outside Dropbox before verification, and Proof Assistant "
+                        "will not write to the source tree.",
                         classes="warning",
                         id="dropbox-warning",
                     )
@@ -1483,6 +1488,14 @@ class ProjectDestinationConflictScreen(NoticeScreen):
                     "Managed project destination is unavailable", classes="title"
                 )
             with PageWorkspace():
+                if self.inspection.availability == ProjectAvailability.PROHIBITED:
+                    yield CopyableText(
+                        "Dropbox work and output destinations are prohibited by design. "
+                        "Choose a local folder outside Dropbox; Dropbox manuscripts "
+                        "remain supported as read-only sources.",
+                        classes="warning",
+                        id="dropbox-destination-policy",
+                    )
                 yield CopyableText(
                     f"Resolved project path: {self.inspection.project_path}\n"
                     f"Classification: {self.inspection.availability.value}\n"

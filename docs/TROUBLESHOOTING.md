@@ -114,14 +114,19 @@ proof-assistant manuscript questions --project "$PROJECT" --json
 
 ## Dropbox source warning
 
-An external source in Dropbox is allowed. The warning explains that an editor
-and Dropbox may expose intermediate saves. Proof Assistant waits for matching
-complete inventories, verifies a staged copy, and confirms the plan again before
-import. If files keep changing, choose **Keep waiting for more edits** rather
-than forcing a partial iteration.
+An external source in Dropbox is allowed only as read-only input. The warning
+explains that an editor and Dropbox may expose intermediate saves. Proof
+Assistant waits for matching complete inventories, verifies a staged copy
+outside Dropbox, and confirms the plan again before import. If files keep
+changing, choose **Keep waiting for more edits** rather than forcing a partial
+iteration.
 
-A managed project, Python environment, or cache in Dropbox is an error. Move or
-recreate it under the defaults in [Installation](INSTALLATION.md).
+Proof Assistant never writes work directories, managed projects, generated or
+copied state, caches, Lake artifacts, worktrees, reports, logs, snapshots,
+temporary files, exports, configuration, environments, or installation source
+into Dropbox. A requested Dropbox work or output destination is prohibited by
+design. Move or recreate it under the local defaults in
+[Installation](INSTALLATION.md).
 
 ## Provider or Lean failure
 

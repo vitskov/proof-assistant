@@ -178,6 +178,12 @@ proof-assistant cache attach --project LEAN_PROJECT
 The default path intentionally remains `$HOME/.cache/repoprover-codex` after
 the product rename, so the existing shared Mathlib depot is reused.
 
+Dropbox is accepted only for a read-only external manuscript source. Every
+command that creates work, project state, generated or copied files, caches,
+Lake artifacts, worktrees, reports, logs, snapshots, temporary files, exports,
+configuration, environments, or installation source requires a destination
+outside Dropbox. A Dropbox work or output destination is prohibited by design.
+
 ## Direct RepoProver operation
 
 ```bash

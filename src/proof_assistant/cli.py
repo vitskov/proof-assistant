@@ -1238,21 +1238,27 @@ def cmd_manuscript_graph(args: argparse.Namespace) -> int:
     from .incremental.graph import graph_to_dot, manuscript_graph_export
     from .incremental.io import atomic_write_json, atomic_write_text
     from .incremental.session import IncrementalSession
+    from .workspace.paths import validate_proof_assistant_write_path
 
-    session = IncrementalSession(Path(args.project))
     try:
+        session = IncrementalSession(Path(args.project))
+        output = (
+            validate_proof_assistant_write_path(args.output, purpose="Graph export")
+            if args.output
+            else None
+        )
         session._load_config()
         objects, edges = _incremental_objects_and_edges(session)
         if args.format == "dot":
             rendered = graph_to_dot(objects, edges)
-            if args.output:
-                atomic_write_text(Path(args.output).expanduser().resolve(), rendered)
+            if output:
+                atomic_write_text(output, rendered)
             else:
                 print(rendered, end="")
         else:
             payload = manuscript_graph_export(objects, edges)
-            if args.output:
-                atomic_write_json(Path(args.output).expanduser().resolve(), payload)
+            if output:
+                atomic_write_json(output, payload)
             else:
                 print(json.dumps(payload, indent=2, sort_keys=True))
     except Exception as exc:

@@ -121,6 +121,7 @@ class ProjectAvailability(StrEnum):
     NEEDS_MAIN_FILE = "NEEDS_MAIN_FILE"
     INCOMPLETE = "INCOMPLETE"
     OCCUPIED = "OCCUPIED"
+    PROHIBITED = "PROHIBITED"
 
 
 class ProjectDeletionAvailability(StrEnum):

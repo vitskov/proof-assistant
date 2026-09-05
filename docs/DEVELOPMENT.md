@@ -3,8 +3,12 @@
 ## Non-negotiable local rules
 
 - Use Python 3.13 and `uv` whenever feasible.
-- Keep Python environments and Lean/Lake/Mathlib caches outside Dropbox.
-- Keep managed Proof Assistant projects outside Dropbox.
+- Treat Dropbox as read-only input storage. A manuscript source may be read
+  there, but Proof Assistant must never write work directories, managed
+  projects, generated or copied state, caches, Lake artifacts, worktrees,
+  reports, logs, snapshots, temporary files, exports, configuration,
+  environments, or installation source into Dropbox. Requested Dropbox work or
+  output destinations are prohibited by design.
 - Every installer must compile and execute a native test program.
 - Shell configuration changes must be append-only and idempotent. For Bash,
   update its existing effective login file and `.bashrc`; never create a
@@ -23,8 +27,9 @@
 - Never push to, open a pull request against, or create an issue in
   `facebookresearch/repoprover`.
 
-The external manuscript source may be in Dropbox; it is imported through the
-stable-source contract. Do not weaken this distinction into a blanket source
+The external manuscript source may be in Dropbox only as read-only input; it is
+read through the stable-source contract and all staged or persisted state stays
+outside Dropbox. Do not weaken this distinction into a blanket source
 rejection.
 
 ## Fast test cycle
@@ -169,8 +174,8 @@ Test the Textual app with its pilot/headless driver. Cover:
 3. backend-only legacy main-file recovery and destination preflight;
 4. new-project and resume selection;
 5. default and customized project-owned task;
-6. external Dropbox-source warning without rejecting the source;
-7. rejection of Dropbox managed project destinations;
+6. external read-only Dropbox-source warning without rejecting the source;
+7. rejection of every Dropbox work/output destination as prohibited by design;
 8. a progress view that lists the main/input closure, shows every typed stage,
    and exposes selectable/copyable read-only text;
 9. clarification rendering with the actual multi-file source path, highlighted
@@ -205,7 +210,9 @@ the selected closure. Do not make wall-clock sleeps the correctness mechanism.
 ## Incremental verification acceptance
 
 Use the golden manuscript under `tests/fixtures/incremental_manuscript` and a
-fresh project outside Dropbox. Acceptance requires:
+fresh project outside Dropbox. No acceptance artifact, temporary file, report,
+log, snapshot, export, worktree, cache, or environment may be placed in
+Dropbox. Acceptance requires:
 
 1. the initial stable import indexes expected claims and edges;
 2. dependencies are proved before descendants;
@@ -254,9 +261,10 @@ uv build --python "$HOME/.venvs/proof-assistant/bin/python"
 ```
 
 Run `./install.sh`; install the wheel in a fresh external Python 3.13
-environment; run compiler, package-resource, CLI/TUI smoke, cache doctor, and a
-small real Lean acceptance. Audit secrets, credentials, environments, caches,
-artifacts, and temporary files before any authorized publication.
+environment outside Dropbox; run compiler, package-resource, CLI/TUI smoke,
+cache doctor, and a small real Lean acceptance. Audit secrets, credentials,
+environments, caches, artifacts, and temporary files before any authorized
+publication, and verify that none were written into Dropbox.
 
 Clarification-screen tests must verify that the exact segment is rendered
 inline as read-only, line-numbered, syntax-highlighted LaTeX at every supported
