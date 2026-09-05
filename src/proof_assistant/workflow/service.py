@@ -5,7 +5,6 @@ import hashlib
 import os
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from collections.abc import Mapping
@@ -132,6 +131,7 @@ from ..workspace.management import (
 from ..workspace.paths import (
     ManagedProjectPathError,
     is_in_dropbox,
+    proof_assistant_temporary_directory,
     validate_managed_project_path,
 )
 from ..workspace.source import compare_inventories, stable_source_copy
@@ -1617,20 +1617,9 @@ class ProofAssistantWorkflow:
     def inspect_project_destination(
         self, name: str, project_path: Path | None = None
     ) -> ProjectDestinationInspection:
-        requested = (
-            project_path
-            if project_path is not None
-            else self.projects.resolve_destination(name)
+        return self._destination_inspection(
+            self.projects.inspect_destination(name, project_path)
         )
-        try:
-            resolved = self.projects.resolve_destination(name, requested)
-        except ManagedProjectPathError as exc:
-            return ProjectDestinationInspection(
-                Path(requested).expanduser().resolve(strict=False),
-                ProjectAvailability.PROHIBITED,
-                str(exc),
-            )
-        return self._destination_inspection(self.projects.inspect(resolved))
 
     def inspect_project_deletion(self, project: Path) -> ProjectDeletionInspection:
         return self._deletion_inspection(self.projects.inspect_deletion(project))
@@ -1908,57 +1897,58 @@ class ProofAssistantWorkflow:
             except LatexIndexError as exc:
                 raise ValueError(str(exc)) from exc
             input_files = source_files[1:]
-            with StateStore(session.database_path) as store:
-                snapshot = store.previous_snapshot()
-                previous_rows = (
-                    {
-                        str(row["claim_id"]): row
-                        for row in store.claim_versions(snapshot)
-                    }
-                    if snapshot
-                    else {}
-                )
-                prior_files = {
-                    str(row["path"]): SourceInventoryEntry(
-                        str(row["path"]),
-                        str(row["sha256"]),
-                        int(row["size"]),
-                    )
-                    for row in (store.source_file_rows(snapshot) if snapshot else [])
-                }
-                old_edges = tuple(
-                    ManuscriptEdge(
-                        str(row["src"]),
-                        str(row["dst"]),
-                        str(row["edge_kind"]),
-                        str(row["provenance"]),
-                        bool(row["approved"]),
-                    )
-                    for row in store.manuscript_edges()
-                )
-                old_task_payload = json_object(
-                    load_json(store.get_metadata("task_spec") or "{}"),
-                    path="persisted task",
-                )
-                old_task_sha = store.get_metadata("task_sha256")
-                main_file_changed = bool(store.get_metadata("pending_main_file_change"))
-                certificates = {
-                    str(row["claim_id"]) for row in store.certificate_rows()
-                }
-                open_questions = [dict(row) for row in store.open_questions()]
-                temporary = Path(tempfile.mkdtemp(prefix="proof-assistant-plan-"))
+            with proof_assistant_temporary_directory(
+                prefix="proof-assistant-plan-"
+            ) as temporary:
                 database_copy = temporary / "state.sqlite3"
-                store.backup_to(database_copy)
-            try:
+                with StateStore(session.database_path) as store:
+                    snapshot = store.previous_snapshot()
+                    previous_rows = (
+                        {
+                            str(row["claim_id"]): row
+                            for row in store.claim_versions(snapshot)
+                        }
+                        if snapshot
+                        else {}
+                    )
+                    prior_files = {
+                        str(row["path"]): SourceInventoryEntry(
+                            str(row["path"]),
+                            str(row["sha256"]),
+                            int(row["size"]),
+                        )
+                        for row in (
+                            store.source_file_rows(snapshot) if snapshot else []
+                        )
+                    }
+                    old_edges = tuple(
+                        ManuscriptEdge(
+                            str(row["src"]),
+                            str(row["dst"]),
+                            str(row["edge_kind"]),
+                            str(row["provenance"]),
+                            bool(row["approved"]),
+                        )
+                        for row in store.manuscript_edges()
+                    )
+                    old_task_payload = json_object(
+                        load_json(store.get_metadata("task_spec") or "{}"),
+                        path="persisted task",
+                    )
+                    old_task_sha = store.get_metadata("task_sha256")
+                    main_file_changed = bool(
+                        store.get_metadata("pending_main_file_change")
+                    )
+                    certificates = {
+                        str(row["claim_id"]) for row in store.certificate_rows()
+                    }
+                    open_questions = [dict(row) for row in store.open_questions()]
+                    store.backup_to(database_copy)
                 with StateStore(database_copy) as candidate_store:
                     objects = index_manuscript(
                         candidate_source, candidate_store, main_file=main_file
                     )
                 explicit_edges, _unresolved = explicit_reference_graph(objects)
-            finally:
-                import shutil
-
-                shutil.rmtree(temporary, ignore_errors=True)
 
         current_ids = {item.claim_id for item in objects}
         persistent_edges = tuple(

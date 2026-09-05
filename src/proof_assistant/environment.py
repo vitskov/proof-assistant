@@ -4,7 +4,6 @@ import os
 import shutil
 import subprocess
 import sys
-import tempfile
 from collections.abc import MutableMapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -67,9 +66,12 @@ def _compiler_smoke(
     lean_include: Path | None = None,
 ) -> str | None:
     """Compile and execute a representative C program."""
+    from .workspace.paths import proof_assistant_temporary_directory
+
     try:
-        with tempfile.TemporaryDirectory(prefix="proof-assistant-cc-") as raw_tmp:
-            tmp = Path(raw_tmp)
+        with proof_assistant_temporary_directory(
+            prefix="proof-assistant-cc-"
+        ) as tmp:
             source = tmp / "check.c"
             binary = tmp / ("check.o" if compile_only else "check")
             includes = "#include <stddef.h>\n" if standard_header else ""

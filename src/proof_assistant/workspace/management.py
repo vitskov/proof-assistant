@@ -60,6 +60,7 @@ class ManagedProjectKind(StrEnum):
     NEEDS_MAIN_FILE = "NEEDS_MAIN_FILE"
     INCOMPLETE = "INCOMPLETE"
     OCCUPIED = "OCCUPIED"
+    PROHIBITED = "PROHIBITED"
 
 
 class ManagedDeletionKind(StrEnum):
@@ -580,6 +581,24 @@ class ProjectManager:
             project_path if project_path is not None else default_project_path(name)
         )
 
+    def inspect_destination(
+        self, name: str, project_path: Path | None = None
+    ) -> ManagedProjectRecord:
+        """Classify an explicit or backend-selected destination without escaping."""
+
+        requested = Path(
+            project_path if project_path is not None else default_project_path(name)
+        ).expanduser().resolve(strict=False)
+        try:
+            return self.inspect(requested)
+        except ManagedProjectPathError as exc:
+            return ManagedProjectRecord(
+                requested,
+                ManagedProjectKind.PROHIBITED,
+                requested.name or name,
+                str(exc),
+            )
+
     def inspect(self, project_path: Path) -> ManagedProjectRecord:
         """Classify a path without modifying its contents."""
 
@@ -727,7 +746,15 @@ class ProjectManager:
     def entries(self) -> tuple[ManagedProjectRecord, ...]:
         records: list[ManagedProjectRecord] = []
         for path in self.catalog.candidate_paths():
-            record = self.inspect(path)
+            try:
+                record = self.inspect(path)
+            except ManagedProjectPathError as exc:
+                record = ManagedProjectRecord(
+                    path,
+                    ManagedProjectKind.PROHIBITED,
+                    path.name,
+                    str(exc),
+                )
             if record.kind == ManagedProjectKind.MIGRATION_READY:
                 try:
                     load_or_migrate_project_config(path)

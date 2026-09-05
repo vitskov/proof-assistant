@@ -8,9 +8,17 @@ from typing import TypedDict
 
 from ..incremental.io import atomic_write_json
 from ..json_types import JSONValue, load_json
-from .paths import default_projects_root
+from .paths import (
+    ProofAssistantWritePathError,
+    default_projects_root,
+    validate_proof_assistant_write_path,
+)
 
 CATALOG_SCHEMA_VERSION = 1
+
+
+class CatalogLocationError(ValueError):
+    """Raised when the machine-local catalog is placed in Dropbox."""
 
 
 class _CatalogPayload(TypedDict):
@@ -41,7 +49,7 @@ class ProjectCatalog:
 
     def __init__(self, path: Path | None = None) -> None:
         self.discover_default_root = path is None
-        self.path = (
+        candidate = (
             (
                 path
                 or Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
@@ -51,6 +59,12 @@ class ProjectCatalog:
             .expanduser()
             .resolve(strict=False)
         )
+        try:
+            self.path = validate_proof_assistant_write_path(
+                candidate, purpose="The Proof Assistant project catalog"
+            )
+        except ProofAssistantWritePathError as exc:
+            raise CatalogLocationError(str(exc)) from exc
 
     @staticmethod
     def _record_from_project(project: Path) -> CatalogProject | None:

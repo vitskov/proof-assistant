@@ -7,7 +7,12 @@ import os
 import tempfile
 from pathlib import Path
 
-from proof_assistant.workspace.paths import default_projects_root, is_in_dropbox
+from proof_assistant.workspace.paths import (
+    ProofAssistantWritePathError,
+    default_projects_root,
+    is_in_dropbox,
+    validate_proof_assistant_write_path,
+)
 
 PREFERENCES_SCHEMA_VERSION = 1
 
@@ -53,10 +58,12 @@ class LocalPreferenceStore:
             .resolve(strict=False)
         )
         projects = default_projects_root()
-        if is_in_dropbox(self.path):
-            raise LocalPreferenceLocationError(
-                "Proof Assistant preferences cannot reside in Dropbox"
+        try:
+            validate_proof_assistant_write_path(
+                self.path, purpose="Proof Assistant preferences"
             )
+        except ProofAssistantWritePathError as exc:
+            raise LocalPreferenceLocationError(str(exc)) from exc
         if self.path == projects or self.path.is_relative_to(projects):
             raise LocalPreferenceLocationError(
                 "Proof Assistant preferences cannot reside inside managed projects"

@@ -1,6 +1,6 @@
 """Project discovery and external manuscript workspace management."""
 
-from .catalog import ProjectCatalog
+from .catalog import CatalogLocationError, ProjectCatalog
 from .paths import (
     ProofAssistantWritePathError,
     default_project_path,
@@ -16,6 +16,7 @@ from .source import InventoryDelta, stable_source_copy
 
 __all__ = [
     "InventoryDelta",
+    "CatalogLocationError",
     "ProjectCatalog",
     "ProofAssistantWritePathError",
     "default_project_path",

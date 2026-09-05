@@ -73,6 +73,39 @@ def test_destination_resolution_keeps_default_path_ownership_in_backend(
     assert inspection.can_create is True
 
 
+def test_prohibited_backend_default_is_returned_as_typed_inspection(
+    tmp_path, monkeypatch
+):
+    expected = tmp_path / "Dropbox (Personal)" / "managed"
+    monkeypatch.setattr(
+        "proof_assistant.workspace.management.default_project_path",
+        lambda name: expected,
+    )
+
+    inspection = workflow(tmp_path).inspect_project_destination("Human Name")
+
+    assert inspection.project_path == expected
+    assert inspection.availability == ProjectAvailability.PROHIBITED
+    assert inspection.can_create is False
+    assert "cannot reside in Dropbox" in (inspection.issue or "")
+
+
+def test_legacy_dropbox_catalog_entry_is_visible_as_prohibited(tmp_path):
+    project = tmp_path / "Dropbox (Personal)" / "legacy-managed"
+    project.mkdir(parents=True)
+    sentinel = project / "legacy-state.txt"
+    sentinel.write_text("preserve", encoding="utf-8")
+    service = workflow(tmp_path)
+    service.catalog.remember_path(project)
+
+    entry = entry_for(service, project)
+
+    assert entry.availability == ProjectAvailability.PROHIBITED
+    assert entry.resumable is False
+    assert "cannot reside in Dropbox" in (entry.issue or "")
+    assert sentinel.read_text(encoding="utf-8") == "preserve"
+
+
 def test_occupied_destination_is_remembered_surfaced_and_never_deleted(tmp_path):
     source = manuscript(tmp_path)
     project = tmp_path / "occupied"

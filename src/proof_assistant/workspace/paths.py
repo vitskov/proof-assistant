@@ -57,13 +57,27 @@ def _registered_dropbox_roots(home: Path, *, strict: bool) -> tuple[Path, ...]:
                         "select a Proof Assistant write location"
                     )
             else:
+                invalid_account = not payload
                 for account in payload.values():
-                    if isinstance(account, dict) and isinstance(
-                        account.get("path"), str
+                    registered_path = (
+                        account.get("path") if isinstance(account, dict) else None
+                    )
+                    if (
+                        not isinstance(registered_path, str)
+                        or not registered_path.strip()
                     ):
-                        roots.append(
-                            Path(account["path"]).expanduser().resolve(strict=False)
-                        )
+                        invalid_account = True
+                        continue
+                    candidate = Path(registered_path).expanduser()
+                    if not candidate.is_absolute():
+                        invalid_account = True
+                        continue
+                    roots.append(candidate.resolve(strict=False))
+                if invalid_account and strict:
+                    raise ProofAssistantWritePathError(
+                        "Dropbox root metadata contains an invalid account; refusing "
+                        "to select a Proof Assistant write location"
+                    )
 
     candidates = (home, home / "Library" / "CloudStorage")
     for parent in candidates:

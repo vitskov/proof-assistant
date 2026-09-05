@@ -258,13 +258,20 @@ class MachineProviderConfigStore:
     """Store machine-wide provider preferences with optimistic revision checks."""
 
     def __init__(self, path: Path | None = None) -> None:
-        self.path = (
+        from ..workspace.paths import (
+            ProofAssistantWritePathError,
+            validate_proof_assistant_write_path,
+        )
+
+        candidate = (
             (path or default_provider_config_path()).expanduser().resolve(strict=False)
         )
-        if any(part.casefold().startswith("dropbox") for part in self.path.parts):
-            raise ProviderConfigError(
-                "Machine provider settings cannot reside in Dropbox"
+        try:
+            self.path = validate_proof_assistant_write_path(
+                candidate, purpose="Machine provider settings"
             )
+        except ProofAssistantWritePathError as exc:
+            raise ProviderConfigError(str(exc)) from exc
         self.lock_path = self.path.with_suffix(self.path.suffix + ".lock")
 
     def _load_unlocked(self) -> MachineProviderSettings:

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import shutil
-import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -76,16 +74,14 @@ def stable_source_copy(
     source: Path, *, expected_inventory_sha256: str | None = None
 ) -> Iterator[tuple[Path, SourceInventory]]:
     """Yield a verified staged source tree and always remove it afterward."""
-    parent = Path(tempfile.mkdtemp(prefix="proof-assistant-source-"))
-    staged: Path | None = None
-    try:
+    from .paths import proof_assistant_temporary_directory
+
+    with proof_assistant_temporary_directory(
+        prefix="proof-assistant-source-"
+    ) as parent:
         staged, inventory = stage_stable_source(
             source,
             parent,
             expected_inventory_sha256=expected_inventory_sha256,
         )
         yield staged, inventory
-    finally:
-        if staged is not None:
-            shutil.rmtree(staged, ignore_errors=True)
-        shutil.rmtree(parent, ignore_errors=True)

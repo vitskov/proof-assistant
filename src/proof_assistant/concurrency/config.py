@@ -346,13 +346,20 @@ class MachineConfigStore:
     """Atomic revisioned store for settings shared by all local projects."""
 
     def __init__(self, path: Path | None = None) -> None:
-        self.path = (
+        from ..workspace.paths import (
+            ProofAssistantWritePathError,
+            validate_proof_assistant_write_path,
+        )
+
+        candidate = (
             (path or default_machine_config_path()).expanduser().resolve(strict=False)
         )
-        if any(part.casefold().startswith("dropbox") for part in self.path.parts):
-            raise MachineConfigLocationError(
-                "Machine concurrency settings cannot reside in Dropbox"
+        try:
+            self.path = validate_proof_assistant_write_path(
+                candidate, purpose="Machine concurrency settings"
             )
+        except ProofAssistantWritePathError as exc:
+            raise MachineConfigLocationError(str(exc)) from exc
         self.lock_path = self.path.with_suffix(self.path.suffix + ".lock")
 
     def _load_unlocked(self) -> MachineConcurrencySettings:

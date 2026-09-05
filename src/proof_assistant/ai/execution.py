@@ -15,7 +15,6 @@ import re
 import secrets
 import socket
 import sys
-import tempfile
 import threading
 import time
 import unicodedata
@@ -545,11 +544,14 @@ class AIBackend:
         tools: Sequence[JSONObject],
         host: AdmittedToolHost,
     ) -> AITurnResult:
+        from ..workspace.paths import proof_assistant_temporary_directory
+
         executable = self.config.executable or (
             "claude" if driver is DriverId.CLAUDE_CLI else "copilot"
         )
-        with tempfile.TemporaryDirectory(prefix="proof-assistant-ai-") as temporary:
-            root = Path(temporary)
+        with proof_assistant_temporary_directory(
+            prefix="proof-assistant-ai-"
+        ) as root:
             tools_path = root / "tools.json"
             system_path = root / "system.txt"
             user_path = root / "task.txt"
