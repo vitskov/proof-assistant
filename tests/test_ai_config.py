@@ -1,6 +1,7 @@
 import json
 import stat
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -37,6 +38,21 @@ def test_default_provider_config_path_is_machine_scoped(tmp_path):
 def test_machine_store_rejects_dropbox(tmp_path):
     with pytest.raises(ProviderConfigError, match="Dropbox"):
         MachineProviderConfigStore(tmp_path / "Dropbox" / "providers.json")
+
+
+def test_machine_store_rejects_custom_registered_dropbox_root(
+    tmp_path, monkeypatch
+):
+    home = tmp_path / "home"
+    registered = tmp_path / "company-sync"
+    (home / ".dropbox").mkdir(parents=True)
+    (home / ".dropbox" / "info.json").write_text(
+        json.dumps({"business": {"path": str(registered)}}), encoding="utf-8"
+    )
+    monkeypatch.setattr(Path, "home", classmethod(lambda _cls: home))
+
+    with pytest.raises(ProviderConfigError, match="Dropbox"):
+        MachineProviderConfigStore(registered / "proof-assistant" / "providers.json")
 
 
 def test_config_round_trip_is_atomic_private_and_revisioned(tmp_path):

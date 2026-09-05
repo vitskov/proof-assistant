@@ -68,11 +68,16 @@ def _registered_dropbox_roots(home: Path, *, strict: bool) -> tuple[Path, ...]:
                     ):
                         invalid_account = True
                         continue
-                    candidate = Path(registered_path).expanduser()
-                    if not candidate.is_absolute():
+                    try:
+                        candidate = Path(registered_path).expanduser()
+                        if not candidate.is_absolute():
+                            invalid_account = True
+                            continue
+                        resolved_candidate = candidate.resolve(strict=False)
+                    except (OSError, RuntimeError, ValueError):
                         invalid_account = True
                         continue
-                    roots.append(candidate.resolve(strict=False))
+                    roots.append(resolved_candidate)
                 if invalid_account and strict:
                     raise ProofAssistantWritePathError(
                         "Dropbox root metadata contains an invalid account; refusing "

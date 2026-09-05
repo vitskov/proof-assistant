@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import stat
+from pathlib import Path
 
 import pytest
 
@@ -54,6 +55,21 @@ def test_machine_path_uses_xdg_and_refuses_dropbox(tmp_path):
     assert path == tmp_path / "config" / "proof-assistant" / "settings.yaml"
     with pytest.raises(MachineConfigLocationError, match="Dropbox"):
         MachineConfigStore(tmp_path / "Dropbox" / "settings.yaml")
+
+
+def test_machine_store_rejects_custom_registered_dropbox_root(
+    tmp_path, monkeypatch
+):
+    home = tmp_path / "home"
+    registered = tmp_path / "company-sync"
+    (home / ".dropbox").mkdir(parents=True)
+    (home / ".dropbox" / "info.json").write_text(
+        json.dumps({"business": {"path": str(registered)}}), encoding="utf-8"
+    )
+    monkeypatch.setattr(Path, "home", classmethod(lambda _cls: home))
+
+    with pytest.raises(MachineConfigLocationError, match="Dropbox"):
+        MachineConfigStore(registered / "proof-assistant" / "settings.yaml")
 
 
 def test_machine_yaml_round_trip_is_revisioned_atomic_and_private(tmp_path):

@@ -163,3 +163,18 @@ def test_preference_store_refuses_dropbox_and_managed_project_locations(
         )
     with pytest.raises(LocalPreferenceLocationError, match="managed projects"):
         LocalPreferenceStore(home / "proof-assistant" / "paper" / ".preferences.json")
+
+
+def test_preference_store_refuses_custom_registered_dropbox_root(
+    tmp_path, monkeypatch
+):
+    home = tmp_path / "home"
+    registered = tmp_path / "company-sync"
+    (home / ".dropbox").mkdir(parents=True)
+    (home / ".dropbox" / "info.json").write_text(
+        json.dumps({"business": {"path": str(registered)}}), encoding="utf-8"
+    )
+    monkeypatch.setattr(Path, "home", classmethod(lambda _cls: home))
+
+    with pytest.raises(LocalPreferenceLocationError, match="Dropbox"):
+        LocalPreferenceStore(registered / "proof-assistant" / "preferences.json")
